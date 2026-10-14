@@ -55,3 +55,8 @@ pub fn category(name: &str) -> Option<&'static [Palette]> {
 pub fn palette(name: &str, index: usize) -> Option<&'static Palette> {
     category(name)?.get(index)
 }
+
+/// How many palettes the largest category has.
+pub fn largest_category_len() -> usize {
+    library().values().map(Vec::len).max().unwrap_or(0)
+}

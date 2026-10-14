@@ -3,6 +3,7 @@
 //! it does, floats at single precision, enums by member name, colours as
 //! scRGB), and parameters described for the model.
 
+use indexmap::IndexMap;
 use nerthus_engine::json::f32_value;
 use nerthus_engine::{ModifierSpec, NodeSpec, ParameterSpec, ValueType};
 use serde_json::{json, Map, Value};
@@ -82,6 +83,13 @@ pub(crate) fn convert(parameter: &ParameterSpec, given: &Value, current: Option<
             let seed = number.round().clamp(0.0, i32::MAX as f64) as i64;
             Ok(Converted::exact(json!(seed)))
         }
+        ValueType::Int if is_palette_list(parameter) => {
+            let number = number_of(given).ok_or_else(|| format!("{name} takes a whole number."))?;
+            let (min, max) = palette_range();
+            let whole = number.clamp(min, max).round_ties_even();
+            let note = (whole != number).then(|| format!("{name} was set to {whole} (palette numbers from 0 to {max}, or -1 for none chosen)."));
+            Ok(Converted { value: json!(whole as i64), note })
+        }
         ValueType::Int => {
             let number = number_of(given).ok_or_else(|| format!("{name} takes a whole number."))?;
             let slider = SliderSpec::of(parameter, None, true);
@@ -109,6 +117,58 @@ pub(crate) fn convert(parameter: &ParameterSpec, given: &Value, current: Option<
         ValueType::Float2List => curve_value(name, given),
         ValueType::Float4List => gradient_value(name, given),
         _ => Err(format!("{name} cannot be set here.")),
+    }
+}
+
+/// Whether the parameter is a palette's number, chosen from the node's
+/// library (`SatelliteMapListBox`) rather than with a slider.
+pub(crate) fn is_palette_list(parameter: &ParameterSpec) -> bool {
+    parameter.editor.as_deref() == Some("SatelliteMapListBox")
+}
+
+/// The numbers a palette list holds whatever the library: -1 (none chosen
+/// yet) to the last palette of the largest library.
+fn palette_range() -> (f64, f64) {
+    let last = nerthus_nodes::colour_library::largest_category_len().saturating_sub(1);
+    (-1.0, last as f64)
+}
+
+/// The library a node of `spec` takes its palettes from: `Library` among
+/// `values` (set together with the palette), else the node's own, else
+/// the type's default.
+pub(crate) fn palette_library(spec: &NodeSpec, values: &[(String, Value)], current: Option<&IndexMap<String, Value>>) -> Option<String> {
+    let parameter = spec.parameter("Library")?;
+    let named = |value: &Value| match value {
+        Value::String(name) => Some(name.clone()),
+        Value::Number(_) => parameter.enum_name(value.as_i64()?).map(str::to_string),
+        _ => None,
+    };
+    let given = values.iter().find(|(name, _)| name == "Library").and_then(|(_, value)| named(value));
+    let own = current.and_then(|current| current.get("Library")).and_then(named);
+    given.or(own).or_else(|| spec.defaults.get("Library").and_then(named))
+}
+
+/// The last palette number `library` holds.
+pub(crate) fn last_palette(library: &str) -> Option<i64> {
+    let count = nerthus_nodes::colour_library::category(library)?.len();
+    Some(count as i64 - 1)
+}
+
+/// Keeps the palette numbers among `values` to the node's library (as the
+/// node itself does when it builds), with a note for each one lowered.
+pub(crate) fn fit_palettes(spec: &NodeSpec, values: &mut [(String, Value)], current: Option<&IndexMap<String, Value>>, notes: &mut Vec<String>) {
+    let Some(library) = palette_library(spec, values, current) else {
+        return;
+    };
+    let Some(last) = last_palette(&library) else {
+        return;
+    };
+    for (name, value) in values.iter_mut() {
+        let is_palette = spec.parameter(name).is_some_and(is_palette_list);
+        if is_palette && value.as_i64().is_some_and(|number| number > last) {
+            *value = json!(last);
+            notes.push(format!("{name} was set to {last}, the last palette of the {library} library."));
+        }
     }
 }
 
@@ -278,6 +338,11 @@ pub(crate) fn describe(parameter: &ParameterSpec, default: Option<&Value>) -> Ma
             entry.insert("min".to_string(), json!(slider.min));
             entry.insert("max".to_string(), json!(slider.max));
         }
+        ValueType::Int if is_palette_list(parameter) => {
+            let (min, max) = palette_range();
+            entry.insert("min".to_string(), json!(min));
+            entry.insert("max".to_string(), json!(max));
+        }
         ValueType::Int if !parameter.is_seed() => {
             let slider = SliderSpec::of(parameter, None, true);
             entry.insert("min".to_string(), json!(slider.min));
@@ -302,6 +367,9 @@ pub(crate) fn describe(parameter: &ParameterSpec, default: Option<&Value>) -> Ma
     }
     if let Some(description) = &parameter.description {
         entry.insert("description".to_string(), json!(description));
+    } else if is_palette_list(parameter) {
+        let text = "A palette's number in the node's Library, from 0 to its last; -1 until one is chosen (SatelliteMap then picks one at random, SuperColor takes the first).";
+        entry.insert("description".to_string(), json!(text));
     }
     entry
 }
@@ -325,6 +393,36 @@ mod tests {
         let clamped = convert(scale, &json!("7"), None).unwrap();
         assert_eq!(clamped.value, json!(1.0));
         assert!(clamped.note.is_some());
+    }
+
+    #[test]
+    fn palettes_reach_past_a_slider() {
+        // Rock has hundreds of palettes; the list is not a 0 to 100 slider.
+        let item = parameter("SatelliteMap", "LibraryItem");
+        let converted = convert(item, &json!(399), None).unwrap();
+        assert_eq!(converted.value, json!(399));
+        assert!(converted.note.is_none());
+        assert_eq!(convert(item, &json!(-1), None).unwrap().value, json!(-1));
+        assert!(convert(item, &json!(1_000_000), None).unwrap().note.is_some());
+    }
+
+    #[test]
+    fn palettes_keep_to_their_library() {
+        let spec = Catalogue::get().node("SatelliteMap").unwrap();
+        let last_colour = last_palette("Color").unwrap();
+        let mut notes = Vec::new();
+        // Set together with a library that has fewer palettes.
+        let mut values = vec![("Library".to_string(), json!("Color")), ("LibraryItem".to_string(), json!(399))];
+        fit_palettes(spec, &mut values, None, &mut notes);
+        assert_eq!(values[1].1, json!(last_colour));
+        assert_eq!(notes.len(), 1);
+        // The node's own library, Rock, has more.
+        let mut current = IndexMap::new();
+        current.insert("Library".to_string(), json!("Rock"));
+        let mut values = vec![("LibraryItem".to_string(), json!(399))];
+        fit_palettes(spec, &mut values, Some(&current), &mut notes);
+        assert_eq!(values[0].1, json!(399));
+        assert_eq!(notes.len(), 1);
     }
 
     #[test]
