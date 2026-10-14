@@ -1,0 +1,71 @@
+[package]
+name = "nerthus-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nerthus"
+path = "src/main.rs"
+
+[dependencies]
+nerthus-compute.workspace = true
+nerthus-core.workspace = true
+nerthus-engine.workspace = true
+nerthus-export.workspace = true
+nerthus-io.workspace = true
+nerthus-nodes.workspace = true
+nerthus-render.workspace = true
+bevy = { workspace = true, features = ["default"] }
+bevy_egui = { workspace = true, features = ["default"] }
+egui.workspace = true
+egui_extras.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+crossbeam-channel.workspace = true
+half.workspace = true
+image.workspace = true
+indexmap.workspace = true
+pulldown-cmark.workspace = true
+rfd.workspace = true
+log.workspace = true
+raw-window-handle.workspace = true
+resvg.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
+toml.workspace = true
+web-time.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# The web build: files the user picks are read, and files saved are
+# downloaded, through the browser.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["Blob", "BlobPropertyBag", "Document", "Element", "HtmlAnchorElement", "HtmlElement", "Url", "Window"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSEvent", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { workspace = true, features = ["std", "NSData"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+winit.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl.workspace = true
+
+# build.rs embeds the icon in the executable when building on Windows.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource.workspace = true
+resvg.workspace = true
