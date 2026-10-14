@@ -237,10 +237,15 @@ pub fn start(editor: &Editor, ui_state: &mut UiState) {
     }
 }
 
-/// Whether a window that keeps the editor's keys to itself is up (the
-/// modal dialogs).
-pub fn modal_open(ui_state: &UiState) -> bool {
-    ui_state.onboard.is_some() || ui_state.artifact_explorer.is_some() || ui_state.help.any_open() || ui_state.nahimic_warning.is_some()
+/// Whether a window that keeps the editor's keys to itself is up: the
+/// first-run setup, the Artifact Explorer, Help's windows, the Nahimic
+/// warning, or any `egui::Modal` (Build and Export?, Save terrain?, an
+/// input box). egui's modals keep the pointer from what is under them but
+/// not the keys. The shortcuts are read before this frame's windows are
+/// drawn, so the modal shown last frame counts: the one on screen.
+pub fn modal_open(ctx: &egui::Context, ui_state: &UiState) -> bool {
+    let egui_modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
+    egui_modal || ui_state.onboard.is_some() || ui_state.artifact_explorer.is_some() || ui_state.help.any_open() || ui_state.nahimic_warning.is_some()
 }
 
 /// Draws the windows open, and an update check's answer once it is in.

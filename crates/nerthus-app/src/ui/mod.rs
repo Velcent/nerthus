@@ -498,7 +498,7 @@ fn draw_editor(
     pending.append(&mut ui_state.floating_commands);
     let floating = editor.user.options.viewport_floating();
     // Modal dialogs keep the shell's keys from it while they show.
-    if !tool_commands::modal_open(ui_state) {
+    if !tool_commands::modal_open(ctx, ui_state) {
         // Allow node shortcuts only when cursor is inside the graph.
         let node_keys = !editor.user.options.confine_shortcuts() || pointer_over_graph(ctx, &ui_state.graph);
         shortcuts(ctx, node_keys, &mut pending);
@@ -1095,5 +1095,29 @@ mod tests {
         assert_eq!(pressed(search, false), vec![Command::Graph(GraphCommand::NodeSearch)]);
         let copy = vec![key(Key::C, Modifiers::COMMAND)];
         assert!(pressed(copy, false).is_empty());
+    }
+
+    #[test]
+    fn modals_keep_the_keys() {
+        let context = egui::Context::default();
+        let ui_state = UiState::default();
+        // Whether the shortcuts are held back as a frame starts, the frame
+        // showing a modal (Save terrain?) or not.
+        let frame = |modal: bool| {
+            let mut held = false;
+            let output = context.run_ui(egui::RawInput::default(), |ui| {
+                held = tool_commands::modal_open(ui.ctx(), &ui_state);
+                if modal {
+                    egui::Modal::new(egui::Id::new("save-terrain")).show(ui.ctx(), |ui| ui.label("Save terrain?"));
+                }
+            });
+            output.drop_without_applying_deltas();
+            held
+        };
+        assert!(!frame(true));
+        // On screen from the frame it was drawn in until it is not.
+        assert!(frame(true));
+        assert!(frame(false));
+        assert!(!frame(false));
     }
 }
