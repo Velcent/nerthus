@@ -86,6 +86,9 @@ mod tests {
     /// The C library's text for one value in a `printf` format.
     fn printf(format: &std::ffi::CStr, value: f64) -> String {
         use std::ffi::{c_char, c_int, CStr};
+        // The UCRT's `snprintf` is an inline function in `stdio.h`; MSVC
+        // links an out-of-line one from this library.
+        #[cfg_attr(target_env = "msvc", link(name = "legacy_stdio_definitions"))]
         unsafe extern "C" {
             fn snprintf(buffer: *mut c_char, size: usize, format: *const c_char, ...) -> c_int;
         }
