@@ -1,5 +1,5 @@
 <div align="center" id = "top">
-  <img alt="logo" height="400px" src="https://raw.githubusercontent.com/danemadsen/nerthus/refs/heads/main/crates/nerthus-app/assets/nerthus.svg">
+  <img alt="logo" height="200px" src="https://raw.githubusercontent.com/danemadsen/nerthus/refs/heads/main/crates/nerthus-app/assets/nerthus.svg">
 </div>
 
 # Nerthus

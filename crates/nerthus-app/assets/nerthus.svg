@@ -3,8 +3,8 @@
 
 <svg
    version="1.0"
-   width="87.457626"
-   height="87.457626"
+   width="200"
+   height="200"
    id="svg1584"
    sodipodi:docname="nerthus.svg"
    inkscape:version="1.4.4 (dcaf3e7, 2026-05-05)"
@@ -21,35 +21,35 @@
      inkscape:pageopacity="0"
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#505050"
-     inkscape:zoom="3.9333333"
-     inkscape:cx="43.728814"
-     inkscape:cy="43.601695"
-     inkscape:window-width="3440"
-     inkscape:window-height="1382"
+     inkscape:zoom="1.3906433"
+     inkscape:cx="-28.044574"
+     inkscape:cy="85.931452"
+     inkscape:window-width="1920"
+     inkscape:window-height="1022"
      inkscape:window-x="0"
-     inkscape:window-y="1110"
+     inkscape:window-y="30"
      inkscape:window-maximized="1"
      inkscape:current-layer="layer1" />
   <defs
      id="defs1586" />
   <g
      id="layer1"
-     style="display:inline;stroke:#ffffff;stroke-opacity:1;stroke-width:7;stroke-dasharray:none"
+     style="display:inline;stroke:#ffffff;stroke-width:7;stroke-dasharray:none;stroke-opacity:1"
      transform="translate(23.728813,13.728813)">
     <circle
-       style="display:inline;stroke:none;stroke-opacity:1;stroke-width:7;stroke-dasharray:none;font-variation-settings:'wght' 1.28;fill:#ffcc00;stroke-linecap:round;fill-opacity:1"
+       style="font-variation-settings:'wght' 1.28;display:inline;fill:#ffcc00;fill-opacity:1;stroke:none;stroke-width:16.0078;stroke-linecap:round;stroke-dasharray:none;stroke-opacity:1"
        id="path1"
-       cx="20"
-       cy="30"
-       r="43.728813" />
+       cx="76.271187"
+       cy="86.271187"
+       r="100" />
     <path
-       d="M 0.15406041,1.2493686 20,30 39.84594,1.2493686"
-       style="fill:none;fill-opacity:0.75;fill-rule:evenodd;stroke:#000000;stroke-width:7.31152;stroke-linecap:round;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
+       d="M 30.887061,20.523618 76.271187,86.271187 121.65531,20.523618"
+       style="fill:none;fill-opacity:0.75;fill-rule:evenodd;stroke:#000000;stroke-width:16.7201;stroke-linecap:round;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
        id="path5127"
        sodipodi:nodetypes="ccc" />
     <path
-       d="M 20,-1.3356943 V 61.335695"
-       style="fill:none;fill-opacity:0.75;fill-rule:evenodd;stroke:#000000;stroke-width:7.31166;stroke-linecap:round;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
+       d="M 76.271187,14.61204 V 157.93033"
+       style="fill:none;fill-opacity:0.75;fill-rule:evenodd;stroke:#000000;stroke-width:16.7205;stroke-linecap:round;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
        id="path5129" />
   </g>
 </svg>
