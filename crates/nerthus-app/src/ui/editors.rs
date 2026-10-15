@@ -1560,7 +1560,7 @@ fn path_box(ui: &mut Ui, edit_id: Id, typing_id: Id, field: Rect, mut text: Stri
 /// `TruncatePath`: the path when it fits `width`; otherwise its root,
 /// "..." and the longest end of the rest that fits beside them (all of
 /// it when not even nothing fits).
-fn truncate_path(ui: &Ui, path: &str, font: &egui::FontId, width: f32) -> String {
+pub fn truncate_path(ui: &Ui, path: &str, font: &egui::FontId, width: f32) -> String {
     let text_width = |text: &str| ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size().x);
     if text_width(path) < width {
         return path.to_string();
