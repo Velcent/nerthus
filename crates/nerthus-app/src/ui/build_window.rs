@@ -195,6 +195,7 @@ pub fn progress(ctx: &egui::Context, editor: &Editor, commands: &mut Vec<Command
             let gap = 8.0;
             let log_rect = rest.with_max_y((footer.top() - gap).max(rest.top()));
             let mut log_ui = tool_window::part(ui, "build-log", log_rect, Layout::top_down(Align::Min));
+            widgets::scroll_bar_gutter(&mut log_ui);
             let mut log = ScrollArea::vertical();
             log = log.stick_to_bottom(true);
             log = log.auto_shrink([false, false]);
@@ -368,6 +369,51 @@ mod tests {
         output.drop_without_applying_deltas();
         let area = egui::AreaState::load(context, egui::Id::new("build-progress")).filter(|area| area.size.is_some());
         (shapes, area.map(|area| area.rect()).unwrap_or(egui::Rect::NOTHING))
+    }
+
+    #[test]
+    fn log_lines_end_before_the_scroll_bar() {
+        let mut editor = Editor::new(Document::new());
+        let (_sender, messages) = crossbeam_channel::unbounded();
+        let mut build = ExportBuild::following("Gutter".to_string(), 1024, false, messages);
+        build.finished = true;
+        // Enough lines to scroll, the last for a node renamed to a long
+        // name without spaces.
+        build.log = (0..100).map(|index| LogLine::Step(format!("Step {index}"))).collect();
+        build.log.push(LogLine::Wrote(format!("{}_Out.png", "ABCD".repeat(30)).into()));
+        editor.export_build = Some(build);
+        let context = egui::Context::default();
+        theme::apply(&context);
+        // Once it has faded in.
+        let mut shapes = Vec::new();
+        for _ in 0..30 {
+            shapes = progress_frame(&context, &editor, Vec::new()).0;
+        }
+        // The log is as wide as the progress bar above it.
+        let progress = shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::Shape::Rect(rect) if rect.fill == theme::PROGRESS_EMPTY => Some(rect.rect),
+            _ => None,
+        });
+        let progress = progress.expect("the progress bar is painted");
+        // The pointer on the log's scroll bar, which grows to its widest.
+        let on_bar = egui::pos2(progress.right() - 2.0, progress.bottom() + 80.0);
+        progress_frame(&context, &editor, vec![egui::Event::PointerMoved(on_bar)]);
+        for _ in 0..20 {
+            progress_frame(&context, &editor, Vec::new());
+        }
+        let shapes = progress_frame(&context, &editor, Vec::new()).0;
+        let bar_left = progress.right() - context.global_style().spacing.scroll.bar_width;
+        let lines: Vec<(&str, egui::Rect)> = shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().starts_with("Step ") || text.galley.text().contains("wrote") => Some((text.galley.text(), text.visual_bounding_rect())),
+                _ => None,
+            })
+            .collect();
+        assert!(lines.iter().any(|(text, _)| text.contains("ABCD_Out.png")), "the long line is not painted");
+        for (text, rect) in lines {
+            assert!(rect.right() <= bar_left, "{text:?} ends at {}, under the scroll bar from {bar_left}", rect.right());
+        }
     }
 
     #[test]

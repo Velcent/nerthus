@@ -570,6 +570,15 @@ pub fn popup_outcome(ui: &Ui, response: &Response) -> Option<bool> {
     Some(theme::settings(ui.ctx()).accept_on_lost_focus)
 }
 
+/// For the scroll areas shown in `ui`: while a floating scroll bar shows,
+/// it gets a gutter of its own, as wide as the bar grows under the pointer
+/// and its margin, so that lines laid out to the content's width end
+/// before the bar rather than under it.
+pub fn scroll_bar_gutter(ui: &mut Ui) {
+    let scroll = &mut ui.spacing_mut().scroll;
+    scroll.floating_allocated_width = scroll.bar_width + scroll.bar_inner_margin;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
