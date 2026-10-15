@@ -248,6 +248,8 @@ pub struct GraphState {
     pub editing_note: Option<(i32, String)>,
     /// The tab being renamed and its name so far.
     pub renaming_tab: Option<(usize, String)>,
+    /// The tab strip's scroll.
+    pub tab_strip: crate::ui::graph_area::TabStrip,
     /// The tab whose deletion awaits confirmation.
     pub confirm_delete_tab: Option<usize>,
     /// Nodes the Data View's filter leaves out, drawn at half strength.
@@ -317,6 +319,7 @@ impl Default for GraphState {
             note_drag: None,
             editing_note: None,
             renaming_tab: None,
+            tab_strip: crate::ui::graph_area::TabStrip::default(),
             confirm_delete_tab: None,
             dimmed: HashSet::new(),
             bookmark_removing: None,
