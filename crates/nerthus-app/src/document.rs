@@ -1637,7 +1637,9 @@ impl Document {
     }
 
     /// `RegionManager.AddNewRegion`: a region a quarter of the terrain
-    /// wide with its corner at `corner`, in a random swatch's colour
+    /// wide with its corner at `corner`, moved in as far as it takes to lie
+    /// wholly on the terrain (a click near the edge would otherwise leave
+    /// most of it off), in a random swatch's colour
     /// (`ElementHelper.GetRandomSwatch`, kept as scRGB), named "Region 001"
     /// or, while that is taken, the next number (at most 100 tries).
     /// Returns its name.
@@ -1652,7 +1654,8 @@ impl Document {
         let swatch = SWATCHES[self.random.below(SWATCHES.len() as u64) as usize];
         let mut added = Region::new(&name);
         added.width = 0.25;
-        added.position = corner;
+        let last = last_region_position(added.width);
+        added.position = corner.map(|value| value.clamp(0.0, last));
         added.color = crate::theme::sc_rgb(crate::theme::swatch_color(swatch));
         regions.push(added);
         self.checkpoint("New region added");
@@ -1813,6 +1816,12 @@ impl ExportSettings {
         members.insert("DisabledInProfiles".to_string(), Value::Array(self.disabled_in_profiles.clone()));
         Value::Object(members)
     }
+}
+
+/// The furthest along either side a region `width` wide can have its
+/// corner and still lie wholly on the terrain.
+pub fn last_region_position(width: f32) -> f32 {
+    (1.0 - width).max(0.0)
 }
 
 /// `ElementHelper.Swatches`.
@@ -2266,5 +2275,19 @@ mod tests {
         let input2 = node.port("Input2").unwrap().record.clone().unwrap();
         assert_eq!((input.from, input.to_port.as_str()), (second, "In"));
         assert_eq!((input2.from, input2.to_port.as_str()), (first, "Input2"));
+    }
+
+    #[test]
+    fn regions_added_near_the_edge_lie_wholly_on_the_terrain() {
+        let mut document = Document::new();
+        let position = |document: &Document, name: &str| document.regions().into_iter().find(|region| region.name == name).map(|region| (region.position, region.width));
+        let middle = document.add_region([0.3, 0.4]);
+        assert_eq!(position(&document, &middle), Some(([0.3, 0.4], 0.25)));
+        // Near the bottom-right corner it moves in to end at the edge.
+        let corner = document.add_region([0.97, 0.971]);
+        assert_eq!(position(&document, &corner), Some(([0.75, 0.75], 0.25)));
+        // Just outside the canvas (on its border) it starts at the edge.
+        let border = document.add_region([-0.001, 0.9]);
+        assert_eq!(position(&document, &border), Some(([0.0, 0.75], 0.25)));
     }
 }
