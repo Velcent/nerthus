@@ -20,10 +20,14 @@ use crate::ui::viewport_2d::Viewport2DState;
 use crate::ui::widgets::{check_item, checked_icon_item, icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator, toolbar_background, toolbar_button, toolbar_separator};
 use crate::viewport_render::{MaskGradient, MASK_GRADIENTS};
 
+/// The toolbar's margin in its column, clear of the frame's 2. The graph
+/// toolbar keeps it too, to line up under this one.
+pub const TOOLBAR_MARGIN: f32 = 2.0;
+
 /// The toolbar column: a `Toolbar.ButtonSize` button, the toolbar's
-/// `Toolbar.Padding` and border 1.5, and its margin 2 each side.
+/// `Toolbar.Padding` and border 1.5, and its margin each side.
 fn toolbar_width(sizes: &theme::Sizes) -> f32 {
-    sizes.toolbar_button + 2.0 * (sizes.toolbar_padding[0] + 1.5 + 2.0)
+    sizes.toolbar_button + 2.0 * (sizes.toolbar_padding[0] + 1.5 + TOOLBAR_MARGIN)
 }
 
 /// `ToggleSkyEditor`: the popup is 400 wide, its panel inset 24 (the
@@ -71,8 +75,8 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, settings: &mut ViewportSet
     let sizes = theme::sizes(ui.ctx());
     let toolbar_column = Rect::from_min_max(Pos2::new(rect.right() - toolbar_width(sizes), rect.top()), rect.max);
     // The column has the frame's own dark fill behind the toolbar.
-    ui.painter().rect_filled(toolbar_column.shrink(2.0), 4.0, egui::Color32::from_rgb(0x05, 0x05, 0x05));
-    let toolbar_rect = toolbar_column.shrink(2.0);
+    let toolbar_rect = toolbar_column.shrink(TOOLBAR_MARGIN);
+    ui.painter().rect_filled(toolbar_rect, 4.0, egui::Color32::from_rgb(0x05, 0x05, 0x05));
     toolbar_background(ui, toolbar_rect, theme::MENU_BORDER, 1.5);
     let [padding_across, padding_down] = sizes.toolbar_padding;
     let inner = toolbar_rect.shrink(1.5).shrink2(Vec2::new(padding_across, padding_down));

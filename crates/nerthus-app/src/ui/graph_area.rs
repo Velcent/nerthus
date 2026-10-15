@@ -13,7 +13,7 @@ use crate::ui::commands::Command;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
 use crate::ui::widgets::{icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator};
-use crate::ui::{data_view, graph_canvas, menus, toolbox, UiState};
+use crate::ui::{data_view, graph_canvas, menus, toolbox, viewport_area, UiState};
 use crate::user::ToolboxStyle;
 
 /// Height of the tab strip (`GraphTabsGrid`) and of a tab (`GraphTabItem`).
@@ -38,12 +38,14 @@ const MIN_GRAPH: f32 = 160.0;
 
 pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut UiState, commands: &mut Vec<Command>) {
     // The toolbar column (auto): margin 2, or 0, 2, 2, 2 against the open
-    // Data View (`ToggleCollapse`).
+    // Data View (`ToggleCollapse`). On the right it also keeps the viewport
+    // toolbar's margin, so the two toolbars share their edges.
     let expanded = ui_state.data_view.expanded;
     let toolbar_left_margin = if expanded { 0.0 } else { AREA_MARGIN };
-    let toolbar_column_width = toolbar_left_margin + toolbar_width(theme::sizes(ui.ctx())) + AREA_MARGIN;
+    let toolbar_right_margin = AREA_MARGIN + viewport_area::TOOLBAR_MARGIN;
+    let toolbar_column_width = toolbar_left_margin + toolbar_width(theme::sizes(ui.ctx())) + toolbar_right_margin;
     let toolbar_column = Rect::from_min_max(Pos2::new(graph_grid.right() - toolbar_column_width, graph_grid.top()), graph_grid.max);
-    let toolbar_rect = Rect::from_min_max(toolbar_column.min + Vec2::new(toolbar_left_margin, AREA_MARGIN), toolbar_column.max - Vec2::splat(AREA_MARGIN));
+    let toolbar_rect = Rect::from_min_max(toolbar_column.min + Vec2::new(toolbar_left_margin, AREA_MARGIN), toolbar_column.max - Vec2::new(toolbar_right_margin, AREA_MARGIN));
 
     // The star columns: the graph `5*`, the Data View `1.05*` (at least
     // 340) while open.
