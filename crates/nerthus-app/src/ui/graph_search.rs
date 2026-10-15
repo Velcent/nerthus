@@ -526,7 +526,9 @@ fn result_row(ui: &mut Ui, editor: &Editor, found: &Found, highlighted: bool) ->
         }
         Found::TabCaption(..) => return false,
     };
-    let width = ui.available_width().max(RESULT_WIDTH + 30.0);
+    // The "more..." submenu sets no width, and a popup's sizing pass offers
+    // 600 across: there a row takes the search popup's width.
+    let width = if ui.is_sizing_pass() { RESULT_WIDTH + 30.0 } else { ui.available_width().max(RESULT_WIDTH + 30.0) };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, RESULT_HEIGHT), Sense::click());
     let hovered = response.hovered() || highlighted;
     if hovered {

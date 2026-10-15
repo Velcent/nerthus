@@ -182,6 +182,19 @@ fn row_galley(ui: &Ui, text: &str, style: RowText, color: Color32) -> std::sync:
     ui.painter().layout_no_wrap(text.to_string(), theme::interface(11.0), color)
 }
 
+/// How wide a menu row of `content_width` is drawn. A popup first lays its
+/// rows out in a sizing pass, offered `Spacing::default_area_size` (600)
+/// across: there a row takes only what it needs (at least the menu's 190),
+/// so the menu is as wide as its widest row; afterwards every row runs
+/// across the menu.
+pub fn menu_row_width(ui: &Ui, content_width: f32) -> f32 {
+    let needed = content_width.max(MENU_MIN_WIDTH);
+    if ui.is_sizing_pass() {
+        return needed;
+    }
+    ui.available_width().max(needed)
+}
+
 /// One menu row: the hover fill (inset 1, corners 4), the icon centred in
 /// its column, the text 2 past it (11px, white when highlighted), the
 /// shortcut in monospace 10 at the right and, for submenus, the arrow.
@@ -194,7 +207,7 @@ fn menu_row_styled(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, style
     let text_width = row_galley(ui, text, style, Color32::WHITE).size().x;
     let shortcut_width = if shortcut.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(shortcut.to_string(), theme::monospace(10.0), Color32::WHITE).size().x + 2.0 + 8.0 };
     let content_width = MENU_ICON_COLUMN + 2.0 + text_width + 2.0 + shortcut_width.max(MENU_ARROW_COLUMN);
-    let width = ui.available_width().max(content_width).max(MENU_MIN_WIDTH);
+    let width = menu_row_width(ui, content_width);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, MENU_ROW_HEIGHT), sense);
     let highlighted = enabled && (response.hovered() || open);
@@ -297,7 +310,9 @@ pub fn header_submenu<R>(ui: &mut Ui, icon: &str, color: Color32, text: &str, co
 /// `MenuItem.SeparatorStyleKey`: a full-width 1px rule (`Menu-Separator`
 /// at 0.2) with 1 above and below.
 pub fn menu_separator(ui: &mut Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), Sense::hover());
+    // On the sizing pass the rule claims no width: the rows set the menu's.
+    let width = if ui.is_sizing_pass() { 0.0 } else { ui.available_width() };
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 3.0), Sense::hover());
     let y = rect.center().y;
     let stroke = Stroke::new(1.0, theme::MENU_SEPARATOR.gamma_multiply(0.2));
     ui.painter().line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], stroke);
@@ -352,4 +367,110 @@ pub fn popup_outcome(ui: &Ui, response: &Response) -> Option<bool> {
         return Some(true);
     }
     Some(theme::settings(ui.ctx()).accept_on_lost_focus)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a frame of the test menu laid out: its button and, once open,
+    /// the menu, its rows and the submenu.
+    struct Shown {
+        button: Rect,
+        menu: Option<Rect>,
+        rows: Vec<Rect>,
+        submenu: Option<Rect>,
+    }
+
+    fn themed_context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let output = context.run_ui(egui::RawInput::default(), |_| {});
+        output.drop_without_applying_deltas();
+        context
+    }
+
+    /// One frame of a Graph-like menu (its button at `button_x`) on a
+    /// window `screen_width` wide: rows with and without shortcuts, a
+    /// separator and the Bake submenu above Bookmarks.
+    fn menu_frame(context: &egui::Context, screen_width: f32, button_x: f32, events: Vec<egui::Event>) -> Shown {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(screen_width, 700.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut shown = Shown { button: Rect::NOTHING, menu: None, rows: Vec::new(), submenu: None };
+        let output = context.run_ui(input, |ui| {
+            let slot = Rect::from_min_size(Pos2::new(button_x, 0.0), Vec2::new(60.0, 24.0));
+            let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(slot));
+            let menu = MenuButton::new("Graph").config(menu_config());
+            let (response, _) = menu.ui(&mut bar, |ui| {
+                menu_style(ui);
+                let mut rows = vec![menu_item(ui, None, None, "Save as...", "Ctrl Shift S").rect];
+                rows.push(menu_item(ui, None, None, "Convert port to portals", "Ctrl Shift Alt P").rect);
+                menu_separator(ui);
+                let bake = submenu(ui, None, None, "Bake", |ui| {
+                    menu_style(ui);
+                    menu_item(ui, None, None, "Bake Selected", "");
+                    menu_item(ui, None, None, "16384 x 16384", "");
+                    ui.min_rect()
+                });
+                rows.push(menu_item(ui, None, None, "Bookmarks", "").rect);
+                if !ui.is_sizing_pass() {
+                    shown.menu = Some(ui.min_rect());
+                    shown.rows = rows;
+                    shown.submenu = bake;
+                }
+            });
+            shown.button = response.rect;
+        });
+        output.drop_without_applying_deltas();
+        shown
+    }
+
+    fn click(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// Opens the menu and hovers its Bake row: the menu and the submenu
+    /// as laid out once both have been sized.
+    fn open_bake(screen_width: f32, button_x: f32) -> (Rect, Vec<Rect>, Rect) {
+        let context = themed_context();
+        let button = menu_frame(&context, screen_width, button_x, Vec::new()).button.center();
+        menu_frame(&context, screen_width, button_x, vec![egui::Event::PointerMoved(button), click(button, true)]);
+        menu_frame(&context, screen_width, button_x, vec![click(button, false)]);
+        let mut shown = menu_frame(&context, screen_width, button_x, Vec::new());
+        for _ in 0..2 {
+            shown = menu_frame(&context, screen_width, button_x, Vec::new());
+        }
+        let menu = shown.menu.expect("the menu opens");
+        let bake = Pos2::new(menu.center().x, shown.rows[1].bottom() + 3.0 + MENU_ROW_HEIGHT / 2.0);
+        menu_frame(&context, screen_width, button_x, vec![egui::Event::PointerMoved(bake)]);
+        for _ in 0..3 {
+            shown = menu_frame(&context, screen_width, button_x, Vec::new());
+        }
+        let submenu = shown.submenu.expect("hovering Bake opens its submenu");
+        (shown.menu.unwrap(), shown.rows, submenu)
+    }
+
+    #[test]
+    fn a_menu_is_as_wide_as_its_widest_row() {
+        let (menu, rows, _) = open_bake(1000.0, 200.0);
+        // Not egui's 600 for an area of unknown size.
+        assert!(menu.width() < 300.0, "the menu is {} wide", menu.width());
+        assert!(menu.width() >= MENU_MIN_WIDTH);
+        // Every row runs across the menu.
+        assert!(rows.iter().all(|row| row.width() == menu.width()));
+        // Under its button.
+        assert!(menu.left() >= 200.0 - 10.0 && menu.left() <= 200.0 + 10.0, "the menu starts at {}", menu.left());
+    }
+
+    #[test]
+    fn a_submenu_opens_beside_its_menu() {
+        let (menu, _, submenu) = open_bake(1000.0, 200.0);
+        assert!(submenu.left() >= menu.right(), "{submenu:?} covers {menu:?}");
+    }
+
+    #[test]
+    fn a_submenu_with_no_room_on_the_right_opens_on_the_left() {
+        let (menu, _, submenu) = open_bake(640.0, 520.0);
+        assert!(submenu.right() <= menu.left(), "{submenu:?} covers {menu:?}");
+    }
 }

@@ -21,7 +21,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::GraphState;
 use crate::ui::graph_commands::GraphCommand;
-use crate::ui::widgets::{check_item, checked_icon_item, header_submenu, menu_caption, menu_item, menu_separator, menu_style, submenu};
+use crate::ui::widgets::{check_item, checked_icon_item, header_submenu, menu_caption, menu_item, menu_row_width, menu_separator, menu_style, submenu};
 use crate::user::{ToolboxMode, ToolboxStyle, UserOptions};
 
 /// The toolbox categories, in toolbox order (`NodeCategory`).
@@ -209,10 +209,11 @@ fn category_menu(ui: &mut Ui, category: &str, look: &EntryLook, origin: Origin, 
 /// A flat list's family header (`Tag="HEADER"`, disabled): its icon and
 /// small capitals in the category's colour.
 fn family_caption(ui: &mut Ui, icon: &str, color: Color32, family: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(190.0), 23.0), Sense::hover());
+    let galley = ui.painter().layout_no_wrap(family.to_uppercase(), theme::interface(11.0 * 0.8), color);
+    let width = menu_row_width(ui, 32.0 + galley.size().x + 8.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 23.0), Sense::hover());
     let icon_rect = Rect::from_center_size(Pos2::new(rect.left() + 15.0, rect.center().y), Vec2::splat(icons::DEFAULT_SIZE));
     icons::paint(ui, icon_rect, icon, color);
-    let galley = ui.painter().layout_no_wrap(family.to_uppercase(), theme::interface(11.0 * 0.8), color);
     ui.painter().galley(Pos2::new(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0), galley, color);
 }
 

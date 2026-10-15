@@ -1294,12 +1294,21 @@ fn options(ui: &mut Ui, label: &str, spec: &ParameterSpec, current: &str, style:
 /// columns at `font_size`; returns the index clicked when it is not the
 /// selected one.
 pub fn option_list(ui: &mut Ui, id: Id, entries: &[String], selected: Option<usize>, columns: usize, font_size: f32) -> Option<usize> {
-    let width = ui.available_width();
     let columns = columns.max(1);
     let rows = entries.len().max(1).div_ceil(columns);
+    let sizes = theme::sizes(ui.ctx());
+    // A popup's sizing pass offers 600 across (the Viewport Helpers menu
+    // holds two lists): there the list takes only what its widest entry
+    // needs in each column, inside the border and grid margins.
+    let width = if ui.is_sizing_pass() {
+        let font = theme::interface(font_size);
+        let widest = entries.iter().map(|entry| ui.painter().layout_no_wrap(entry.clone(), font.clone(), Color32::WHITE).size().x).fold(0.0, f32::max);
+        columns as f32 * (widest + 2.0 * sizes.option_padding[0] + 2.0 * sizes.option_margin) + 2.0 * (1.0 + 2.0)
+    } else {
+        ui.available_width()
+    };
     // An item: the text's line, `OptionsX.Item.Padding` and
     // `OptionsX.Item.Margin` above and below.
-    let sizes = theme::sizes(ui.ctx());
     let row_height = font_size * 1.36 + 2.0 * sizes.option_padding[1] + 2.0 * sizes.option_margin;
     let height = rows as f32 * row_height + 4.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
