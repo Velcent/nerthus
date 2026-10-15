@@ -207,6 +207,9 @@ fn dotnet_bool(value: bool) -> &'static str {
     if value { "True" } else { "False" }
 }
 
+/// The line between [`profile_summary`]'s groups of settings.
+pub const PROFILE_SEPARATOR: &str = "------------------------------------";
+
 /// `BuildSettingsWindow.ShowProfile`: a profile's settings as Build
 /// Settings › Profiles lists them.
 pub fn profile_summary(definition: &BuildDefinition) -> String {
@@ -228,7 +231,7 @@ pub fn profile_summary(definition: &BuildDefinition) -> String {
     }
     lines.push(format!("Subdivision: {}", definition.subdivision.name()));
     lines.push(format!("Output Type: {}", definition.output_type.name()));
-    lines.push("------------------------------------".to_string());
+    lines.push(PROFILE_SEPARATOR.to_string());
     if definition.output_type == OutputType::CroppedTiles {
         let tiles = definition.number_of_tiles * definition.number_of_tiles;
         // `{n:###,###}`: nothing for 0, thousands separated.
@@ -241,7 +244,7 @@ pub fn profile_summary(definition: &BuildDefinition) -> String {
         lines.push(format!("Tile Zero Index: {}", dotnet_bool(definition.tile_zero_index)));
         lines.push(format!("Flip Y: {}", dotnet_bool(definition.flip_y)));
         lines.push(format!("Tile Pattern: {}", definition.tile_pattern));
-        lines.push("------------------------------------".to_string());
+        lines.push(PROFILE_SEPARATOR.to_string());
     }
     lines.push(format!("Organize Files: {}", definition.organize_files.name()));
     lines.push(format!("Preserve Tiled Cache: {}", dotnet_bool(definition.preserve_tiled_cache)));
