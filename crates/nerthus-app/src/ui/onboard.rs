@@ -5,11 +5,17 @@
 //! started!" keeps the choices, takes them at once and writes
 //! `onboard.dat`. `--skip-onboard` writes the file without asking, and
 //! `--screenshot` runs skip the window.
+//!
+//! On a screen too small for the whole window it shrinks: its margins
+//! narrow, the pages scroll above the footer, and the choices wrap or go
+//! one over the other, so the Next button and the note below the pages
+//! never cover them.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, TryRecvError};
-use egui::{Align, Color32, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align, Color32, FontId, Galley, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use serde_json::{json, Value};
 
 use crate::editor::Editor;
@@ -26,6 +32,28 @@ const TABS: [SideTab; 3] = [
     SideTab { title: "Preferences", brush: theme::ACCENT_MUTED_TEAL },
     SideTab { title: "GPU Compute", brush: ACCENT_ORANGE },
 ];
+
+/// The window at its full size.
+const WINDOW_SIZE: Vec2 = Vec2::new(1240.0, 720.0);
+/// The tab headers' width.
+const HEADERS_WIDTH: f32 = 200.0;
+/// The bottom of the window, kept for the note and the button.
+const FOOTER_HEIGHT: f32 = 90.0;
+/// The note beside the button.
+const NOTE: &str = "You can change any choices in the Options dialog later.";
+
+/// A `ListBox-OptionsX` frame's margin and border, both sides together.
+const LIST_FRAME: Vec2 = Vec2::new(6.0, 4.0);
+/// The gap between a list's items.
+const LIST_GAP: f32 = 4.0;
+/// The narrowest a navigation style goes beside the other.
+const MIN_CHOICE_WIDTH: f32 = 160.0;
+/// A toolbox style's card at its full size.
+const CARD_SIZE: Vec2 = Vec2::new(340.0, 200.0);
+/// The narrowest a toolbox style's card goes beside the other.
+const MIN_CARD_WIDTH: f32 = 220.0;
+/// The shortest a toolbox style's card gets before the page scrolls.
+const MIN_CARD_HEIGHT: f32 = 160.0;
 
 /// The folders the first page can change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,46 +244,47 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, onboard: &mut Onboard, dia
         let (rect, _) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
         ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(160));
     });
-    let window = help_windows::dialog_window(ctx, "onboard", Vec2::new(1240.0, 720.0));
+    let window = help_windows::dialog_window(ctx, "onboard", WINDOW_SIZE);
     window.show(ctx, |ui| {
         let area = ui.max_rect();
         ui.set_min_size(area.size());
         paint_backdrop(ui, area);
+        let parts = parts(area);
 
-        // The welcome (margin 72, 64).
-        let welcome = Rect::from_min_size(area.min + Vec2::new(72.0, 64.0), Vec2::new(area.width() - 144.0, 80.0));
-        let mut welcome_ui = region(ui, welcome, Layout::top_down(Align::Min));
+        let mut welcome_ui = region(ui, "onboard-welcome", parts.welcome, Layout::top_down(Align::Min));
         welcome_ui.label(RichText::new("Welcome to Nerthus!").font(theme::interface(32.0)).color(Color32::WHITE));
         let subtitle = "Before you get started, you can quickly set up your preferred workspace.";
         welcome_ui.label(RichText::new(subtitle).font(theme::interface(14.0)).color(theme::LABEL_DEFAULT));
 
-        // The tabs (margin 72, 160, 20, 90): headers on the left, the page
-        // beside them.
-        let body = Rect::from_min_max(area.min + Vec2::new(72.0, 160.0), area.max - Vec2::new(20.0, 90.0));
-        let headers = Rect::from_min_size(body.min, Vec2::new(200.0, body.height()));
-        let mut headers_ui = region(ui, headers, Layout::top_down(Align::Min));
-        if help_windows::side_tabs(&mut headers_ui, &TABS, &mut onboard.tab, 200.0) {
+        // The headers and the page scroll where the window is too short
+        // for them, so that they stay above the footer.
+        let mut headers_ui = region(ui, "onboard-headers", parts.headers, Layout::top_down(Align::Min));
+        let mut headers = egui::ScrollArea::vertical();
+        headers = headers.id_salt("onboard-headers");
+        headers = headers.auto_shrink([false, false]);
+        if headers.show(&mut headers_ui, |ui| help_windows::side_tabs(ui, &TABS, &mut onboard.tab, HEADERS_WIDTH)).inner {
             onboard.next_label = next_label(onboard.tab);
         }
-        // The tab's margin 24 on the right, the page's 8 and padding 8.
-        let page_min = egui::pos2(headers.right() + 24.0 + 16.0, body.top() + 8.0);
-        let page_rect = Rect::from_min_max(page_min, body.max - Vec2::splat(8.0));
-        let mut page_ui = region(ui, page_rect, Layout::top_down(Align::Min));
-        match onboard.tab {
-            0 => paths_page(&mut page_ui, editor, onboard, dialogs),
-            1 => preferences_page(&mut page_ui, onboard),
-            _ => gpu_page(&mut page_ui, onboard),
-        }
+        let mut page_ui = region(ui, "onboard-page", parts.page, Layout::top_down(Align::Min));
+        let mut page = egui::ScrollArea::vertical();
+        // Each page keeps its own place.
+        page = page.id_salt(onboard.tab);
+        page = page.auto_shrink([false, false]);
+        page.show(&mut page_ui, |ui| match onboard.tab {
+            0 => paths_page(ui, editor, onboard, dialogs),
+            1 => preferences_page(ui, onboard),
+            _ => gpu_page(ui, onboard),
+        });
 
-        // "You can change any choices…" (margin 32, 0, 0, 32) and the
-        // button (margin 0, 0, 64, 48).
-        let note = "You can change any choices in the Options dialog later.";
-        let note_galley = ui.painter().layout_no_wrap(note.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
+        // The note (margin 32, 0, 0, 32) and the button (margin 0, 0, 64,
+        // 48), in the footer: the note is below the button's row, so they
+        // stay apart however narrow the window.
+        let note_galley = ui.painter().layout_no_wrap(NOTE.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
         let note_position = egui::pos2(area.left() + 32.0, area.bottom() - 32.0 - note_galley.size().y);
         ui.painter().galley(note_position, note_galley, theme::LABEL_DEFAULT);
         let button_corner = area.right_bottom() - Vec2::new(64.0, 48.0);
         let button_rect = Rect::from_min_max(button_corner - Vec2::new(400.0, 48.0), button_corner);
-        let mut button_ui = region(ui, button_rect, Layout::right_to_left(Align::Center));
+        let mut button_ui = region(ui, "onboard-next", button_rect, Layout::right_to_left(Align::Center));
         let next = help_windows::important_button(&mut button_ui, onboard.next_label, 14.0, 0.0, Vec2::new(24.0, 12.0));
         if next.clicked() {
             if onboard.tab + 1 < TABS.len() {
@@ -274,10 +303,42 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, onboard: &mut Onboard, dia
     true
 }
 
-/// A part of the window laid out on its own.
-fn region(ui: &mut Ui, rect: Rect, layout: Layout) -> Ui {
-    let builder = egui::UiBuilder::new().max_rect(rect).layout(layout);
-    ui.new_child(builder)
+/// Where the window's parts go.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Parts {
+    welcome: Rect,
+    headers: Rect,
+    page: Rect,
+}
+
+/// The parts in `area`. In the full window they are where `Onboard` has
+/// them: the welcome at margin 72, 64, and the tabs at margin 72, 160, 20,
+/// 90 with the page past the headers (the tab's margin 24, the page's 8
+/// and padding 8). A shorter window takes the top margin in, from 64 at
+/// 700 tall to 24 at 600; one too narrow for the toolbox styles side by
+/// side takes the left margin and the gap past the headers in, from 72
+/// and 40 to 24 and 16 at 640 wide. The bottom 90 are the footer's.
+fn parts(area: Rect) -> Parts {
+    let short = ((700.0 - area.height()) / 100.0).clamp(0.0, 1.0);
+    let narrow = ((1040.0 - area.width()) / 400.0).clamp(0.0, 1.0);
+    let top = 64.0 - 40.0 * short;
+    let left = 72.0 - 48.0 * narrow;
+    let welcome = Rect::from_min_size(area.min + Vec2::new(left, top), Vec2::new((area.width() - 2.0 * left).max(0.0), 80.0));
+    let body_min = egui::pos2(area.left() + left, welcome.bottom() + 16.0);
+    let body_max = (area.max - Vec2::new(20.0, FOOTER_HEIGHT)).max(body_min);
+    let headers = Rect::from_min_size(body_min, Vec2::new(HEADERS_WIDTH, body_max.y - body_min.y));
+    let page_min = egui::pos2(headers.right() + 40.0 - 24.0 * narrow, body_min.y + 8.0);
+    let page = Rect::from_min_max(page_min, (body_max - Vec2::splat(8.0)).max(page_min));
+    Parts { welcome, headers, page }
+}
+
+/// A part of the window laid out on its own and kept to its place: what
+/// does not fit is cut off at its edge.
+fn region(ui: &mut Ui, id: &str, rect: Rect, layout: Layout) -> Ui {
+    let builder = egui::UiBuilder::new().id_salt(id).max_rect(rect).layout(layout);
+    let mut region = ui.new_child(builder);
+    region.set_clip_rect(rect.intersect(ui.clip_rect()));
+    region
 }
 
 /// The faint logo behind the pages (at 5% opacity, running off the bottom
@@ -297,12 +358,13 @@ fn folder_link(ui: &mut Ui, path: &Path, color: Color32) -> bool {
     response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
-/// A paragraph under a setting (13 px, margin 24, 12, 360, 0).
+/// A paragraph under a setting (13 px, margin 24, 12, 360, 0), at least
+/// 240 wide where the page has room for it.
 fn paragraph(ui: &mut Ui, text: &str) {
     ui.add_space(12.0);
     ui.horizontal(|ui| {
         ui.add_space(24.0);
-        let width = (ui.available_width() - 360.0).max(240.0);
+        let width = (ui.available_width() - 360.0).max(240.0).min(ui.available_width());
         ui.allocate_ui_with_layout(Vec2::new(width, 0.0), Layout::top_down(Align::Min), |ui| {
             ui.add(egui::Label::new(RichText::new(text).font(theme::interface(13.0)).color(theme::LABEL_DEFAULT)).wrap());
         });
@@ -415,25 +477,34 @@ fn refusal(ctx: &egui::Context, onboard: &mut Onboard) {
     }
 }
 
-/// A `ListBox-OptionsX` item: a bold first line and a plain second, the
-/// selected one on the selection brush.
-fn option_item(ui: &mut Ui, size: Vec2, title: &str, detail: &str, selected: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+/// A `ListBox-OptionsX` item `width` wide: a bold first line and a plain
+/// second, centred and wrapped in it, the selected one on the selection
+/// brush. It is 56 tall, or taller for lines that wrap.
+fn option_item(ui: &mut Ui, width: f32, title: &str, detail: &str, selected: bool) -> egui::Response {
+    let wrap_width = (width - 16.0).max(0.0);
+    let title_galley = centred_text(ui, title, theme::semibold(14.0), wrap_width);
+    let detail_galley = centred_text(ui, detail, theme::interface(14.0), wrap_width);
+    let height = title_galley.size().y + detail_galley.size().y;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, (height + 16.0).max(56.0)), Sense::click());
     if selected {
         ui.painter().rect_filled(rect, 2.0, theme::OPTIONS_SELECTION);
     } else if response.hovered() {
         ui.painter().rect_filled(rect, 2.0, theme::OPTIONS_SELECTION.gamma_multiply(0.4));
     }
     let color = if selected || response.hovered() { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
-    let title_galley = ui.painter().layout_no_wrap(title.to_string(), theme::semibold(14.0), color);
-    let detail_galley = ui.painter().layout_no_wrap(detail.to_string(), theme::interface(14.0), color);
-    let height = title_galley.size().y + detail_galley.size().y;
     let top = rect.center().y - height / 2.0;
-    let title_position = egui::pos2(rect.center().x - title_galley.size().x / 2.0, top);
-    let detail_position = egui::pos2(rect.center().x - detail_galley.size().x / 2.0, top + title_galley.size().y);
-    ui.painter().galley(title_position, title_galley, color);
-    ui.painter().galley(detail_position, detail_galley, color);
+    let title_height = title_galley.size().y;
+    ui.painter().galley(egui::pos2(rect.center().x, top), title_galley, color);
+    ui.painter().galley(egui::pos2(rect.center().x, top + title_height), detail_galley, color);
     response
+}
+
+/// Text wrapped at `width` with each line centred on where it is drawn,
+/// in the colour it is drawn with.
+fn centred_text(ui: &Ui, text: &str, font: FontId, width: f32) -> Arc<Galley> {
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), font, Color32::PLACEHOLDER, width);
+    job.halign = Align::Center;
+    ui.painter().layout_job(job)
 }
 
 /// Preferences: the navigation and toolbox styles.
@@ -444,11 +515,10 @@ fn preferences_page(ui: &mut Ui, onboard: &mut Onboard) {
         ("Nerthus Defaults", "LMB Orbit / MMB Pan / RMB Zoom"),
         ("Industry Standard", "Alt+LMB Orbit / Alt+MMB Pan / Alt+RMB Zoom"),
     ];
-    let list_width = ui.available_width().min(840.0);
-    list_frame(ui, |ui| {
+    let (beside, width) = list_items(ui.available_width().min(840.0), MIN_CHOICE_WIDTH, f32::INFINITY);
+    list_frame(ui, beside, |ui| {
         for (index, (title, detail)) in navigation_choices.iter().enumerate() {
-            let size = Vec2::new((list_width - 8.0) / 2.0, 56.0);
-            if option_item(ui, size, title, detail, onboard.navigation == index).clicked() {
+            if option_item(ui, width, title, detail, onboard.navigation == index).clicked() {
                 onboard.navigation = index;
             }
         }
@@ -456,38 +526,57 @@ fn preferences_page(ui: &mut Ui, onboard: &mut Onboard) {
     ui.add_space(24.0);
     heading(ui, "Toolbox Style");
     ui.add_space(8.0);
-    list_frame(ui, |ui| {
+    let (beside, width) = list_items(ui.available_width(), MIN_CARD_WIDTH, CARD_SIZE.x);
+    // In a page a little too short for them the cards give up some of
+    // their height before it has to scroll. What is above them measures
+    // the same wherever the page is scrolled to.
+    let above = ui.cursor().top() - ui.min_rect().top();
+    let rows = if beside { 1.0 } else { 2.0 };
+    let room = (ui.clip_rect().height() - above - LIST_FRAME.y - LIST_GAP * (rows - 1.0)) / rows;
+    let size = Vec2::new(width, room.clamp(MIN_CARD_HEIGHT, CARD_SIZE.y));
+    list_frame(ui, beside, |ui| {
         let styles = [
             ("Docked Panel", "Recommended for Beginners", ToolboxStyle::Panel),
             ("Compact Buttons", "For experts and reduced UI space", ToolboxStyle::Menus),
         ];
         for (index, (title, detail, style)) in styles.into_iter().enumerate() {
-            if toolbox_item(ui, title, detail, style, onboard.toolbox == index).clicked() {
+            if toolbox_item(ui, size, title, detail, style, onboard.toolbox == index).clicked() {
                 onboard.toolbox = index;
             }
         }
     });
 }
 
-/// `ListBox-OptionsX`'s box: its items in a row.
-fn list_frame(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
+/// How two items share a list `width` wide: whether they go side by side,
+/// which they do if each gets at least `min`, or one over the other; and
+/// how wide each is, at most `max`.
+fn list_items(width: f32, min: f32, max: f32) -> (bool, f32) {
+    let inside = (width - LIST_FRAME.x).max(0.0);
+    let half = (inside - LIST_GAP) / 2.0;
+    if half >= min { (true, half.min(max)) } else { (false, inside.min(max)) }
+}
+
+/// `ListBox-OptionsX`'s box: its items in a row, or one over the other.
+fn list_frame(ui: &mut Ui, beside: bool, contents: impl FnOnce(&mut Ui)) {
     let mut frame = egui::Frame::new();
     frame = frame.fill(theme::OPTIONS_BACKGROUND);
     frame = frame.stroke(Stroke::new(1.0, theme::OPTIONS_BORDER));
     frame = frame.corner_radius(4.0);
     frame = frame.inner_margin(egui::Margin::symmetric(2, 1));
     frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            contents(ui);
-        });
+        ui.spacing_mut().item_spacing = Vec2::splat(LIST_GAP);
+        if beside {
+            ui.horizontal(contents);
+        } else {
+            ui.vertical(contents);
+        }
     });
 }
 
-/// A toolbox style: its name over a sketch of it, bordered in teal when
-/// chosen.
-fn toolbox_item(ui: &mut Ui, title: &str, detail: &str, style: ToolboxStyle, selected: bool) -> egui::Response {
-    let size = Vec2::new(340.0, 200.0);
+/// A toolbox style's card (340 × 200 at most): its name over a sketch of
+/// it, bordered in teal when chosen. The name wraps in a narrow card,
+/// pushing the sketch down.
+fn toolbox_item(ui: &mut Ui, size: Vec2, title: &str, detail: &str, style: ToolboxStyle, selected: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let border = if selected { theme::ACCENT_TEAL } else { Color32::TRANSPARENT };
     if response.hovered() && !selected {
@@ -495,13 +584,16 @@ fn toolbox_item(ui: &mut Ui, title: &str, detail: &str, style: ToolboxStyle, sel
     }
     ui.painter().rect_stroke(rect.shrink(1.0), 4.0, Stroke::new(2.0, border), egui::StrokeKind::Inside);
     let color = if selected || response.hovered() { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
-    let title_galley = ui.painter().layout_no_wrap(title.to_string(), theme::semibold(14.0), color);
-    let detail_galley = ui.painter().layout_no_wrap(detail.to_string(), theme::interface(14.0), color);
+    let wrap_width = (size.x - 20.0).max(0.0);
+    let title_galley = ui.painter().layout(title.to_string(), theme::semibold(14.0), Color32::PLACEHOLDER, wrap_width);
+    let detail_galley = ui.painter().layout(detail.to_string(), theme::interface(14.0), Color32::PLACEHOLDER, wrap_width);
     let text_left = rect.left() + 10.0;
-    let title_height = title_galley.size().y;
+    let detail_top = rect.top() + 10.0 + title_galley.size().y;
+    let text_bottom = detail_top + detail_galley.size().y;
     ui.painter().galley(egui::pos2(text_left, rect.top() + 10.0), title_galley, color);
-    ui.painter().galley(egui::pos2(text_left, rect.top() + 10.0 + title_height), detail_galley, color);
-    let sketch = Rect::from_min_max(egui::pos2(rect.left() + 10.0, rect.top() + 60.0), rect.max - Vec2::splat(10.0));
+    ui.painter().galley(egui::pos2(text_left, detail_top), detail_galley, color);
+    let sketch_top = (rect.top() + 60.0).max(text_bottom + 16.0);
+    let sketch = Rect::from_min_max(egui::pos2(rect.left() + 10.0, sketch_top), rect.max - Vec2::splat(10.0));
     paint_toolbox_sketch(ui, sketch, style);
     response
 }
@@ -585,6 +677,9 @@ fn finish(editor: &mut Editor, onboard: &Onboard) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Document;
+    use egui::epaint::ClippedShape;
+    use egui::{AreaState, Event, Id, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, Shape, TouchPhase};
 
     #[test]
     fn devices_without_problems_are_all_usable() {
@@ -606,5 +701,240 @@ mod tests {
     fn the_button_reads_as_the_page_needs() {
         assert_eq!(next_label(0), "Next: Select your preferences");
         assert_eq!(next_label(2), "Let's get started!");
+    }
+
+    /// The screen, in points, of 1366 × 768, 1280 × 720 (or 1920 × 1080
+    /// at 150%), 1024 × 768, 800 × 600 and 640 × 480 at the default 120%.
+    const SMALL_SCREENS: [Vec2; 5] = [
+        Vec2::new(1138.0, 640.0),
+        Vec2::new(1066.0, 600.0),
+        Vec2::new(853.0, 640.0),
+        Vec2::new(666.0, 500.0),
+        Vec2::new(533.0, 400.0),
+    ];
+    /// 1600 × 960 at 120%, where the window has its full size.
+    const FULL_SCREEN: Vec2 = Vec2::new(1333.0, 800.0);
+    /// A folder about 110 characters long.
+    const LONG_FOLDER: &str = "/home/someone/Documents/Studio Work/Clients/Northern Range Survey/Terrain Sources/Heightfield Tiles/2026 Q4";
+
+    fn context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        context
+    }
+
+    /// The setup on this page, with PROJECTS and BUILDS apart in long
+    /// folders when `long_folders`.
+    fn setup(tab: usize, long_folders: bool) -> (Editor, Onboard) {
+        let mut editor = Editor::new(Document::new());
+        let mut onboard = Onboard::open(true);
+        onboard.tab = tab;
+        onboard.next_label = next_label(tab);
+        if long_folders {
+            onboard.separate_folders = true;
+            let preferences = &mut editor.user.preferences;
+            preferences.set_member("Locations", "Projects", json!(format!("{LONG_FOLDER}/Projects")));
+            preferences.set_member("Locations", "Builds", json!(format!("{LONG_FOLDER}/Builds")));
+        }
+        (editor, onboard)
+    }
+
+    /// A frame at this screen size with these events. Returns what was
+    /// painted and the window's rect.
+    fn frame(context: &egui::Context, screen: Vec2, editor: &mut Editor, onboard: &mut Onboard, events: Vec<Event>) -> (Vec<ClippedShape>, Rect) {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
+        let mut dialogs = FileDialogs::default();
+        let mut output = context.run_ui(input, |ui| {
+            show(ui.ctx(), editor, onboard, &mut dialogs);
+        });
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        let rect = AreaState::load(context, Id::new("onboard")).filter(|area| area.size.is_some()).map(|area| area.rect());
+        (shapes, rect.unwrap_or(Rect::NOTHING))
+    }
+
+    /// Frames enough for egui's first-frame sizing to settle and the
+    /// window to fade in.
+    fn settle(context: &egui::Context, screen: Vec2, editor: &mut Editor, onboard: &mut Onboard) -> (Vec<ClippedShape>, Rect) {
+        for _ in 0..20 {
+            frame(context, screen, editor, onboard, Vec::new());
+        }
+        frame(context, screen, editor, onboard, Vec::new())
+    }
+
+    /// Each shape painted, nested ones on their own, with the part of it
+    /// that shows. Shapes that do not show are left out.
+    fn shown(shapes: &[ClippedShape]) -> Vec<(Rect, &Shape)> {
+        let mut shown = Vec::new();
+        for clipped in shapes {
+            let mut stack = vec![&clipped.shape];
+            while let Some(shape) = stack.pop() {
+                if let Shape::Vec(inner) = shape {
+                    stack.extend(inner);
+                    continue;
+                }
+                let rect = shape.visual_bounding_rect().intersect(clipped.clip_rect);
+                if rect.is_positive() {
+                    shown.push((rect, shape));
+                }
+            }
+        }
+        shown
+    }
+
+    fn text(shape: &Shape) -> Option<&str> {
+        match shape {
+            Shape::Text(text) => Some(text.galley.text()),
+            _ => None,
+        }
+    }
+
+    /// Whether two rects share more than a sliver.
+    fn overlap(a: Rect, b: Rect) -> bool {
+        a.intersect(b).shrink(0.5).is_positive()
+    }
+
+    /// The Next button's rect: the smallest painted round its label.
+    fn button(shown: &[(Rect, &Shape)], label: &str, window: Rect) -> Rect {
+        let label_rect = shown.iter().find(|(_, shape)| text(shape) == Some(label)).map(|(rect, _)| *rect).expect("no Next button");
+        let around = shown.iter().filter_map(|(_, shape)| match shape {
+            Shape::Rect(rect) if rect.rect.contains_rect(label_rect) && !rect.rect.contains_rect(window.shrink(2.0)) => Some(rect.rect),
+            _ => None,
+        });
+        around.min_by(|a, b| a.area().total_cmp(&b.area())).expect("no button round the Next label")
+    }
+
+    /// What the window shows stays inside it, the button and the note
+    /// cover nothing else, and no text runs into other text.
+    fn assert_laid_out(shapes: &[ClippedShape], window: Rect, label: &str, what: &str) {
+        let shown = shown(shapes);
+        let button = button(&shown, label, window);
+        let note = shown.iter().find(|(_, shape)| text(shape) == Some(NOTE)).map(|(rect, _)| *rect).expect("no note");
+        // The backdrop is an image; the veil, the shadow and the frame
+        // cover the window.
+        let image = |shape: &Shape| matches!(shape, Shape::Mesh(_)) || matches!(shape, Shape::Rect(rect) if rect.brush.is_some());
+        let contents = shown.iter().filter(|(rect, shape)| !image(shape) && !rect.contains_rect(window.shrink(2.0)));
+        let contents: Vec<_> = contents.collect();
+        for (rect, shape) in &contents {
+            assert!(window.expand(0.5).contains_rect(*rect), "{what}: {shape:?} at {rect:?} is outside the window {window:?}");
+            let footer = text(shape) == Some(NOTE) || text(shape) == Some(label) || matches!(shape, Shape::Rect(own) if own.rect == button);
+            if !footer {
+                assert!(!overlap(*rect, button), "{what}: {shape:?} at {rect:?} is under the Next button {button:?}");
+                assert!(!overlap(*rect, note), "{what}: {shape:?} at {rect:?} is under the note {note:?}");
+            }
+        }
+        let texts: Vec<_> = contents.iter().filter_map(|(rect, shape)| text(shape).map(|text| (*rect, text))).collect();
+        for (index, (rect, text)) in texts.iter().enumerate() {
+            for (other_rect, other) in &texts[index + 1..] {
+                assert!(!overlap(*rect, *other_rect), "{what}: {text:?} at {rect:?} runs into {other:?} at {other_rect:?}");
+            }
+        }
+    }
+
+    /// The page in the window (inside its border, 1 wide).
+    fn page(window: Rect) -> Rect {
+        parts(window.shrink(1.0)).page
+    }
+
+    /// Whether the page's last item shows whole: the paragraph under the
+    /// folders, the Compact Buttons sketch (the last sketch drawn), or what
+    /// the devices said.
+    fn end_shows(shapes: &[ClippedShape], window: Rect, tab: usize) -> bool {
+        let page = page(window);
+        let held = shapes.iter().filter(|clipped| page.expand(1.0).contains_rect(clipped.clip_rect));
+        let last = held.filter(|clipped| match (&clipped.shape, tab) {
+            (Shape::Text(text), 0) => text.galley.text().starts_with("Projects are usually small"),
+            (Shape::Rect(rect), 1) => rect.fill == theme::WINDOW_BACKGROUND,
+            (Shape::Text(text), 2) => text.galley.text().starts_with("Nerthus is in CPU-only mode"),
+            _ => false,
+        });
+        last.last().is_some_and(|clipped| clipped.clip_rect.expand(0.5).contains_rect(clipped.shape.visual_bounding_rect()))
+    }
+
+    #[test]
+    fn the_full_window_keeps_its_layout() {
+        // Inside the window's border.
+        let area = Rect::from_min_size(Pos2::ZERO, WINDOW_SIZE - Vec2::splat(2.0));
+        let parts = parts(area);
+        assert_eq!(parts.welcome, Rect::from_min_size(Pos2::new(72.0, 64.0), Vec2::new(1094.0, 80.0)));
+        assert_eq!(parts.headers, Rect::from_min_max(Pos2::new(72.0, 160.0), Pos2::new(272.0, 628.0)));
+        assert_eq!(parts.page, Rect::from_min_max(Pos2::new(312.0, 168.0), Pos2::new(1210.0, 620.0)));
+    }
+
+    #[test]
+    fn nothing_runs_under_the_footer_or_out_of_the_window() {
+        let pages = [(0, false), (0, true), (1, false), (2, false)];
+        for screen in SMALL_SCREENS.into_iter().chain([FULL_SCREEN]) {
+            for (tab, long_folders) in pages {
+                let context = context();
+                let (mut editor, mut onboard) = setup(tab, long_folders);
+                let (shapes, window) = settle(&context, screen, &mut editor, &mut onboard);
+                assert!(window.is_positive(), "no window at {screen:?}");
+                let what = format!("page {tab} (long folders {long_folders}) at {screen:?}");
+                assert_laid_out(&shapes, window, onboard.next_label, &what);
+            }
+        }
+    }
+
+    #[test]
+    fn laptop_screens_show_every_page_whole() {
+        // 1366 × 768 and 1280 × 720.
+        for screen in &SMALL_SCREENS[..2] {
+            for tab in 0..TABS.len() {
+                let context = context();
+                let (mut editor, mut onboard) = setup(tab, false);
+                let (shapes, window) = settle(&context, *screen, &mut editor, &mut onboard);
+                assert!(end_shows(&shapes, window, tab), "page {tab} at {screen:?} has to scroll");
+            }
+            // The styles side by side.
+            let context = context();
+            let (mut editor, mut onboard) = setup(1, false);
+            let (shapes, _) = settle(&context, *screen, &mut editor, &mut onboard);
+            let shown = shown(&shapes);
+            let top = |name: &str| shown.iter().find(|(_, shape)| text(shape) == Some(name)).map(|(rect, _)| rect.top()).expect(name);
+            assert!((top("Docked Panel") - top("Compact Buttons")).abs() < 1.0);
+            assert!((top("Nerthus Defaults") - top("Industry Standard")).abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn next_is_in_reach_on_small_screens() {
+        for screen in SMALL_SCREENS {
+            let context = context();
+            let (mut editor, mut onboard) = setup(0, false);
+            // Only the first two pages: on the last, Next finishes and
+            // writes the settings.
+            for expected in [1, 2] {
+                let (shapes, window) = settle(&context, screen, &mut editor, &mut onboard);
+                let position = button(&shown(&shapes), onboard.next_label, window).center();
+                let press = |pressed| Event::PointerButton { pos: position, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+                frame(&context, screen, &mut editor, &mut onboard, vec![Event::PointerMoved(position)]);
+                frame(&context, screen, &mut editor, &mut onboard, vec![press(true)]);
+                frame(&context, screen, &mut editor, &mut onboard, vec![press(false)]);
+                assert_eq!(onboard.tab, expected, "Next at {screen:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_page_scrolls_to_its_end_on_the_smallest_screen() {
+        let screen = SMALL_SCREENS[4];
+        for tab in 0..TABS.len() {
+            let context = context();
+            let (mut editor, mut onboard) = setup(tab, true);
+            let (shapes, window) = settle(&context, screen, &mut editor, &mut onboard);
+            assert!(!end_shows(&shapes, window, tab) || tab == 2, "page {tab} fits at {screen:?} without scrolling");
+            let page = page(window);
+            let wheel = Event::MouseWheel { unit: MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: TouchPhase::Move, modifiers: Modifiers::NONE };
+            frame(&context, screen, &mut editor, &mut onboard, vec![Event::PointerMoved(page.center())]);
+            frame(&context, screen, &mut editor, &mut onboard, vec![wheel]);
+            for _ in 0..60 {
+                frame(&context, screen, &mut editor, &mut onboard, Vec::new());
+            }
+            let (shapes, _) = frame(&context, screen, &mut editor, &mut onboard, Vec::new());
+            assert!(end_shows(&shapes, window, tab), "page {tab} does not scroll to its end");
+            assert_laid_out(&shapes, window, onboard.next_label, &format!("page {tab} scrolled"));
+        }
     }
 }
