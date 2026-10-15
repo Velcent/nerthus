@@ -43,6 +43,9 @@ const PORTS_SIDE: f32 = 8.0;
 const PORT_WIDTH: f32 = 20.0;
 const PORT_HEIGHT: f32 = 12.0;
 const PORT_DOT: f32 = 8.0;
+/// How far past its dot, towards the middle, a small node's port takes
+/// the pointer.
+const PORT_HIT_INSIDE: f32 = 4.0;
 /// `ConnectionElement.PortGap`.
 const PORT_GAP: f32 = 10.0;
 /// The circuit's horizontal run out of and into ports.
@@ -210,7 +213,9 @@ pub struct GraphState {
     pub snap_to_grid: bool,
     /// `GridUnit` (`Options.GridSize`): what nodes snap to.
     pub grid_unit: f32,
-    pub renaming: Option<i32>,
+    /// The node the inline name editor (F2) is open on and its name so
+    /// far; [`GraphState::start_renaming`] opens it.
+    renaming: Option<i32>,
     rename_text: String,
     pub zoom_request: Option<ZoomRequest>,
     /// Canvas point of the last right-click, where added nodes go.
@@ -343,6 +348,17 @@ impl GraphState {
         self.group_drag = None;
         self.group_states.clear();
         self.snap_lines.clear();
+    }
+
+    /// Opens the inline name editor (F2) on `node`, holding the node's
+    /// own name: never text an earlier rename left, on this node or
+    /// another.
+    pub fn start_renaming(&mut self, editor: &Editor, node: i32) {
+        let Some(data) = editor.document.node(node) else {
+            return;
+        };
+        self.renaming = Some(node);
+        self.rename_text = data.name.clone();
     }
 
     /// Closes the inline name editor (F2), dropping its text so the next
@@ -548,7 +564,17 @@ pub(crate) fn layout_node(node: &NodeData, default_size: &str) -> NodeLayout {
         // RefreshPoints: the element's centre, `PortGap` outwards.
         let anchor_x = if is_input { element.center().x - PORT_GAP } else { element.center().x + PORT_GAP };
         let anchor = Pos2::new(anchor_x, element.center().y);
-        let hit = element.expand2(Vec2::new(4.0, 2.0));
+        let mut hit = element.expand2(Vec2::new(4.0, 2.0));
+        // On a small node the two sides' elements meet across the middle:
+        // there a port takes the pointer near its dot only, leaving the
+        // icon between them to the node.
+        if size == NodeSize::Small {
+            if is_input {
+                hit.max.x = dot.right() + PORT_HIT_INSIDE;
+            } else {
+                hit.min.x = dot.left() - PORT_HIT_INSIDE;
+            }
+        }
         PortLayout {
             name: name.to_string(),
             label: String::new(),
@@ -900,7 +926,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     handle_background(ui, editor, state, &layouts, &frame.groups, &background, &connections, hovered_connection, origin, commands);
     handle_drops(ui, editor, state, &layouts, commands);
     draw_drag_overlay(ui, &painter, state, &layouts, origin, pointer);
-    rename_overlay(ui, editor, state, &layouts, origin, commands);
+    rename_overlay(ui, state, &layouts, origin, commands);
     graph_groups::rename_overlay(ui, editor, state, &frame.groups, origin);
     crate::ui::graph_popups::show(ui, editor, state, commands);
     ui.set_clip_rect(outer_clip);
@@ -1633,6 +1659,9 @@ fn handle_port_drags(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layou
     for (index, port, response) in ports {
         let node = layouts[*index].id;
         let collapsed = port.collapsed;
+        // A port has no menu of its own: a right-click on it goes on to
+        // its node's.
+        node_menu(response, editor, node, commands);
         // `PortElement.OnMouseDoubleClick` (Double-Click Connect): a
         // connection follows the pointer until the next click.
         if double_click_connect && response.double_clicked() {
@@ -1770,14 +1799,20 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
             let pointer_start = view.to_canvas(origin, pointer);
             start_element_drag(editor, state, id, pointer_start);
         }
-        response.context_menu(|ui| {
-            if !editor.selection.contains(&id) {
-                editor.select(Some(id));
-            }
-            node_context_menu(ui, editor, commands);
-        });
+        node_menu(&response, editor, id, commands);
     }
     drag_elements(ui, editor, state, layouts, groups, origin);
+}
+
+/// The node's context menu on a right-click of the node or one of its
+/// ports, the node selected unless it already is.
+fn node_menu(response: &Response, editor: &mut Editor, id: i32, commands: &mut Vec<Command>) {
+    response.context_menu(|ui| {
+        if !editor.selection.contains(&id) {
+            editor.select(Some(id));
+        }
+        node_context_menu(ui, editor, commands);
+    });
 }
 
 /// The drag of the selection begins: locked elements stay (`Locked`), and
@@ -2383,7 +2418,7 @@ fn draw_drag_overlay(ui: &Ui, painter: &egui::Painter, state: &GraphState, layou
 /// The inline name editor (F2): an `EditablePopup`, closing as
 /// [`crate::ui::widgets::popup_outcome`] says; a blank name is no name.
 /// The name taken goes to [`GraphCommand::RenameNode`].
-fn rename_overlay(ui: &mut Ui, editor: &Editor, state: &mut GraphState, layouts: &[NodeLayout], origin: Pos2, commands: &mut Vec<Command>) {
+fn rename_overlay(ui: &mut Ui, state: &mut GraphState, layouts: &[NodeLayout], origin: Pos2, commands: &mut Vec<Command>) {
     let Some(id) = state.renaming else {
         return;
     };
@@ -2391,11 +2426,6 @@ fn rename_overlay(ui: &mut Ui, editor: &Editor, state: &mut GraphState, layouts:
         state.stop_renaming();
         return;
     };
-    if state.rename_text.is_empty()
-        && let Some(node) = editor.document.node(id)
-    {
-        state.rename_text = node.name.clone();
-    }
     let view = state.view();
     let top_left = view.to_screen(origin, layout.rect.min + Vec2::new(46.0, 10.0));
     let size = Vec2::new(150.0 * view.zoom.max(0.6), 22.0);
@@ -3057,6 +3087,56 @@ mod tests {
     }
 
     #[test]
+    fn small_node_ports_leave_the_middle_to_the_node() {
+        // A small Combine, like Final in Alpine Valley: two inputs, which
+        // fill both rows on the left, and an output.
+        let mut document = Document::new();
+        let combine = document.add_node("Combine", [26100.0, 26100.0]).unwrap();
+        document.set_member(combine, "NodeSize", serde_json::json!("Small"), "Node size", false);
+        let mut editor = Editor::new(document);
+        let layout = layout_node(editor.document.node(combine).unwrap(), editor.user.options.default_node_size());
+        assert_eq!((layout.inputs.len(), layout.outputs.len()), (2, 1));
+
+        // Each port takes the pointer over its dot, but neither side reaches
+        // the icon in the middle or the other side.
+        let icon = Rect::from_center_size(layout.rect.center(), Vec2::splat(20.0));
+        for port in layout.ports() {
+            assert!(port.hit.contains_rect(port.dot), "{} {:?} misses its dot {:?}", port.name, port.hit, port.dot);
+            assert!(!port.hit.intersects(icon), "{} {:?} covers the icon {icon:?}", port.name, port.hit);
+        }
+        for input in &layout.inputs {
+            for output in &layout.outputs {
+                assert!(!input.hit.intersects(output.hit), "{} {:?} meets {} {:?}", input.name, input.hit, output.name, output.hit);
+            }
+        }
+
+        // A right-click in the middle, beside it in the output's row, or
+        // on a port's dot opens the node's menu.
+        let none = egui::Modifiers::NONE;
+        let output_row = layout.outputs[0].dot.center().y;
+        let points = [
+            ("the middle", layout.rect.center()),
+            ("the output's row", Pos2::new(layout.rect.center().x + 8.0, output_row)),
+            ("an input's dot", layout.inputs[1].dot.center()),
+            ("the output's dot", layout.outputs[0].dot.center()),
+        ];
+        for (place, at) in points {
+            let context = themed_context();
+            let mut state = GraphState::default();
+            editor.select(None);
+            graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+            let point = state.view().to_screen(state.rect.min, at);
+            let button = |pressed: bool| egui::Event::PointerButton { pos: point, button: PointerButton::Secondary, pressed, modifiers: none };
+            graph_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(point)], none);
+            graph_frame(&context, &mut editor, &mut state, vec![button(true)], none);
+            graph_frame(&context, &mut editor, &mut state, vec![button(false)], none);
+            graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+            assert!(egui::Popup::is_any_open(&context), "no menu opens on {place}");
+            assert_eq!(editor.selection, vec![combine], "the menu on {place} is not the node's");
+        }
+    }
+
+    #[test]
     fn the_name_editor_takes_enter_and_escape() {
         let mut editor = Editor::new(Document::new());
         let mut state = GraphState::default();
@@ -3076,7 +3156,7 @@ mod tests {
         let typed = |text: &str| egui::Event::Text(text.to_string());
 
         // F2 opens the box on the name; Enter takes what was typed.
-        state.renaming = Some(mountain);
+        state.start_renaming(&editor, mountain);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         assert_eq!(state.rename_text, mountain_name);
         graph_frame(&context, &mut editor, &mut state, vec![typed("Q")], none);
@@ -3087,7 +3167,7 @@ mod tests {
         assert_eq!(state.renaming, None);
 
         // Escape closes it and keeps the name.
-        state.renaming = Some(blur);
+        state.start_renaming(&editor, blur);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         graph_frame(&context, &mut editor, &mut state, vec![typed("y")], none);
         assert_eq!(state.rename_text, format!("{blur_name}y"));
@@ -3096,7 +3176,7 @@ mod tests {
         assert_eq!(state.renaming, None);
 
         // Closed by a click on the graph, it leaves no text for the next.
-        state.renaming = Some(mountain);
+        state.start_renaming(&editor, mountain);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         graph_frame(&context, &mut editor, &mut state, vec![typed("Zed")], none);
         let background = Pos2::new(600.0, 600.0);
@@ -3106,14 +3186,64 @@ mod tests {
         graph_frame(&context, &mut editor, &mut state, vec![button(false)], none);
         assert_eq!(state.renaming, None);
         assert!(state.rename_text.is_empty());
-        state.renaming = Some(blur);
+        state.start_renaming(&editor, blur);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         assert_eq!(state.rename_text, blur_name);
+
+        // Renaming another node while the box is still open starts on that
+        // node's name, not on what was typed for this one.
+        graph_frame(&context, &mut editor, &mut state, vec![typed("Q")], none);
+        assert_eq!(state.rename_text, format!("{blur_name}Q"));
+        state.start_renaming(&editor, mountain);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        assert_eq!(state.renaming, Some(mountain));
+        assert_eq!(state.rename_text, mountain_name);
+
+        // A name rubbed out stays rubbed out, ready for a new one.
+        let erase = vec![key(Key::Backspace); mountain_name.chars().count()];
+        graph_frame(&context, &mut editor, &mut state, erase, none);
+        assert!(state.rename_text.is_empty());
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        assert!(state.rename_text.is_empty());
+        graph_frame(&context, &mut editor, &mut state, vec![typed("Peak")], none);
+        assert_eq!(state.rename_text, "Peak");
 
         // Nor does a reset.
         state.reset();
         assert_eq!(state.renaming, None);
         assert!(state.rename_text.is_empty());
+    }
+
+    #[test]
+    fn f2_opens_the_name_editor_on_the_selected_node_s_name() {
+        let mut editor = Editor::new(Document::new());
+        let mut ui_state = crate::ui::UiState::default();
+        let mut window = bevy::prelude::Window::default();
+        let context = themed_context();
+        let none = egui::Modifiers::NONE;
+        graph_frame(&context, &mut editor, &mut ui_state.graph, Vec::new(), none);
+        let view = ui_state.graph.view();
+        let canvas_at = |x: f32, y: f32| {
+            let point = view.to_canvas(ui_state.graph.rect.min, Pos2::new(x, y));
+            [point.x, point.y]
+        };
+        let erosion = editor.document.add_node("Erosion", canvas_at(300.0, 200.0)).unwrap();
+        let snow = editor.document.add_node("Snow", canvas_at(700.0, 200.0)).unwrap();
+        let erosion_name = editor.document.node(erosion).unwrap().name.clone();
+        let snow_name = editor.document.node(snow).unwrap().name.clone();
+
+        editor.select(Some(erosion));
+        crate::ui::commands::run(vec![Command::Rename], &mut editor, &mut ui_state, &mut window);
+        graph_frame(&context, &mut editor, &mut ui_state.graph, Vec::new(), none);
+        graph_frame(&context, &mut editor, &mut ui_state.graph, vec![egui::Event::Text("Q".into())], none);
+        assert_eq!(ui_state.graph.rename_text, format!("{erosion_name}Q"));
+
+        // F2 on another node takes that node's name, whatever was typed.
+        editor.select(Some(snow));
+        crate::ui::commands::run(vec![Command::Rename], &mut editor, &mut ui_state, &mut window);
+        graph_frame(&context, &mut editor, &mut ui_state.graph, Vec::new(), none);
+        assert_eq!(ui_state.graph.renaming, Some(snow));
+        assert_eq!(ui_state.graph.rename_text, snow_name);
     }
 
     /// The canvas the graph shows.
