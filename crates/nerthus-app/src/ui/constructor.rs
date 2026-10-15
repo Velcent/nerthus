@@ -21,8 +21,9 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::editors::{self, SliderSpec};
+use crate::ui::graph_canvas::elided_galley;
 use crate::ui::tool_window;
-use crate::ui::widgets::{check_item, icon_menu, menu_separator, Tooltips};
+use crate::ui::widgets::{check_item, icon_menu, menu_separator, toolbar_button, Tooltips};
 
 /// The right column's narrowest and the left's (`MinWidth`s).
 const LIST_MIN_WIDTH: f32 = 300.0;
@@ -499,44 +500,73 @@ fn toolbar(ui: &mut Ui, window: &mut ConstructorWindow) {
     frame.inner_margin = egui::Margin::same(4);
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            // `tglColorize`, `btnRefresh`.
-            if icon_text_button(ui, "group-palette", "Colorize Previews", Some(window.colorize)).tooltip("Colorize Terrains").clicked() {
-                window.colorize = !window.colorize;
+        // The icons docked right go first, so the buttons on the left get
+        // only the room they leave.
+        let row = Vec2::new(ui.available_width(), BUTTON_HEIGHT.max(toolbar_button(ui)));
+        ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // `tglUpdateViewport`, then the Preview Resolution menu.
+            let toggled = crate::ui::widgets::icon_toggle(ui, "cube-plus", "Update 3D Viewport", window.update_viewport, theme::ACCENT_PRIMARY);
+            if toggled.clicked() {
+                window.update_viewport = !window.update_viewport;
             }
-            ui.separator();
-            if icon_text_button(ui, "rotate-360", "Refresh Previews", None).clicked() {
-                window.refresh = true;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // `tglUpdateViewport`, then the Preview Resolution menu.
-                let toggled = crate::ui::widgets::icon_toggle(ui, "cube-plus", "Update 3D Viewport", window.update_viewport, theme::ACCENT_PRIMARY);
-                if toggled.clicked() {
-                    window.update_viewport = !window.update_viewport;
+            icon_menu(ui, "cube", "Preview Resolution", None, |ui| {
+                for size in PREVIEW_SIZES {
+                    if check_item(ui, window.preview_size == size, &format!("{size} x {size}"), "").clicked() {
+                        window.preview_size = size;
+                    }
                 }
-                icon_menu(ui, "cube", "Preview Resolution", None, |ui| {
-                    for size in PREVIEW_SIZES {
-                        if check_item(ui, window.preview_size == size, &format!("{size} x {size}"), "").clicked() {
-                            window.preview_size = size;
-                        }
-                    }
-                    menu_separator(ui);
-                    // "Faster Previews" ticked renders faster.
-                    if check_item(ui, window.faster, "Faster Previews", "").clicked() {
-                        window.faster = !window.faster;
-                    }
-                });
+                menu_separator(ui);
+                // "Faster Previews" ticked renders faster.
+                if check_item(ui, window.faster, "Faster Previews", "").clicked() {
+                    window.faster = !window.faster;
+                }
+            });
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // `tglColorize`, `btnRefresh` in that room: they share it,
+                // the longer giving way first, and nothing of them is
+                // drawn, or answers the pointer, past it.
+                ui.shrink_clip_rect(ui.max_rect());
+                let room = ui.available_width() - (SEPARATOR + 2.0 * ui.spacing().item_spacing.x);
+                let refresh_width = icon_text_width(ui, "Refresh Previews");
+                let colorize_room = (room - refresh_width).max(room / 2.0);
+                let colorize = icon_text_button(ui, "group-palette", "Colorize Previews", Some(window.colorize), Some("Colorize Terrains"), colorize_room);
+                if colorize.clicked() {
+                    window.colorize = !window.colorize;
+                }
+                ui.add(egui::Separator::default().spacing(SEPARATOR));
+                if icon_text_button(ui, "rotate-360", "Refresh Previews", None, None, ui.available_width()).clicked() {
+                    window.refresh = true;
+                }
             });
         });
     });
 }
 
+/// `Button-IconText`'s height, and its width less its text's: the margins
+/// (8), the icon and the gap after it (6).
+const BUTTON_HEIGHT: f32 = 32.0;
+const BUTTON_MARGINS: f32 = 8.0 + icons::DEFAULT_SIZE + 6.0 + 8.0;
+/// The separator between the toolbar's buttons (egui's).
+const SEPARATOR: f32 = 6.0;
+
+/// The width of `icon_text_button` with the whole of `text`.
+fn icon_text_width(ui: &Ui, text: &str) -> f32 {
+    BUTTON_MARGINS + ui.painter().layout_no_wrap(text.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT).size().x
+}
+
 /// `ToggleButton-IconXText` / `Button-IconText`: an icon and its text;
-/// `on` for a toggle.
-fn icon_text_button(ui: &mut Ui, icon: &str, text: &str, on: Option<bool>) -> egui::Response {
-    let galley = ui.painter().layout_no_wrap(text.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
-    let size = Vec2::new(16.0 + 6.0 + galley.size().x + 16.0, 32.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+/// `on` for a toggle. No wider than `max_width`: the text is cut with "…"
+/// to fit, and left out when no more of it than the "…" fits. `tooltip`
+/// under the pointer, or the whole text when it is cut.
+fn icon_text_button(ui: &mut Ui, icon: &str, text: &str, on: Option<bool>, tooltip: Option<&str>, max_width: f32) -> egui::Response {
+    let room = max_width - BUTTON_MARGINS;
+    let galley = elided_galley(ui.painter(), text, theme::interface(12.0), theme::LABEL_DEFAULT, room.max(1.0));
+    let glyphs: usize = galley.rows.iter().map(|row| row.glyphs.len()).sum();
+    let galley = Some(galley).filter(|galley| !galley.elided || glyphs > 1);
+    let cut = galley.as_ref().is_none_or(|galley| galley.elided);
+    // Without its text, the icon in its margins.
+    let width = galley.as_ref().map_or(8.0 + icons::DEFAULT_SIZE + 8.0, |galley| BUTTON_MARGINS + galley.size().x);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, BUTTON_HEIGHT), Sense::click());
     let checked = on == Some(true);
     if checked {
         ui.painter().rect_filled(rect, 4.0, theme::BUTTON_PRESSED);
@@ -547,9 +577,14 @@ fn icon_text_button(ui: &mut Ui, icon: &str, text: &str, on: Option<bool>) -> eg
     let tint = if checked || response.hovered() { theme::LABEL_EMPHASIS } else { theme::ICON_DEFAULT };
     let icon_rect = Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.center().y - 8.0), Vec2::splat(icons::DEFAULT_SIZE));
     icons::paint(ui, icon_rect, icon, tint);
-    let text_position = Pos2::new(icon_rect.right() + 6.0, rect.center().y - galley.size().y / 2.0);
-    ui.painter().galley(text_position, galley, tint);
-    response
+    if let Some(galley) = galley {
+        let text_position = Pos2::new(icon_rect.right() + 6.0, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(text_position, galley, tint);
+    }
+    match tooltip.or(cut.then_some(text)) {
+        Some(tooltip) => response.tooltip(tooltip),
+        None => response,
+    }
 }
 
 /// `list`: a row a terrain, in the order they are placed: its colour, its
@@ -700,5 +735,117 @@ fn terrain_editor(ui: &mut Ui, editor: &mut Editor, window: &mut ConstructorWind
 fn slide(ui: &mut Ui, id: Id, label: &str, value: &mut f32, spec: &SliderSpec, colour: Color32) {
     if let Some(changed) = editors::slider(ui, id, label, *value as f64, spec, colour) {
         *value = changed as f32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::epaint::ClippedShape;
+
+    /// The side panel's width with the window at its 1280 by 720 (at 1600
+    /// by 960 and 120%), and squeezed into an 800 by 600 window at 120%.
+    const DEFAULT_WIDTH: f32 = 531.0;
+    const SQUEEZED_WIDTH: f32 = 300.0;
+    const WIDTHS: [f32; 7] = [170.0, 220.0, SQUEEZED_WIDTH, 340.0, 420.0, DEFAULT_WIDTH, 640.0];
+    const LABELS: [&str; 2] = ["Colorize Previews", "Refresh Previews"];
+
+    fn themed_context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        context
+    }
+
+    /// One frame of the toolbar in a panel `width` across, 20 in: what it
+    /// drew.
+    fn frame(context: &egui::Context, window: &mut ConstructorWindow, width: f32) -> Vec<ClippedShape> {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut output = context.run_ui(input, |ui| {
+            let mut panel = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(20.0, 0.0), Vec2::new(width, 400.0))));
+            panel.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+            toolbar(&mut panel, window);
+        });
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        shapes
+    }
+
+    /// The labels (what of them shows, "…" and all, where and their clip),
+    /// and the icons: the shapes drawn with a texture of their own, but
+    /// for the Preview Resolution menu's corner mark. Left to right.
+    fn labels_and_icons(shapes: &[ClippedShape]) -> (Vec<(String, Rect, Rect)>, Vec<Rect>) {
+        let mut labels = Vec::new();
+        let mut icons = Vec::new();
+        for clipped in shapes {
+            let bounds = clipped.shape.visual_bounding_rect();
+            match &clipped.shape {
+                Shape::Text(text) => {
+                    let shown = text.galley.rows.iter().flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr)).collect::<String>();
+                    labels.push((shown, bounds, clipped.clip_rect));
+                }
+                shape if shape.texture_id() != egui::TextureId::default() && bounds.width() >= icons::DEFAULT_SIZE => icons.push(bounds),
+                _ => {}
+            }
+        }
+        labels.sort_by(|one, other| one.1.left().total_cmp(&other.1.left()));
+        icons.sort_by(|one, other| one.left().total_cmp(&other.left()));
+        (labels, icons)
+    }
+
+    #[test]
+    fn the_buttons_keep_clear_of_the_icons_docked_right() {
+        let context = themed_context();
+        let mut window = ConstructorWindow::new(0);
+        for width in WIDTHS {
+            let shapes = frame(&context, &mut window, width);
+            let (labels, icons) = labels_and_icons(&shapes);
+            assert_eq!(icons.len(), 4, "at {width}, the four icons show");
+            // The Preview Resolution menu's and Update 3D Viewport's.
+            let docked = icons[2].left();
+            assert!(icons[1].right() < docked, "at {width}, Refresh Previews' icon {:?} clears the docked icons from {docked}", icons[1]);
+            let mut drawn: Vec<Rect> = icons.clone();
+            for (text, rect, clip) in &labels {
+                assert!(rect.right() < docked, "at {width}, {text:?} ({rect:?}) clears the docked icons from {docked}");
+                assert!(clip.contains_rect(*rect), "at {width}, {text:?} is not cut off");
+                drawn.push(*rect);
+            }
+            for (index, one) in drawn.iter().enumerate() {
+                assert!(one.left() >= 20.0 && one.right() <= 20.0 + width, "at {width}, {one:?} is in the panel");
+                for other in &drawn[index + 1..] {
+                    assert!(!one.intersects(*other), "at {width}, {one:?} and {other:?} overlap");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_labels_show_whole_where_there_is_room() {
+        let context = themed_context();
+        let mut window = ConstructorWindow::new(0);
+        for width in [DEFAULT_WIDTH, 640.0] {
+            let shapes = frame(&context, &mut window, width);
+            let (labels, _) = labels_and_icons(&shapes);
+            let texts: Vec<&str> = labels.iter().map(|(text, _, _)| text.as_str()).collect();
+            assert_eq!(texts, LABELS, "at {width}, both labels show whole");
+        }
+    }
+
+    #[test]
+    fn squeezed_the_labels_are_cut_then_left_out() {
+        let context = themed_context();
+        let mut window = ConstructorWindow::new(0);
+        let shapes = frame(&context, &mut window, SQUEEZED_WIDTH);
+        let (labels, _) = labels_and_icons(&shapes);
+        assert_eq!(labels.len(), 2, "at {SQUEEZED_WIDTH}, both labels show");
+        for ((shown, _, _), whole) in labels.iter().zip(LABELS) {
+            let kept = shown.strip_suffix('…').unwrap_or_else(|| panic!("at {SQUEEZED_WIDTH}, {whole:?} is cut, not {shown:?}"));
+            assert!(kept.len() > 1 && whole.starts_with(kept), "at {SQUEEZED_WIDTH}, {whole:?} is cut to {shown:?}");
+        }
+        let shapes = frame(&context, &mut window, 170.0);
+        let (labels, _) = labels_and_icons(&shapes);
+        assert!(labels.is_empty(), "at 170, the buttons are their icons alone, not {labels:?}");
     }
 }
