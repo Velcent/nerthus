@@ -949,18 +949,24 @@ pub fn keep_min_window_size(
 
 /// The 3D camera draws only into the viewport host.
 fn fit_camera(camera: &mut Camera, scale: f32, physical_size: UVec2, host: Rect) {
-    let physical_width = physical_size.x;
-    let physical_height = physical_size.y;
-    let left = (host.left() * scale).max(0.0) as u32;
-    let top = (host.top() * scale).max(0.0) as u32;
-    let width = ((host.width() * scale).max(1.0) as u32).min(physical_width.saturating_sub(left).max(1));
-    let height = ((host.height() * scale).max(1.0) as u32).min(physical_height.saturating_sub(top).max(1));
-    let viewport = Viewport {
-        physical_position: UVec2::new(left, top),
-        physical_size: UVec2::new(width, height),
-        ..default()
-    };
-    camera.viewport = Some(viewport);
+    let (physical_position, physical_size) = host_pixels(scale, physical_size, host);
+    camera.viewport = Some(Viewport { physical_position, physical_size, ..default() });
+}
+
+/// The whole physical pixels the viewport `host` (in points) covers at
+/// `scale`, as a position and a size: its edges rounded outward, left
+/// and top down and right and bottom up, so the scene reaches the frame
+/// at any scale. Its origin and size each rounded down left it 1 px
+/// short of the frame when both were fractional, as at 120%; the frame
+/// is painted over the pixel the two share. At least 1 by 1, inside the
+/// window's `physical_size`.
+fn host_pixels(scale: f32, physical_size: UVec2, host: Rect) -> (UVec2, UVec2) {
+    let edge = |points: f32, round: fn(f32) -> f32, most: u32| (round(points * scale).max(0.0) as u32).min(most);
+    let left = edge(host.left(), f32::floor, physical_size.x.saturating_sub(1));
+    let top = edge(host.top(), f32::floor, physical_size.y.saturating_sub(1));
+    let right = edge(host.right(), f32::ceil, physical_size.x).max(left + 1);
+    let bottom = edge(host.bottom(), f32::ceil, physical_size.y).max(top + 1);
+    (UVec2::new(left, top), UVec2::new(right - left, bottom - top))
 }
 
 /// `SetCursorPosition`: the pointer to the middle of the area a Lazy Menu
@@ -1337,5 +1343,40 @@ mod tests {
         let shown = window_of(&world);
         assert_eq!(shown.resize_constraints.min_width, 568.0);
         assert_eq!((shown.physical_width(), shown.physical_height()), (300, 200));
+    }
+
+    #[test]
+    fn the_3d_view_reaches_its_frame_at_any_scale() {
+        let window = UVec2::new(1920, 1152);
+        // 120%, the scale Nerthus starts at: the origin and size each
+        // rounded down stopped at column 1221 and row 484, which the host
+        // covers whole, leaving them the clear colour.
+        let host = Rect::from_min_max(Pos2::new(10.4, 30.4), Pos2::new(1018.4, 404.4));
+        assert_eq!(host_pixels(1.2, window, host), (UVec2::new(12, 36), UVec2::new(1211, 450)));
+        // Whole pixels stay as they are.
+        let whole = Rect::from_min_max(Pos2::new(10.0, 30.0), Pos2::new(1018.0, 404.0));
+        assert_eq!(host_pixels(1.0, window, whole), (UVec2::new(10, 30), UVec2::new(1008, 374)));
+        // Every pixel the host touches is drawn, and no more.
+        for scale in [0.75, 1.0, 1.2, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            for fraction in [0.0, 0.1, 0.33, 0.5, 0.67, 0.9] {
+                let host = Rect::from_min_size(Pos2::new(8.0 + fraction, 30.0 + fraction), Vec2::new(600.0 + fraction, 400.0 - fraction));
+                let (position, size) = host_pixels(scale, window, host);
+                let (start, end) = (position.as_vec2(), (position + size).as_vec2());
+                let (least, most) = (host.min * scale, host.max * scale);
+                assert!(start.x <= least.x && start.y <= least.y, "{scale}, {fraction}: {start} after {least:?}");
+                assert!(end.x >= most.x && end.y >= most.y, "{scale}, {fraction}: {end} before {most:?}");
+                assert!(least.x - start.x < 1.0 && least.y - start.y < 1.0, "{scale}, {fraction}: {start} before {least:?}");
+                assert!(end.x - most.x < 1.0 && end.y - most.y < 1.0, "{scale}, {fraction}: {end} after {most:?}");
+            }
+        }
+        // Kept inside the window, and at least a pixel.
+        let past = Rect::from_min_max(Pos2::new(1900.0, 1100.0), Pos2::new(2000.0, 1200.0));
+        assert_eq!(host_pixels(1.0, window, past), (UVec2::new(1900, 1100), UVec2::new(20, 52)));
+        let beyond = Rect::from_min_max(Pos2::new(2000.0, 0.0), Pos2::new(2100.0, 10.0));
+        assert_eq!(host_pixels(1.0, window, beyond), (UVec2::new(1919, 0), UVec2::new(1, 10)));
+        let before = Rect::from_min_max(Pos2::new(-10.0, -10.0), Pos2::new(100.0, 100.0));
+        assert_eq!(host_pixels(1.0, window, before), (UVec2::ZERO, UVec2::new(100, 100)));
+        let empty = Rect::from_min_max(Pos2::new(5.0, 5.0), Pos2::new(5.0, 5.0));
+        assert_eq!(host_pixels(1.0, window, empty), (UVec2::new(5, 5), UVec2::ONE));
     }
 }
