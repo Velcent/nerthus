@@ -565,17 +565,17 @@ pub fn slider(ui: &mut Ui, id: Id, label: &str, value: f64, spec: &SliderSpec, c
     // `_displayName` (margin 10, -1, 8, 0) and `_valueDisplay` (18 high,
     // margin 0, 3, 10, 1, monospace 13).
     // The value keeps its room; the name gets what is left, trimmed, and
-    // nothing leaves the bar. The name hides while the nudge bar shows
-    // (`NudgePopup_Opened`).
+    // nothing leaves the bar. Both hide while the nudge bar shows
+    // (`NudgePopup_Opened`): its box holds the value.
     let text_painter = painter.with_clip_rect(content);
     let shown = spec.format(value, settings.precise_values);
     let shown_color = color.gamma_multiply(value_opacity);
     let value_galley = painter.layout_no_wrap(shown, theme::monospace(13.0), shown_color);
     let value_box_top = content.top() + 3.0 + (content.height() - 4.0 - 18.0) / 2.0;
     let value_rect = Rect::from_min_size(Pos2::new(content.right() - 10.0 - value_galley.size().x, value_box_top), Vec2::new(value_galley.size().x, 18.0));
-    text_painter.galley(value_rect.min, value_galley, shown_color);
     let nudging = slider_popups::nudge_open(ui.ctx(), nudge_id).is_some();
     if !nudging {
+        text_painter.galley(value_rect.min, value_galley, shown_color);
         let label_color = color.gamma_multiply(control_opacity);
         let label_left = content.left() + 10.0;
         let label_room = value_rect.left() - 8.0 - label_left;
@@ -618,11 +618,13 @@ pub fn slider(ui: &mut Ui, id: Id, label: &str, value: f64, spec: &SliderSpec, c
         }
         return typed_value(ui.ctx(), &text, spec).filter(|new_value| (new_value - value).abs() > f64::EPSILON);
     }
-    // The bar: 2 left of and above the slider's bar, as wide as the whole
-    // control.
+    // The bar: 2 left of and above the slider's bar, and 2 past its right,
+    // short of the parameter menu beside the control.
+    let nudge_top_left = track.min - Vec2::splat(2.0 * popup_scale);
+    let nudge_right = (track.right() + 2.0 * popup_scale).min(content.right());
     let nudge_look = NudgeLook {
-        top_left: track.min - Vec2::splat(2.0 * popup_scale),
-        width: row.width(),
+        top_left: nudge_top_left,
+        width: nudge_right - nudge_top_left.x,
         color,
         has_default: spec.default.is_some(),
     };
@@ -785,8 +787,9 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
 
     // The two values keep their room; the name sits between them,
     // trimmed, and nothing leaves the bar. The range (`Panel.ZIndex` 50)
-    // and the thumbs (100) lie over them. The name hides while the nudge
-    // bar shows (`NudgePopup_Opened`).
+    // and the thumbs (100) lie over them. The name and the values hide
+    // while the nudge bar shows (`NudgePopup_Opened`): its box holds the
+    // value it steps.
     let text_painter = painter.with_clip_rect(content);
     let text_color = accent.gamma_multiply(opacity);
     let precise = theme::settings(ui.ctx()).precise_values;
@@ -798,11 +801,14 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
     let value_top = content.top() + 2.0 + (content.height() - 3.0 - 15.0) / 2.0;
     let low_rect = Rect::from_min_size(Pos2::new(content.left() + 8.0, value_top), Vec2::new(low_galley.size().x, 15.0));
     let high_rect = Rect::from_min_size(Pos2::new(content.right() - 8.0 - high_galley.size().x, value_top), Vec2::new(high_galley.size().x, 15.0));
-    text_painter.galley(low_rect.min, low_galley, text_color);
-    text_painter.galley(high_rect.min, high_galley, text_color);
     let nudge_end = slider_popups::nudge_open(ui.ctx(), nudge_id).flatten();
+    let nudging = nudge_end.is_some();
+    if !nudging {
+        text_painter.galley(low_rect.min, low_galley, text_color);
+        text_painter.galley(high_rect.min, high_galley, text_color);
+    }
     if let RangeLook::Accent { label, .. } = look
-        && nudge_end.is_none()
+        && !nudging
     {
         let name_room = (high_rect.left() - low_rect.right() - 16.0).min(content.width());
         let name_galley = fitted_line(ui, label, theme::interface(12.0), text_color, name_room);
@@ -888,15 +894,17 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
         return changed(typed.0, typed.1);
     }
     // The bar covers the control from 2 before the sliders' corner (they
-    // sit 2 in), as wide as the whole control; its buttons take the
-    // style's accent.
+    // sit 2 in) to 2 past their right, short of the parameter menu beside
+    // it; its buttons take the style's accent.
     let button_color = match look {
         RangeLook::Accent { color, .. } => *color,
         RangeLook::Palette(_) => theme::ACCENT_PRIMARY,
     };
+    let nudge_top_left = track.min - Vec2::splat(2.0 * popup_scale);
+    let nudge_right = (track.right() + 2.0 * popup_scale).min(content.right());
     let nudge_look = NudgeLook {
-        top_left: content.min + Vec2::splat(2.0 - 2.0 * popup_scale),
-        width: row.width(),
+        top_left: nudge_top_left,
+        width: nudge_right - nudge_top_left.x,
         color: button_color,
         has_default: spec.default.is_some(),
     };
@@ -2632,13 +2640,14 @@ mod tests {
         // Up 10, the eighth button: a tenth of the range, and the box
         // follows.
         let bar_left = SLIDER_ROW.left() + 20.0 + 3.5 - 2.0;
-        let up_ten = Pos2::new(bar_left + 7.0 * 28.0 + 14.0, SLIDER_ROW.top() + 1.0 - 2.0 + 13.0);
+        let (button, _) = slider_popups::nudge_widths(SLIDER_ROW.right() - 3.5 + 2.0 - bar_left, 1.0);
+        let up_ten = Pos2::new(bar_left + 7.5 * button, SLIDER_ROW.top() + 1.0 - 2.0 + 13.0);
         let changes = left_click(&context, 0.25, &spec, up_ten);
         let changed = changes.into_iter().flatten().next().expect("Up 10 changes the value");
         assert!((changed - 0.35).abs() < 1e-6, "{changed}");
         assert_eq!(slider_popups::nudge_text(&context, nudge_id).as_deref(), Some("0.3500"));
         // The box takes a formula with Enter.
-        let field = Pos2::new(bar_left + 9.0 * 28.0 + 6.0 + 20.0, up_ten.y);
+        let field = Pos2::new(bar_left + 9.0 * button + 6.0 + 20.0, up_ten.y);
         left_click(&context, 0.35, &spec, field);
         slider_frame(&context, 0.35, &spec, vec![egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }]);
         slider_frame(&context, 0.35, &spec, vec![egui::Event::Text("1/8".to_string())]);
@@ -2650,6 +2659,78 @@ mod tests {
         assert!(slider_popups::nudge_text(&context, nudge_id).is_some());
         slider_frame(&context, 0.25, &spec, vec![egui::Event::PointerMoved(Pos2::new(120.0, 150.0))]);
         assert!(slider_popups::nudge_text(&context, nudge_id).is_none());
+    }
+
+    /// The texts a frame of `draw` in the slider row painted, and where.
+    fn painted_texts(context: &egui::Context, mut draw: impl FnMut(&mut Ui)) -> Vec<(String, Rect)> {
+        let output = context.run_ui(frame_input(Vec::new(), egui::Modifiers::NONE), |ui| {
+            let mut row = ui.new_child(egui::UiBuilder::new().max_rect(SLIDER_ROW));
+            draw(&mut row);
+        });
+        let texts = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((text.galley.text().to_string(), Rect::from_min_size(text.pos, text.galley.size()))),
+                _ => None,
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+        texts
+    }
+
+    /// Opens the slider's nudge bar `along` its width, the interface at
+    /// `scale`: the bar, and the texts the slider and the bar painted.
+    fn nudge_shown(scale: f32, along: f32, mut draw: impl FnMut(&mut Ui)) -> (Rect, Vec<(String, Rect)>) {
+        let context = themed_context();
+        context.set_zoom_factor(scale);
+        slider_popups::request_right_click(&context, slider_id(), along);
+        // The pass it opens in, then one with it in place.
+        painted_texts(&context, &mut draw);
+        let texts = painted_texts(&context, &mut draw);
+        let bar = context.memory(|memory| memory.area_rect(slider_id().with("nudge").with("area"))).expect("the bar shows");
+        (bar, texts)
+    }
+
+    #[test]
+    fn the_nudge_bar_keeps_to_its_slider_and_shows_the_value_in_its_box() {
+        let spec = SliderSpec::linear(0.0, 1.0);
+        let draw = |ui: &mut Ui| {
+            slider(ui, slider_id(), "Scale", 0.25, &spec, Color32::WHITE);
+        };
+        assert!(painted_texts(&themed_context(), draw).iter().any(|(text, _)| text == "0.25"));
+        for scale in [0.8, 1.0, 1.2] {
+            let (bar, texts) = nudge_shown(scale, 0.3, draw);
+            // Areas sit on whole pixels: within one of the slider's bar,
+            // short of the parameter menu past the row.
+            let pixel = 1.0 / scale;
+            let content = Rect::from_min_max(Pos2::new(SLIDER_ROW.left() + 20.0, SLIDER_ROW.top()), SLIDER_ROW.max);
+            assert!(bar.left() >= content.left() - pixel && bar.right() <= content.right() + pixel, "at {scale}: {bar:?} leaves {content:?}");
+            let (_, boxed) = texts.iter().find(|(text, _)| text == "0.2500").unwrap_or_else(|| panic!("at {scale}: the box shows"));
+            assert!(bar.contains_rect(*boxed), "at {scale}: the box's text {boxed:?} leaves {bar:?}");
+            // The slider's own value hides under it.
+            assert!(!texts.iter().any(|(text, _)| text == "0.25"), "at {scale}: the value shows under the bar");
+        }
+    }
+
+    #[test]
+    fn a_range_nudge_bar_keeps_to_its_slider_and_hides_both_values() {
+        let spec = RangeSpec::linear(0.0, 1.0);
+        let draw = |ui: &mut Ui| {
+            range_slider(ui, slider_id(), "Range", 0.2, 0.6, &spec, Color32::WHITE);
+        };
+        let closed = painted_texts(&themed_context(), draw);
+        assert!(closed.iter().any(|(text, _)| text == "0.20") && closed.iter().any(|(text, _)| text == "0.60"));
+        for scale in [0.8, 1.0, 1.2] {
+            // The low end's bar: its box on the left.
+            let (bar, texts) = nudge_shown(scale, 0.3, draw);
+            let pixel = 1.0 / scale;
+            let content = Rect::from_min_max(Pos2::new(SLIDER_ROW.left() + 20.0, SLIDER_ROW.top()), SLIDER_ROW.max);
+            assert!(bar.left() >= content.left() - pixel && bar.right() <= content.right() + pixel, "at {scale}: {bar:?} leaves {content:?}");
+            let (_, boxed) = texts.iter().find(|(text, _)| text == "0.2000").unwrap_or_else(|| panic!("at {scale}: the box shows"));
+            assert!(bar.contains_rect(*boxed) && boxed.center().x < bar.center().x, "at {scale}: the box's text {boxed:?} in {bar:?}");
+            assert!(!texts.iter().any(|(text, _)| text == "0.20" || text == "0.60"), "at {scale}: a value shows under the bar");
+        }
     }
 
     #[test]
