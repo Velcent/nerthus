@@ -55,7 +55,7 @@ pub fn macro_folders(project: Option<&Path>) -> Vec<PathBuf> {
 pub enum FileCommand {
     /// File › New (Ctrl N).
     New,
-    /// File › Open… (Ctrl O).
+    /// File › Open... (Ctrl O).
     Open,
     /// A file from Open Recent, the latest one (Ctrl Shift O), or a
     /// project dropped on the window.

@@ -18,6 +18,10 @@ use crate::ui::tool_window;
 const DEBOUNCE_SECONDS: f64 = 0.5;
 /// The map the check runs over.
 const CHECK_SIZE: usize = 16;
+/// The expression box's least height, however short the window.
+const MIN_BOX_HEIGHT: f32 = 80.0;
+/// The buttons' height.
+const BUTTON_HEIGHT: f32 = 28.0;
 
 /// The window while it is open.
 #[derive(Clone, Debug)]
@@ -72,50 +76,63 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor) {
     // 480 × 400 at the interface scale (the window's `UIScaler`).
     window = tool_window::place(ctx, window, window_id().with("window"), Vec2::new(480.0, 400.0));
     window.show(ctx, |ui| {
-        let bottom_height = 24.0 + 28.0;
-        let help = RichText::new("Use a, b, c to access inputs. Use x, y for coordinates.").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT.gamma_multiply(0.7));
-        let editor_height = (ui.available_height() - bottom_height - 60.0).max(80.0);
-        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = syntax_box::highlight(text.as_str(), theme::monospace(14.0));
-            job.wrap.max_width = wrap_width;
-            ui.fonts_mut(|fonts| fonts.layout_job(job))
-        };
-        ui.add_space(8.0);
         let box_id = window_id().with("expression");
+        // Tab and Enter are the `SyntaxBox`'s, taken before the box runs.
         let changed_by_keys = syntax_box::take_keys(ui, box_id, &mut state.text);
-        let mut text_edit = egui::TextEdit::multiline(&mut state.text);
-        text_edit = text_edit.id(box_id);
-        text_edit = text_edit.font(theme::monospace(14.0));
-        text_edit = text_edit.desired_width(f32::INFINITY);
-        text_edit = text_edit.code_editor();
-        // Tab and Enter are the `SyntaxBox`'s.
-        text_edit = text_edit.return_key(None);
-        text_edit = text_edit.layouter(&mut layouter);
-        let scroll = egui::ScrollArea::vertical().max_height(editor_height).id_salt("math-expression");
-        let response = scroll.show(ui, |ui| ui.add_sized(Vec2::new(ui.available_width(), editor_height), text_edit)).inner;
-        if response.changed() || changed_by_keys {
-            state.changed_at = Some(now);
-        }
-        ui.add_space(8.0);
-        ui.add(egui::Label::new(help).wrap());
-        if let Some((message, valid)) = &state.result {
-            let accent = if *valid { theme::ACCENT_MUTED_GREEN } else { theme::ACCENT_MUTED_RED };
-            let result = RichText::new(message.as_str()).font(theme::monospace_bold(12.0)).color(accent.gamma_multiply(0.7));
-            ui.add_space(6.0);
-            ui.add(egui::Label::new(result).wrap());
-        }
-        ui.add_space(24.0);
-        ui.horizontal(|ui| {
-            if apply_button(ui).clicked() {
-                action = Some(MathAction::Apply);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if dialog_button(ui, "Cancel", false).clicked() {
-                    action = Some(MathAction::Cancel);
+        // From the bottom up: the buttons, the check's result and the help
+        // go in first and the box takes the room left above them, so that
+        // the window keeps its size whatever shows under the box.
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            // As tall as the buttons, which would otherwise hang below the
+            // window's bottom and make it grow.
+            let row = Vec2::new(ui.available_width(), BUTTON_HEIGHT);
+            ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if apply_button(ui).clicked() {
+                    action = Some(MathAction::Apply);
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if dialog_button(ui, "Cancel", false).clicked() {
+                        action = Some(MathAction::Cancel);
+                    }
+                    ui.add_space(8.0);
+                    if dialog_button(ui, "Accept Changes", true).clicked() {
+                        action = Some(MathAction::Accept);
+                    }
+                });
+            });
+            ui.add_space(24.0);
+            if let Some((message, valid)) = &state.result {
+                let accent = if *valid { theme::ACCENT_MUTED_GREEN } else { theme::ACCENT_MUTED_RED };
+                let result = RichText::new(message.as_str()).font(theme::monospace_bold(12.0)).color(accent.gamma_multiply(0.7));
+                ui.add(egui::Label::new(result).wrap());
+                ui.add_space(6.0);
+            }
+            let help = RichText::new("Use a, b, c to access inputs. Use x, y for coordinates.").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT.gamma_multiply(0.7));
+            ui.add(egui::Label::new(help).wrap());
+            ui.add_space(8.0);
+            // In a window too short for the box it reaches up past the
+            // window's top, and the window grows once to fit it.
+            let room = Vec2::new(ui.available_width(), ui.available_height().max(8.0 + MIN_BOX_HEIGHT));
+            ui.allocate_ui_with_layout(room, egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.add_space(8.0);
-                if dialog_button(ui, "Accept Changes", true).clicked() {
-                    action = Some(MathAction::Accept);
+                let editor_height = ui.available_height();
+                let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+                    let mut job = syntax_box::highlight(text.as_str(), theme::monospace(14.0));
+                    job.wrap.max_width = wrap_width;
+                    ui.fonts_mut(|fonts| fonts.layout_job(job))
+                };
+                let mut text_edit = egui::TextEdit::multiline(&mut state.text);
+                text_edit = text_edit.id(box_id);
+                text_edit = text_edit.font(theme::monospace(14.0));
+                text_edit = text_edit.desired_width(f32::INFINITY);
+                text_edit = text_edit.code_editor();
+                // Tab and Enter are the `SyntaxBox`'s.
+                text_edit = text_edit.return_key(None);
+                text_edit = text_edit.layouter(&mut layouter);
+                let scroll = egui::ScrollArea::vertical().max_height(editor_height).id_salt("math-expression");
+                let response = scroll.show(ui, |ui| ui.add_sized(Vec2::new(ui.available_width(), editor_height), text_edit)).inner;
+                if response.changed() || changed_by_keys {
+                    state.changed_at = Some(now);
                 }
             });
         });
@@ -179,7 +196,7 @@ fn check_expression(editor: &Editor, node: i32, text: &str) -> (String, bool) {
 /// `Button-IconText-Bordered` with `player-play`: Apply and Run.
 fn apply_button(ui: &mut egui::Ui) -> egui::Response {
     let galley = ui.painter().layout_no_wrap("Apply and Run".to_string(), theme::interface(12.0), theme::LABEL_EMPHASIS);
-    let size = Vec2::new(8.0 + 16.0 + 6.0 + galley.size().x + 10.0, 28.0);
+    let size = Vec2::new(8.0 + 16.0 + 6.0 + galley.size().x + 10.0, BUTTON_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let fill = if response.hovered() { theme::BUTTON_HOVER } else { theme::BUTTON_BACKGROUND };
     ui.painter().rect_filled(rect, 2.0, fill);
@@ -197,6 +214,142 @@ fn dialog_button(ui: &mut egui::Ui, text: &str, important: bool) -> egui::Respon
     let mut widget = egui::Button::new(label);
     widget = widget.fill(theme::BUTTON_BACKGROUND);
     widget = widget.stroke(Stroke::new(1.0, border));
-    widget = widget.min_size(Vec2::new(80.0, 28.0));
+    widget = widget.min_size(Vec2::new(80.0, BUTTON_HEIGHT));
     ui.add(widget)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use egui::{AreaState, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect};
+
+    /// 1600 × 960 at 120%, in points.
+    const SCREEN: Vec2 = Vec2::new(1333.0, 800.0);
+
+    fn context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context
+    }
+
+    /// The editor with a Math node holding `expression`, and the window
+    /// open on it.
+    fn opened(context: &egui::Context, expression: &str) -> Editor {
+        let mut editor = Editor::new(Document::new());
+        let node = editor.document.add_node("MathX", [25100.0, 25100.0]).unwrap();
+        editor.document.set_value(node, "Expression", Value::from(expression));
+        open(context, &editor, node);
+        editor
+    }
+
+    /// A frame at `time` with these events. Returns the window's rect.
+    fn frame(context: &egui::Context, editor: &mut Editor, time: f64, events: Vec<Event>) -> Rect {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)), time: Some(time), events, ..Default::default() };
+        let output = context.run_ui(input, |ui| show(ui.ctx(), editor));
+        output.drop_without_applying_deltas();
+        let rect = AreaState::load(context, window_id().with("window")).filter(|area| area.size.is_some()).map(|area| area.rect());
+        rect.unwrap_or(Rect::NOTHING)
+    }
+
+    fn box_rect(context: &egui::Context) -> Rect {
+        context.read_response(window_id().with("expression")).map(|response| response.rect).unwrap_or(Rect::NOTHING)
+    }
+
+    fn result(context: &egui::Context) -> Option<(String, bool)> {
+        context.data(|data| data.get_temp::<MathEditor>(window_id())).and_then(|state| state.result)
+    }
+
+    fn key(key: Key) -> Event {
+        Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    /// Types `typed` at the end of the box, lets the check run, then moves
+    /// the pointer over the app for a while. Returns the window's rect and
+    /// the box's before the typing, and each frame's after the check.
+    fn type_and_wait(typed: &str, valid: bool) -> ((Rect, Rect), Vec<(Rect, Rect)>) {
+        let context = context();
+        let mut editor = opened(&context, "a");
+        let mut time = 0.0;
+        let mut before = Rect::NOTHING;
+        for _ in 0..5 {
+            before = frame(&context, &mut editor, time, Vec::new());
+            time += 0.1;
+        }
+        let box_before = box_rect(&context);
+        context.memory_mut(|memory| memory.request_focus(window_id().with("expression")));
+        frame(&context, &mut editor, time, Vec::new());
+        frame(&context, &mut editor, time, vec![key(Key::End)]);
+        frame(&context, &mut editor, time, vec![Event::Text(typed.to_string())]);
+        // Past the half second the check waits for.
+        time += 1.0;
+        frame(&context, &mut editor, time, Vec::new());
+        let (_, passed) = result(&context).expect("the check did not run");
+        assert_eq!(passed, valid, "{:?}", result(&context));
+        let mut after = Vec::new();
+        for step in 0..60 {
+            time += 1.0 / 30.0;
+            let pointer = Pos2::new(100.0 + step as f32 * 15.0, 400.0 + (step % 7) as f32 * 20.0);
+            let rect = frame(&context, &mut editor, time, vec![Event::PointerMoved(pointer)]);
+            after.push((rect, box_rect(&context)));
+        }
+        ((before, box_before), after)
+    }
+
+    fn assert_keeps_its_size(typed: &str, valid: bool) {
+        let ((before, box_before), after) = type_and_wait(typed, valid);
+        let body = tool_window::body(&context());
+        assert!(body.expand(0.5).contains_rect(before), "{before:?} is outside the body {body:?}");
+        for (rect, expression) in after {
+            assert!((rect.size() - before.size()).abs().max_elem() <= 0.5, "the window grew from {before:?} to {rect:?}");
+            assert!((rect.min - before.min).abs().max_elem() <= 0.5, "the window moved from {before:?} to {rect:?}");
+            // The box gives up the room the result line takes.
+            assert!(expression.height() < box_before.height(), "the box kept {box_before:?}: {expression:?}");
+            assert!(expression.height() > 150.0, "the box is only {expression:?}");
+            assert!(rect.contains_rect(expression), "the box {expression:?} is outside the window {rect:?}");
+        }
+    }
+
+    #[test]
+    fn the_window_keeps_its_size_once_the_expression_is_valid() {
+        assert_keeps_its_size(" + 1", true);
+    }
+
+    #[test]
+    fn the_window_keeps_its_size_once_the_expression_has_an_error() {
+        assert_keeps_its_size(" +* (", false);
+    }
+
+    #[test]
+    fn a_window_made_too_short_for_the_box_settles() {
+        let context = context();
+        let mut editor = opened(&context, "a");
+        let mut time = 0.0;
+        let mut rect = Rect::NOTHING;
+        for _ in 0..5 {
+            rect = frame(&context, &mut editor, time, Vec::new());
+            time += 0.1;
+        }
+        // Its bottom edge dragged up most of the way to its title bar.
+        let from = Pos2::new(rect.center().x, rect.bottom() - 1.0);
+        let to = Pos2::new(from.x, rect.top() + 60.0);
+        let button = |pos: Pos2, pressed: bool| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        for events in [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(from.lerp(to, 0.5))], vec![Event::PointerMoved(to)], vec![button(to, false)]] {
+            frame(&context, &mut editor, time, events);
+            time += 0.1;
+        }
+        let mut rects = Vec::new();
+        for _ in 0..30 {
+            rects.push(frame(&context, &mut editor, time, Vec::new()));
+            time += 1.0 / 30.0;
+        }
+        let settled = rects[10];
+        assert!(settled.height() < rect.height() - 50.0, "{settled:?} was not made shorter than {rect:?}");
+        for later in &rects[10..] {
+            assert!((later.size() - settled.size()).abs().max_elem() <= 0.5, "the window went on from {settled:?} to {later:?}");
+        }
+        let expression = box_rect(&context);
+        assert!(expression.height() >= MIN_BOX_HEIGHT - 0.5, "the box is only {expression:?}");
+        assert!(settled.contains_rect(expression), "the box {expression:?} is outside the window {settled:?}");
+    }
 }

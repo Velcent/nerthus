@@ -21,24 +21,24 @@ pub fn file_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     if menu_item(ui, Some("file-broken"), Some(theme::ACCENT_PRIMARY), "New", "Ctrl N").clicked() {
         commands.push(Command::NewProject);
     }
-    if menu_item(ui, Some("folder"), None, "Open…", "Ctrl O").clicked() {
+    if menu_item(ui, Some("folder"), None, "Open...", "Ctrl O").clicked() {
         commands.push(Command::Open);
     }
     submenu(ui, None, None, "Open Recent", |ui| {
         menu_style(ui);
         recent_files(ui, editor, commands);
     });
-    if menu_item(ui, None, None, "Open Examples…", "").clicked() {
+    if menu_item(ui, None, None, "Open Examples...", "").clicked() {
         commands.push(Command::File(FileCommand::OpenExamples));
     }
     if menu_item(ui, Some("input-spark"), Some(theme::ACCENT_YELLOW), "Start Dialog", "").clicked() {
         commands.push(Command::File(FileCommand::StartDialog));
     }
     menu_separator(ui);
-    if menu_item(ui, Some("device-floppy"), Some(theme::ACCENT_BLUE), "Save…", "Ctrl S").clicked() {
+    if menu_item(ui, Some("device-floppy"), Some(theme::ACCENT_BLUE), "Save...", "Ctrl S").clicked() {
         commands.push(Command::Save);
     }
-    if menu_item(ui, Some("device-floppy"), None, "Save as…", "Ctrl Shift S").clicked() {
+    if menu_item(ui, Some("device-floppy"), None, "Save as...", "Ctrl Shift S").clicked() {
         commands.push(Command::SaveAs);
     }
     if menu_item(ui, Some("copy-plus"), None, "Save incremental", "").clicked() {
@@ -48,13 +48,13 @@ pub fn file_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     // The web build has no files to repair or import, nor macros to
     // export, and its window is the browser's tab.
     let web = cfg!(target_arch = "wasm32");
-    if !web && menu_item(ui, None, None, "Repair File…", "").clicked() {
+    if !web && menu_item(ui, None, None, "Repair File...", "").clicked() {
         commands.push(Command::File(FileCommand::RepairFile));
     }
     if !web {
         submenu(ui, None, None, "Import", |ui| {
             menu_style(ui);
-            let items = [("Macro…", FileCommand::ImportMacro), ("Graph…", FileCommand::ImportGraph), ("TORLET…", FileCommand::ImportTorlet), ("Image…", FileCommand::ImportImage)];
+            let items = [("Macro...", FileCommand::ImportMacro), ("Graph...", FileCommand::ImportGraph), ("TORLET...", FileCommand::ImportTorlet), ("Image...", FileCommand::ImportImage)];
             for (text, command) in items {
                 if menu_item(ui, None, None, text, "").clicked() {
                     commands.push(Command::File(command));
@@ -64,7 +64,7 @@ pub fn file_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     }
     submenu(ui, None, None, "Export", |ui| {
         menu_style(ui);
-        let items = [("Macro…", FileCommand::ExportMacro), ("TORLET…", FileCommand::ExportTorlet)];
+        let items = [("Macro...", FileCommand::ExportMacro), ("TORLET...", FileCommand::ExportTorlet)];
         for (text, command) in items {
             let shown = !web || command != FileCommand::ExportMacro;
             if shown && menu_item(ui, None, None, text, "").clicked() {
@@ -72,7 +72,7 @@ pub fn file_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
             }
         }
     });
-    menu_item_enabled(ui, Some("file-barcode"), None, "Share…", "", false);
+    menu_item_enabled(ui, Some("file-barcode"), None, "Share...", "", false);
     if !web {
         menu_separator(ui);
         if menu_item(ui, None, Some(theme::ACCENT_RED), "Exit", "Alt F4").clicked() {
@@ -296,7 +296,6 @@ fn bake_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>, reload_i
             }
         }
         menu_separator(ui);
-        menu_separator(ui);
         if reload_item {
             if menu_item(ui, None, None, "Reload SmartCache to RAM", "").clicked() {
                 commands.push(Command::ReloadSmartCache);
@@ -371,7 +370,7 @@ pub fn node_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
         commands.push(Command::ShowLocked2DViewport);
     }
     menu_separator(ui);
-    if menu_item(ui, Some("arrow-left-rhombus"), Some(theme::ACCENT_PURPLE), "Select Upsteam", "").clicked() {
+    if menu_item(ui, Some("arrow-left-rhombus"), Some(theme::ACCENT_PURPLE), "Select Upstream", "").clicked() {
         commands.push(Command::SelectUpstream);
     }
     if menu_item(ui, Some("arrow-right-rhombus"), Some(theme::ACCENT_PURPLE), "Select Downstream", "").clicked() {
@@ -500,7 +499,7 @@ pub fn project_menu(ui: &mut Ui, commands: &mut Vec<Command>) {
 
 /// `RecreateMRU`: "Recent Files", then each recent file that is still
 /// there, numbered, by name, with its path and change time as the tooltip;
-/// then Open Autosave….
+/// then Open Autosave...
 fn recent_files(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     menu_caption(ui, "Recent Files");
     let existing = editor.user.recent.files().iter().filter(|file| file.is_file());
