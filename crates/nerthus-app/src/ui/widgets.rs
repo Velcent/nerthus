@@ -376,6 +376,84 @@ pub fn toolbar_separator(ui: &mut Ui, above: f32, below: f32) {
     ui.add_space(below);
 }
 
+/// How tall a vertical toolbar's two groups were when last laid out.
+#[derive(Clone, Copy)]
+struct ToolbarGroups {
+    top: f32,
+    bottom: f32,
+}
+
+/// Where a vertical toolbar's top group ends and its bottom group starts
+/// (`vertical_toolbar`).
+pub struct ToolbarDock {
+    /// Where the bottom group starts, down from the column's top, to end
+    /// at the foot: while the last layout found both groups fit.
+    docked_at: Option<f32>,
+    /// The column's top.
+    start: f32,
+    /// The top group's height and where the bottom one starts, once the
+    /// top one ends.
+    split: Option<(f32, f32)>,
+}
+
+impl ToolbarDock {
+    /// Ends the top group: what is added after it docks at the foot of
+    /// the toolbar, as far down as the room allows.
+    pub fn bottom(&mut self, ui: &mut Ui) {
+        let top = ui.cursor().top() - self.start;
+        if let Some(docked_at) = self.docked_at {
+            ui.add_space((docked_at - top).max(0.0));
+        }
+        self.split = Some((top, ui.cursor().top()));
+    }
+}
+
+/// A vertical toolbar's buttons in `inner`, cut to the toolbar `clip`:
+/// what `contents` adds before `ToolbarDock::bottom` from the top down,
+/// what it adds after (in order down the toolbar) docked at its foot. In
+/// a toolbar too short for both groups the bottom one follows the top one
+/// and the column scrolls (fading at the edge with more), so no button is
+/// drawn over another or outside the toolbar, or takes clicks there.
+pub fn vertical_toolbar<R>(ui: &mut Ui, id_salt: &str, inner: Rect, clip: Rect, contents: impl FnOnce(&mut Ui, &mut ToolbarDock) -> R) -> R {
+    let id = ui.id().with(id_salt);
+    let measured: Option<ToolbarGroups> = ui.data(|data| data.get_temp(id));
+    let fits = |groups: &ToolbarGroups| groups.top + groups.bottom <= inner.height();
+    let docked_at = measured.filter(fits).map(|groups| inner.height() - groups.bottom);
+    // The fades over the scrolled edges blend into the cladding.
+    let cladding = egui::Frame::new().fill(theme::PANEL_CLADDING);
+    let info = egui::UiStackInfo::new(egui::UiKind::Frame).with_frame(cladding);
+    let layout = egui::Layout::top_down(egui::Align::Center);
+    let builder = egui::UiBuilder::new().id_salt(id_salt).max_rect(inner).layout(layout).ui_stack_info(info);
+    let mut column = ui.new_child(builder);
+    column.shrink_clip_rect(clip);
+    // However short the toolbar: not egui's least of 64 past its foot.
+    let mut scroll = egui::ScrollArea::vertical().id_salt("toolbar-scroll").auto_shrink(false).min_scrolled_height(0.0);
+    if docked_at.is_some() {
+        // Grown to fit after a scroll: back to the top this frame.
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    let (result, groups) = scroll.show(&mut column, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let start = ui.cursor().top();
+        let mut dock = ToolbarDock { docked_at, start, split: None };
+        let result = contents(ui, &mut dock);
+        let end = ui.cursor().top();
+        let groups = match dock.split {
+            Some((top, bottom_start)) => ToolbarGroups { top, bottom: end - bottom_start },
+            None => ToolbarGroups { top: end - start, bottom: 0.0 },
+        };
+        (result, groups)
+    }).inner;
+    let changed = measured.is_none_or(|measured| (measured.top - groups.top).abs() > 0.5 || (measured.bottom - groups.bottom).abs() > 0.5);
+    if changed {
+        ui.data_mut(|data| data.insert_temp(id, groups));
+        // Lay out again with the groups' heights known.
+        ui.ctx().request_discard("toolbar groups measured");
+        ui.ctx().request_repaint();
+    }
+    result
+}
+
 /// How an `EditablePopup`'s text box was left: Enter or Tab take the
 /// text, Escape drops it, and a click elsewhere takes it only with Accept
 /// values when clicking outside of editable field (`AcceptOnLostFocus`).
@@ -510,6 +588,120 @@ mod tests {
         let front = luminance(background.blend(color));
         let back = luminance(background);
         (front.max(back) + 0.05) / (front.min(back) + 0.05)
+    }
+
+    /// A button of the test toolbar: where it was laid out, where it
+    /// takes clicks and whether it was clicked.
+    struct ToolbarButton {
+        rect: Rect,
+        interact: Rect,
+        clicked: bool,
+    }
+
+    /// The test toolbar's inner rect, `height` high.
+    fn toolbar_inner(context: &egui::Context, height: f32) -> Rect {
+        Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(theme::sizes(context).toolbar_button, height))
+    }
+
+    /// One frame of a vertical toolbar in `inner`: three buttons and a
+    /// separator at the top, two buttons docked at the bottom.
+    fn toolbar_frame(context: &egui::Context, inner: Rect, events: Vec<egui::Event>) -> Vec<ToolbarButton> {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 700.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut buttons = Vec::new();
+        let output = context.run_ui(input, |ui| {
+            buttons.clear();
+            vertical_toolbar(ui, "test-toolbar", inner, inner.expand(2.0), |ui, dock| {
+                let mut button = |ui: &mut Ui| {
+                    let response = icon_button(ui, "sun", "", None);
+                    buttons.push(ToolbarButton { rect: response.rect, interact: response.interact_rect, clicked: response.clicked() });
+                };
+                for _ in 0..3 {
+                    button(ui);
+                }
+                toolbar_separator(ui, 8.0, 8.0);
+                dock.bottom(ui);
+                for _ in 0..2 {
+                    button(ui);
+                }
+            });
+        });
+        output.drop_without_applying_deltas();
+        buttons
+    }
+
+    /// The test toolbar's buttons and separator one under another.
+    fn toolbar_content(context: &egui::Context) -> f32 {
+        5.0 * theme::sizes(context).toolbar_button + 17.0
+    }
+
+    /// A click at `at` over three frames: onto it, pressed, released. The
+    /// buttons clicked.
+    fn click_toolbar(context: &egui::Context, inner: Rect, at: Pos2) -> Vec<usize> {
+        toolbar_frame(context, inner, vec![egui::Event::PointerMoved(at)]);
+        toolbar_frame(context, inner, vec![click(at, true)]);
+        let buttons = toolbar_frame(context, inner, vec![click(at, false)]);
+        buttons.iter().enumerate().filter(|(_, button)| button.clicked).map(|(index, _)| index).collect()
+    }
+
+    fn assert_apart_and_inside(buttons: &[ToolbarButton], inner: Rect, case: &str) {
+        assert_eq!(buttons.len(), 5, "{case}");
+        for pair in buttons.windows(2) {
+            assert!(pair[0].rect.bottom() <= pair[1].rect.top() + 0.01, "{case}: {:?} over {:?}", pair[0].rect, pair[1].rect);
+        }
+        for button in buttons.iter().filter(|button| button.interact.is_positive()) {
+            let inside = button.interact.top() >= inner.top() - 0.01 && button.interact.bottom() <= inner.bottom() + 0.01;
+            assert!(inside, "{case}: a button takes clicks at {:?}, outside {inner:?}", button.interact);
+        }
+    }
+
+    #[test]
+    fn a_toolbar_with_room_docks_its_bottom_group_at_its_foot() {
+        let context = themed_context();
+        let inner = toolbar_inner(&context, 400.0);
+        let buttons = toolbar_frame(&context, inner, Vec::new());
+        assert_apart_and_inside(&buttons, inner, "400");
+        assert!((buttons[0].rect.top() - inner.top()).abs() < 0.5, "the top group starts at {}", buttons[0].rect.top());
+        assert!((buttons[4].rect.bottom() - inner.bottom()).abs() < 0.5, "the bottom group ends at {}", buttons[4].rect.bottom());
+        assert!(buttons[3].rect.top() - buttons[2].rect.bottom() > 400.0 - toolbar_content(&context));
+    }
+
+    #[test]
+    fn a_short_toolbar_never_draws_a_button_over_another_or_outside_it() {
+        let context = themed_context();
+        // As a splitter drags it shorter, then taller again.
+        let heights = (40..=400).rev().step_by(9).chain((40..=400).step_by(9));
+        for height in heights {
+            let inner = toolbar_inner(&context, height as f32);
+            let buttons = toolbar_frame(&context, inner, Vec::new());
+            assert_apart_and_inside(&buttons, inner, &height.to_string());
+            if height as f32 >= toolbar_content(&context) {
+                assert!((buttons[4].rect.bottom() - inner.bottom()).abs() < 0.5, "{height}: room for both, the bottom group ends at {}", buttons[4].rect.bottom());
+            } else {
+                assert!(buttons[3].rect.top() - buttons[2].rect.bottom() <= 17.01, "{height}: the bottom group does not follow the top one");
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_toolbar_scrolls_to_its_bottom_group() {
+        let context = themed_context();
+        let inner = toolbar_inner(&context, 80.0);
+        let last = toolbar_frame(&context, inner, Vec::new())[4].rect;
+        assert!(last.top() >= inner.bottom(), "the last button starts out of sight, at {last:?}");
+        // Where it is laid out, under the toolbar, it takes no click.
+        assert_eq!(click_toolbar(&context, inner, last.center()), Vec::<usize>::new());
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        toolbar_frame(&context, inner, vec![egui::Event::PointerMoved(inner.center())]);
+        toolbar_frame(&context, inner, vec![wheel]);
+        for _ in 0..60 {
+            toolbar_frame(&context, inner, Vec::new());
+        }
+        let buttons = toolbar_frame(&context, inner, Vec::new());
+        assert_apart_and_inside(&buttons, inner, "scrolled");
+        let last = buttons[4].rect;
+        assert!((last.bottom() - inner.bottom()).abs() < 0.5, "scrolled to the end, the last button ends at {}", last.bottom());
+        assert_eq!(click_toolbar(&context, inner, last.center()), [4]);
     }
 
     #[test]

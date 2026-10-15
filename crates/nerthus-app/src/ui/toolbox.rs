@@ -37,6 +37,8 @@ const TEXT_PADDING: f32 = 10.0;
 /// (`GetWidthForMode`).
 const BUTTON_SIZE: f32 = 36.0;
 const WIDE: f32 = BUTTON_SIZE * 2.3;
+/// The menus' margin in their area (`ScrollViewer`).
+const MENUS_MARGIN: f32 = 10.0;
 /// `ToolboxButton-Hover` and `ToolboxButton-Pressed`.
 const BUTTON_HOVER: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 const BUTTON_OPEN: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
@@ -262,19 +264,31 @@ pub fn show(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphState
 }
 
 /// The menus style (`ScrollViewer`, margin 10): Long is one column of
-/// icons, Compact two, Expanded one of icons with names.
+/// icons, Compact two, Expanded one of icons with names. A column taller
+/// than its area is cut off at the margin and scrolls, its handle in
+/// sight while there is more to see.
 fn show_menus(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphState, commands: &mut Vec<Command>) {
     let mode = editor.user.options.toolbox_mode();
     let (column, button, per_row) = menus_layout(ui, area, mode);
+    let rows = CATEGORIES.len().div_ceil(per_row);
+    let content = Vec2::new(column.width(), rows as f32 * button.y);
     let look = EntryLook { editor, average: average_usage(editor) };
     let mut settings: Vec<SettingsChange> = Vec::new();
-    for (index, category) in CATEGORIES.iter().enumerate() {
-        let row = (index / per_row) as f32;
-        let place = (index % per_row) as f32;
-        let corner = column.min + Vec2::new(place * button.x, row * button.y);
-        let rect = Rect::from_min_size(corner, button);
-        category_button(ui, rect, category, mode, &look, state, commands, &mut settings);
-    }
+    let builder = UiBuilder::new().max_rect(column).layout(egui::Layout::top_down(egui::Align::Min));
+    let mut column_ui = ui.new_child(builder);
+    column_ui.shrink_clip_rect(column);
+    let scroll = &mut column_ui.spacing_mut().scroll;
+    scroll.dormant_handle_opacity = scroll.active_handle_opacity;
+    ScrollArea::vertical().id_salt("toolbox-menus-scroll").max_height(column.height()).show(&mut column_ui, |ui| {
+        let (buttons, _) = ui.allocate_exact_size(content, Sense::hover());
+        for (index, category) in CATEGORIES.iter().enumerate() {
+            let row = (index / per_row) as f32;
+            let place = (index % per_row) as f32;
+            let corner = buttons.min + Vec2::new(place * button.x, row * button.y);
+            let rect = Rect::from_min_size(corner, button);
+            category_button(ui, rect, category, mode, &look, state, commands, &mut settings);
+        }
+    });
     resize_menus(ui, column, mode, &mut editor.user.options, state);
     apply_settings(&mut editor.user.options, state, settings);
 }
@@ -288,8 +302,9 @@ pub fn place(ui: &Ui, area: Rect, options: &UserOptions) -> Rect {
     }
 }
 
-/// The menus' column at the top-left of `area` (margin 10), a button's
-/// size and how many buttons share a row.
+/// The menus' column at the top-left of `area` (margin 10), as much of it
+/// as shows (no lower than the margin above the area's bottom), a
+/// button's size and how many buttons share a row.
 fn menus_layout(ui: &Ui, area: Rect, mode: ToolboxMode) -> (Rect, Vec2, usize) {
     let font = theme::semibold(10.0);
     let line_height = ui.painter().layout_no_wrap("Primitive".to_string(), font, theme::LABEL_DEFAULT).size().y;
@@ -300,7 +315,9 @@ fn menus_layout(ui: &Ui, area: Rect, mode: ToolboxMode) -> (Rect, Vec2, usize) {
         ToolboxMode::Expanded => (WIDE, WIDE, 1),
     };
     let rows = CATEGORIES.len().div_ceil(per_row);
-    let column = Rect::from_min_size(area.min + Vec2::new(10.0, 10.0), Vec2::new(width, rows as f32 * button_height));
+    let room = (area.height() - 2.0 * MENUS_MARGIN).max(0.0);
+    let height = (rows as f32 * button_height).min(room);
+    let column = Rect::from_min_size(area.min + Vec2::splat(MENUS_MARGIN), Vec2::new(width, height));
     (column, Vec2::new(button_width, button_height), per_row)
 }
 

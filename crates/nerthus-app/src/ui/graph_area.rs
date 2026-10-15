@@ -3,7 +3,7 @@
 //! clock and progress at the bottom), the Data View beside it while open,
 //! and the graph toolbar on the right.
 
-use egui::{Align, CornerRadius, CursorIcon, Layout, Pos2, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
+use egui::{CornerRadius, CursorIcon, Pos2, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
 
 use crate::document::CombineKind;
 use crate::editor::Editor;
@@ -12,7 +12,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
-use crate::ui::widgets::{icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator};
+use crate::ui::widgets::{icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator, vertical_toolbar};
 use crate::ui::{data_view, graph_canvas, menus, toolbox, viewport_area, UiState};
 use crate::user::ToolboxStyle;
 
@@ -86,15 +86,21 @@ pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut U
         Rect::from_min_max(border.min + Vec2::new(TAB_BORDER + 2.0, 2.0), border.max - Vec2::splat(TAB_BORDER + 2.0))
     };
     // `Toolbox`: margin 0, 35, 0, 0 for the menus and 0, 16, 0, 24 for the
-    // panel; none without tabs. It is placed before the graph lays out,
-    // for Extents and Selection to leave room for it, and drawn over it.
-    let toolbox_area = if tabs_hidden {
+    // panel; none without tabs. The menus end above the build strip, which
+    // is drawn over the graph's bottom left after them. It is placed before
+    // the graph lays out, for Extents and Selection to leave room for it,
+    // and drawn over it.
+    let menus = editor.user.options.toolbox_style() == ToolboxStyle::Menus;
+    let mut toolbox_area = if tabs_hidden {
         grid
-    } else if editor.user.options.toolbox_style() == ToolboxStyle::Menus {
+    } else if menus {
         Rect::from_min_max(grid.min + Vec2::new(0.0, 35.0), grid.max)
     } else {
         Rect::from_min_max(grid.min + Vec2::new(0.0, 16.0), grid.max - Vec2::new(0.0, 24.0))
     };
+    if menus {
+        toolbox_area.max.y = footer_top(grid).max(toolbox_area.min.y);
+    }
     ui_state.graph.toolbox_rect = toolbox::place(ui, toolbox_area, &editor.user.options);
     graph_canvas::show(ui, graph_rect, editor, &mut ui_state.graph, commands);
     toolbox::show(ui, toolbox_area, editor, &mut ui_state.graph, commands);
@@ -371,8 +377,9 @@ fn confirm_tab_delete(ui: &mut Ui, tabs: &[crate::document::GraphTabInfo], ui_st
     }
 }
 
-/// The build strip's width while the graph has room for it.
+/// The build strip's width while the graph has room for it, and its height.
 const FOOTER_WIDTH: f32 = 200.0;
+const FOOTER_HEIGHT: f32 = 26.0;
 /// The build strip's inset from the graph's left and bottom edges (inside
 /// the border), and from its right edge while the graph is narrower than
 /// the strip.
@@ -392,8 +399,13 @@ fn footer_rect(area: Rect) -> Option<Rect> {
     if width <= 0.0 {
         return None;
     }
-    let min = Pos2::new(area.left() + FOOTER_INSET, area.bottom() - FOOTER_INSET - 26.0);
-    Some(Rect::from_min_size(min, Vec2::new(width, 26.0)))
+    let min = Pos2::new(area.left() + FOOTER_INSET, footer_top(area));
+    Some(Rect::from_min_size(min, Vec2::new(width, FOOTER_HEIGHT)))
+}
+
+/// The top of the build strip at the bottom of the graph `area`.
+fn footer_top(area: Rect) -> f32 {
+    area.bottom() - FOOTER_INSET - FOOTER_HEIGHT
 }
 
 /// How many of the progress ticks, the first centred at `start_x`, fit
@@ -472,97 +484,90 @@ fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, data_shown: bool, editor: &Edi
     let [padding_across, padding_down] = theme::sizes(ui.ctx()).toolbar_padding;
     let inner = toolbar_rect.shrink(1.5).shrink2(Vec2::new(padding_across, padding_down));
 
-    let top_builder = UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Center));
-    let mut top = ui.new_child(top_builder);
-    top.shrink_clip_rect(toolbar_rect);
-    top.spacing_mut().item_spacing.y = 0.0;
-    // `btnExpandToggle`. While the graph leaves the open Data View no room
-    // it shows shut, and the chevron can't open it until there is.
-    if ui_state.data_view.expanded && !data_shown {
-        top.add_enabled_ui(false, |ui| {
-            let tip = "Data View: no room beside the graph (widen the window or the graph area)";
-            icon_button(ui, "chevron-left", "Data View", None).on_disabled_hover_text(tip);
+    vertical_toolbar(ui, "graph-toolbar", inner, toolbar_rect, |column, dock| {
+        // `btnExpandToggle`. While the graph leaves the open Data View no
+        // room it shows shut, and the chevron can't open it until there is.
+        if ui_state.data_view.expanded && !data_shown {
+            column.add_enabled_ui(false, |ui| {
+                let tip = "Data View: no room beside the graph (widen the window or the graph area)";
+                icon_button(ui, "chevron-left", "Data View", None).on_disabled_hover_text(tip);
+            });
+        } else {
+            let chevron = if data_shown { "chevron-right" } else { "chevron-left" };
+            if icon_button(column, chevron, "Data View", None).clicked() {
+                ui_state.data_view.toggle();
+            }
+        }
+        toolbar_separator(column, 8.0, 8.0);
+        icon_menu(column, "bookmarks", "Node Bookmarks", None, |ui| {
+            menus::bookmarks_menu(ui, editor, ui_state, commands);
         });
-    } else {
-        let chevron = if data_shown { "chevron-right" } else { "chevron-left" };
-        if icon_button(&mut top, chevron, "Data View", None).clicked() {
-            ui_state.data_view.toggle();
-        }
-    }
-    toolbar_separator(&mut top, 8.0, 8.0);
-    icon_menu(&mut top, "bookmarks", "Node Bookmarks", None, |ui| {
-        menus::bookmarks_menu(ui, editor, ui_state, commands);
-    });
-    icon_menu(&mut top, "tournament", "Node Commands", None, |ui| {
-        if menu_item(ui, Some("arrow-left-rhombus"), Some(theme::ACCENT_MUTED_PURPLE), "Select upstream", "").clicked() {
-            commands.push(Command::SelectUpstream);
-        }
-        if menu_item(ui, Some("arrow-right-rhombus"), Some(theme::ACCENT_MUTED_PURPLE), "Select downstream", "").clicked() {
-            commands.push(Command::SelectDownstream);
-        }
-        menu_separator(ui);
-        if menu_item(ui, Some("layers-linked"), None, "Group / Ungroup", "").clicked() {
-            commands.push(Command::Graph(GraphCommand::GroupUngroup));
-        }
-        if menu_item(ui, Some("arrows-join-2"), Some(theme::ACCENT_MUTED_ORANGE), "Combine nodes", "").clicked() {
-            commands.push(Command::Graph(GraphCommand::Combine(CombineKind::Toolbar)));
-        }
-        menu_separator(ui);
-        submenu(ui, Some("keyframe"), None, "Convert port to portals", |ui| {
-            menus::convert_port_items(ui, editor, commands);
+        icon_menu(column, "tournament", "Node Commands", None, |ui| {
+            if menu_item(ui, Some("arrow-left-rhombus"), Some(theme::ACCENT_MUTED_PURPLE), "Select upstream", "").clicked() {
+                commands.push(Command::SelectUpstream);
+            }
+            if menu_item(ui, Some("arrow-right-rhombus"), Some(theme::ACCENT_MUTED_PURPLE), "Select downstream", "").clicked() {
+                commands.push(Command::SelectDownstream);
+            }
+            menu_separator(ui);
+            if menu_item(ui, Some("layers-linked"), None, "Group / Ungroup", "").clicked() {
+                commands.push(Command::Graph(GraphCommand::GroupUngroup));
+            }
+            if menu_item(ui, Some("arrows-join-2"), Some(theme::ACCENT_MUTED_ORANGE), "Combine nodes", "").clicked() {
+                commands.push(Command::Graph(GraphCommand::Combine(CombineKind::Toolbar)));
+            }
+            menu_separator(ui);
+            submenu(ui, Some("keyframe"), None, "Convert port to portals", |ui| {
+                menus::convert_port_items(ui, editor, commands);
+            });
+            menu_separator(ui);
+            submenu(ui, None, None, "Move to Tab", |ui| {
+                if let Some(target) = menus::tab_targets(ui, editor, ui_state.graph.tab) {
+                    commands.push(Command::Graph(GraphCommand::MoveToTab(target)));
+                }
+            });
         });
-        menu_separator(ui);
-        submenu(ui, None, None, "Move to Tab", |ui| {
-            if let Some(target) = menus::tab_targets(ui, editor, ui_state.graph.tab) {
-                commands.push(Command::Graph(GraphCommand::MoveToTab(target)));
+        toolbar_separator(column, 8.0, 8.0);
+        icon_menu(column, "flame", "Bake", None, |ui| {
+            menus::toolbar_bake_items(ui, editor, commands);
+        });
+
+        // Docked at the bottom, down from the top: Refresh and Mutate (each
+        // with its right-click menu: `btnRefresh`, `btnMutate`), the engine
+        // toggle (`Accent-Muted-Red`; `Accent-Red` outline while suspended)
+        // and Graph Commands, with separators (margin 2, 8) between. A
+        // separator's margin at least keeps them from Bake.
+        column.add_space(8.0);
+        dock.bottom(column);
+        let refresh = icon_button(column, "rotate-360", "Refresh", None);
+        if refresh.clicked() {
+            commands.push(Command::Refresh);
+        }
+        refresh.context_menu(|ui| {
+            menu_style(ui);
+            if menu_item(ui, Some("rotate-360"), None, "Refresh all nodes", "").clicked() {
+                commands.push(Command::RefreshAll);
             }
         });
-    });
-    toolbar_separator(&mut top, 8.0, 8.0);
-    icon_menu(&mut top, "flame", "Bake", None, |ui| {
-        menus::toolbar_bake_items(ui, editor, commands);
-    });
-
-    // Docked bottom, first at the bottom: Graph Commands, the engine
-    // toggle (`Accent-Muted-Red`; `Accent-Red` outline while suspended),
-    // Mutate and Refresh, with separators (margin 2, 8) between. They
-    // take what the top ones leave: in a toolbar too short for both they
-    // are cut off under them (Refresh first), never drawn over them.
-    let top_end = top.min_rect().bottom().min(inner.bottom());
-    let below = Rect::from_min_max(Pos2::new(inner.left(), top_end), inner.max);
-    let bottom_builder = UiBuilder::new().max_rect(below).layout(Layout::bottom_up(Align::Center));
-    let mut bottom = ui.new_child(bottom_builder);
-    bottom.shrink_clip_rect(Rect::from_min_max(Pos2::new(toolbar_rect.left(), top_end), toolbar_rect.max));
-    bottom.spacing_mut().item_spacing.y = 0.0;
-    icon_menu(&mut bottom, "menu-deep", "Graph Commands", None, |ui| {
-        menus::graph_commands(ui, editor, ui_state, commands);
-    });
-    toolbar_separator(&mut bottom, 8.0, 8.0);
-    let engine_tip = if editor.engine_active { "Suspend Engine (Currently running)" } else { "Resume Engine (Currently suspended)" };
-    if engine_toggle(&mut bottom, !editor.engine_active).on_hover_text(engine_tip).clicked() {
-        commands.push(Command::ToggleEngine);
-    }
-    toolbar_separator(&mut bottom, 8.0, 8.0);
-    // `btnMutate` and `btnRefresh`, each with its right-click menu.
-    let mutate = icon_button(&mut bottom, "potion", "Mutate", None);
-    if mutate.clicked() {
-        commands.push(Command::Graph(GraphCommand::MutateButton));
-    }
-    mutate.context_menu(|ui| {
-        menu_style(ui);
-        if menu_item(ui, Some("potion"), None, "Mutate all nodes", "").clicked() {
-            commands.push(Command::Graph(GraphCommand::MutateAll));
+        let mutate = icon_button(column, "potion", "Mutate", None);
+        if mutate.clicked() {
+            commands.push(Command::Graph(GraphCommand::MutateButton));
         }
-    });
-    let refresh = icon_button(&mut bottom, "rotate-360", "Refresh", None);
-    if refresh.clicked() {
-        commands.push(Command::Refresh);
-    }
-    refresh.context_menu(|ui| {
-        menu_style(ui);
-        if menu_item(ui, Some("rotate-360"), None, "Refresh all nodes", "").clicked() {
-            commands.push(Command::RefreshAll);
+        mutate.context_menu(|ui| {
+            menu_style(ui);
+            if menu_item(ui, Some("potion"), None, "Mutate all nodes", "").clicked() {
+                commands.push(Command::Graph(GraphCommand::MutateAll));
+            }
+        });
+        toolbar_separator(column, 8.0, 8.0);
+        let engine_tip = if editor.engine_active { "Suspend Engine (Currently running)" } else { "Resume Engine (Currently suspended)" };
+        if engine_toggle(column, !editor.engine_active).on_hover_text(engine_tip).clicked() {
+            commands.push(Command::ToggleEngine);
         }
+        toolbar_separator(column, 8.0, 8.0);
+        icon_menu(column, "menu-deep", "Graph Commands", None, |ui| {
+            menus::graph_commands(ui, editor, ui_state, commands);
+        });
     });
 }
 
@@ -590,6 +595,7 @@ fn engine_toggle(ui: &mut Ui, suspended: bool) -> egui::Response {
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::user::ToolboxMode;
 
     /// The build strip painted at the bottom of a graph frame `width` wide,
     /// its clock at `seconds`: the strip and the shapes painted, and among
@@ -783,10 +789,150 @@ mod tests {
         }
     }
 
+    /// The toolbox's category buttons as painted: the part of each outline
+    /// (`TOOLBOX_BUTTON_BACKGROUND`) left in sight by its clip.
+    fn toolbox_buttons(shapes: &[egui::epaint::ClippedShape]) -> Vec<Rect> {
+        let buttons = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            Shape::Rect(rect) if rect.stroke.color == theme::TOOLBOX_BUTTON_BACKGROUND => Some(rect.rect.intersect(clipped.clip_rect)),
+            _ => None,
+        });
+        buttons.filter(|visible| visible.is_positive()).collect()
+    }
+
+    /// Where the toolbox shows `text` (an Expanded category's name), in
+    /// full sight.
+    fn toolbox_text(shapes: &[egui::epaint::ClippedShape], text: &str) -> Option<Rect> {
+        shapes.iter().find_map(|clipped| match &clipped.shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                let bounds = clipped.shape.visual_bounding_rect();
+                clipped.clip_rect.contains_rect(bounds).then_some(bounds)
+            }
+            _ => None,
+        })
+    }
+
+    /// The graph frame's inside: `grid` less its border (and the tabs).
+    fn graph_frame(grid: Rect, tabs_hidden: bool) -> Rect {
+        let top = if tabs_hidden { grid.top() } else { grid.top() + GRAPH_TOP };
+        Rect::from_min_max(Pos2::new(grid.left(), top), grid.max).shrink(TAB_BORDER)
+    }
+
+    #[test]
+    fn the_toolbox_menus_keep_inside_the_graph_above_the_build_strip() {
+        for mode in [ToolboxMode::Single, ToolboxMode::Double, ToolboxMode::Expanded] {
+            for tabs_hidden in [false, true] {
+                let (context, mut editor, mut ui_state) = graph_grid_context();
+                editor.user.options.set_toolbox_style(ToolboxStyle::Menus);
+                editor.user.options.set_toolbox_mode(mode);
+                editor.user.options.set_value("HideTabs", serde_json::json!(tabs_hidden));
+                let mut scrolled = false;
+                for height in (60..=700).step_by(20) {
+                    let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, height as f32));
+                    grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                    let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                    let case = format!("{mode:?} at {height} (tabs hidden: {tabs_hidden})");
+                    let toolbox = ui_state.graph.toolbox_rect;
+                    let strip_top = footer_top(grid);
+                    if toolbox.height() > 0.0 {
+                        assert!(toolbox.bottom() <= strip_top, "{case}: the toolbox reaches {} under the strip at {strip_top}", toolbox.bottom());
+                    }
+                    let frame = graph_frame(grid, tabs_hidden);
+                    let buttons = toolbox_buttons(&shapes);
+                    for button in &buttons {
+                        assert!(toolbox.expand(0.5).contains_rect(*button), "{case}: a button at {button:?} past the toolbox {toolbox:?}");
+                        assert!(frame.contains_rect(*button), "{case}: a button at {button:?} outside the graph frame {frame:?}");
+                        assert!(button.bottom() <= strip_top, "{case}: a button at {button:?} under the strip at {strip_top}");
+                    }
+                    scrolled |= buttons.len() < toolbox::CATEGORIES.len();
+                    if height >= 600 {
+                        assert_eq!(buttons.len(), toolbox::CATEGORIES.len(), "{case}: not every category shows");
+                    }
+                }
+                assert!(scrolled, "{mode:?}: no graph short enough to cut the toolbox off");
+            }
+        }
+    }
+
+    #[test]
+    fn every_toolbox_category_is_in_reach_in_a_short_graph() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        editor.user.options.set_toolbox_style(ToolboxStyle::Menus);
+        editor.user.options.set_toolbox_mode(ToolboxMode::Expanded);
+        // About the graph of a 1280 by 500 window: three categories show.
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, 200.0));
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        assert!(toolbox_text(&shapes, "Primitive").is_some());
+        assert!(toolbox_text(&shapes, "Macro").is_none(), "Macro shows without scrolling");
+        // The wheel over the toolbox scrolls it, not the graph.
+        let toolbox = ui_state.graph.toolbox_rect;
+        let zoom = ui_state.graph.view().zoom;
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        grid_frame(&context, grid, &mut editor, &mut ui_state, vec![egui::Event::PointerMoved(toolbox.center())]);
+        grid_frame(&context, grid, &mut editor, &mut ui_state, vec![wheel]);
+        for _ in 0..60 {
+            grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        }
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        assert_eq!(ui_state.graph.view().zoom, zoom);
+        assert!(toolbox_text(&shapes, "Primitive").is_none(), "the toolbox did not scroll");
+        let name = toolbox_text(&shapes, "Macro").expect("Macro in sight at the end");
+        assert!(toolbox.contains_rect(name), "Macro at {name:?} outside the toolbox {toolbox:?}");
+        // Its menu opens from there.
+        assert!(!egui::Popup::is_any_open(&context));
+        click(&context, grid, &mut editor, &mut ui_state, name.center());
+        assert!(egui::Popup::is_any_open(&context), "Macro's menu did not open");
+    }
+
+    #[test]
+    fn a_click_under_the_toolbox_opens_no_menu() {
+        // Below the cut-off column, on the strip: no category's menu.
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        editor.user.options.set_toolbox_style(ToolboxStyle::Menus);
+        editor.user.options.set_toolbox_mode(ToolboxMode::Single);
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, 200.0));
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let toolbox = ui_state.graph.toolbox_rect;
+        for y in [toolbox.bottom() + 4.0, footer_top(grid) + 4.0, grid.bottom() + 4.0] {
+            click(&context, grid, &mut editor, &mut ui_state, Pos2::new(toolbox.center().x, y));
+            assert!(!egui::Popup::is_any_open(&context), "a menu opened at {y}");
+        }
+    }
+
+    #[test]
+    fn a_short_toolbar_scrolls_to_its_bottom_group_and_keeps_it_inside() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        let grid = Rect::from_min_size(Pos2::new(10.0, 300.0), Vec2::new(900.0, 250.0));
+        let chevron = chevron_at(&context, grid);
+        // Above the toolbar, where the viewport toolbar is, nothing of the
+        // graph's takes a click.
+        for y in (240..300).step_by(6) {
+            let commands = click(&context, grid, &mut editor, &mut ui_state, Pos2::new(chevron.x, y as f32));
+            assert!(commands.is_empty(), "a click at {y} above the toolbar: {commands:?}");
+        }
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        grid_frame(&context, grid, &mut editor, &mut ui_state, vec![egui::Event::PointerMoved(chevron)]);
+        grid_frame(&context, grid, &mut editor, &mut ui_state, vec![wheel]);
+        for _ in 0..60 {
+            grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        }
+        // Scrolled to the end: Graph Commands at the foot, the engine
+        // toggle and Mutate over it with a separator (17) between each,
+        // and Refresh on top.
+        let sizes = theme::sizes(&context);
+        let foot = grid.bottom() - AREA_MARGIN - 1.5 - sizes.toolbar_padding[1];
+        let refresh = Pos2::new(chevron.x, foot - 3.5 * sizes.toolbar_button - 2.0 * 17.0);
+        let commands = click(&context, grid, &mut editor, &mut ui_state, refresh);
+        assert!(commands.iter().any(|command| matches!(command, Command::Refresh)), "{commands:?}");
+        let mutate = refresh + Vec2::new(0.0, sizes.toolbar_button);
+        let commands = click(&context, grid, &mut editor, &mut ui_state, mutate);
+        assert!(commands.iter().any(|command| matches!(command, Command::Graph(GraphCommand::MutateButton))), "{commands:?}");
+    }
+
     #[test]
     fn a_short_toolbar_keeps_the_data_view_chevron_clickable() {
         // Too short for both groups: the bottom one (Refresh at its top)
-        // gives way under the top one.
+        // follows the top one, out of sight until the toolbar scrolls.
         let (context, mut editor, mut ui_state) = graph_grid_context();
         let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, 150.0));
         let commands = click(&context, grid, &mut editor, &mut ui_state, chevron_at(&context, grid));
