@@ -4,7 +4,7 @@
 //! dialogs' frames and buttons, selectable items and tooltips.
 
 use egui::containers::menu::{MenuButton, MenuConfig, SubMenu};
-use egui::{Button, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetText};
+use egui::{Button, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetText};
 
 use crate::icons;
 use crate::theme;
@@ -196,7 +196,7 @@ fn menu_rows_within<R>(ui: &mut Ui, room: f32, contents: impl FnOnce(&mut Ui) ->
     scroll_bar_gutter(ui);
     let scroll = &mut ui.spacing_mut().scroll;
     scroll.dormant_handle_opacity = scroll.active_handle_opacity;
-    let rows = egui::ScrollArea::vertical().id_salt("menu-rows").max_height(max_height).show(ui, |ui| {
+    let rows = ScrollArea::vertical().id_salt("menu-rows").max_height(max_height).show(ui, |ui| {
         // Not for scroll areas in the rows.
         ui.spacing_mut().scroll = style;
         menu_style(ui);
@@ -337,7 +337,9 @@ pub fn menu_caption(ui: &mut Ui, text: &str) {
 }
 
 /// A submenu entry (`SubmenuHeader`): the row with its arrow, opening
-/// `contents` beside it.
+/// `contents` beside it. Its rows scroll once there are more than fit
+/// beside the row (`submenu_room`), as the graph search's "more..." can
+/// have.
 pub fn submenu<R>(ui: &mut Ui, icon: Option<&str>, accent: Option<Color32>, text: &str, contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     let tint = accent.unwrap_or(theme::MENU_ICON);
     let icon = icon.map(|name| (name, tint));
@@ -378,10 +380,11 @@ fn submenu_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R, draw: impl F
 
 /// The most room a submenu has beside its row and under the title bar:
 /// down from the row's top, where egui opens it first
-/// (`RectAlign::RIGHT_START`), or up from the row's bottom (`RIGHT_END`),
-/// a pixel short against rounding. No taller, the submenu fits one of
-/// them, so egui opens it beside the row rather than centred across it
-/// (over the bar) or, when nothing fits, moved over its menu.
+/// (`RectAlign::RIGHT_START`), or up from the row's bottom (`RIGHT_END`,
+/// or the same on the left), a pixel short against rounding. No taller,
+/// the submenu fits one of them, so egui opens it beside the row rather
+/// than centred across it (over the bar) or, when nothing fits, moved
+/// over its menu and still past the window's edge.
 fn submenu_room(ui: &Ui, row: &Response) -> f32 {
     let window = ui.ctx().content_rect();
     // egui's anchor: the row, taller by half the submenu's frame each way.

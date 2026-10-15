@@ -5,7 +5,7 @@
 //! Enter takes the first result, the arrows walk them, a comma adds the
 //! first to a list of nodes to make in a chain (`IsMultiSelect`).
 
-use egui::{Align, Event, Frame, Id, Key, Layout, LayerId, Margin, Modifiers, Order, Popup, PopupAnchor, PopupCloseBehavior, PopupKind, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Align, AreaState, Event, Frame, Id, Key, Layout, LayerId, Margin, Modifiers, Order, Popup, PopupAnchor, PopupCloseBehavior, PopupKind, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use nerthus_engine::{Catalogue, NodeSpec, Registry};
 
 use crate::document::{node_tab, PortalState};
@@ -321,7 +321,9 @@ pub fn show(ui: &mut Ui, editor: &mut Editor, popup: &mut SearchPopup, commands:
     menu = menu.layout(Layout::top_down_justified(Align::Min));
     menu = menu.close_behavior(PopupCloseBehavior::CloseOnClickOutside);
     menu = menu.open_bool(&mut open);
-    menu.show(|ui| {
+    // egui places the popup for the size it had last frame.
+    let placed_for = AreaState::load(ui.ctx(), id).and_then(|area| area.size);
+    let shown = menu.show(|ui| {
         menu_style(ui);
         ui.set_min_width(RESULT_WIDTH + 30.0);
         search_box(ui, popup);
@@ -354,6 +356,13 @@ pub fn show(ui: &mut Ui, editor: &mut Editor, popup: &mut SearchPopup, commands:
             }
         });
     });
+    // New results resized it (as they do the frame after a key is typed):
+    // placed again at its new size before it is seen, rather than running
+    // off the window for a frame.
+    let resized = shown.is_some_and(|shown| placed_for.is_some_and(|size| size != shown.response.rect.size()));
+    if resized {
+        ui.ctx().request_discard("graph search resized");
+    }
     if let Some(item) = chosen {
         if multi && popup.text.contains(',') {
             choose_many(editor, popup, Some(&item), commands);
@@ -564,6 +573,9 @@ fn result_row(ui: &mut Ui, editor: &Editor, found: &Found, highlighted: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Document;
+    use egui::epaint::ClippedShape;
+    use egui::{MouseWheelUnit, RawInput, Shape, TouchPhase};
 
     #[test]
     fn arrows_walk_the_results_round() {
@@ -592,5 +604,150 @@ mod tests {
         // `String.Remove(text, LastIndexOf(',') + 1)`: the space after the
         // kept comma goes too.
         assert_eq!(popup.text, "Mountain,ErosionPro, ");
+    }
+
+    /// 1280 × 800 at the default 120%.
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1066.0, 666.0));
+    /// Where the pointer opened the search, low on the graph.
+    const OPENED_AT: Pos2 = Pos2::new(500.0, 433.0);
+
+    /// A context with the editor's fonts, which take effect a frame after
+    /// they are set.
+    fn themed_context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let input = RawInput { screen_rect: Some(SCREEN), ..Default::default() };
+        let output = context.run_ui(input, |_| {});
+        output.drop_without_applying_deltas();
+        context
+    }
+
+    /// One frame of the search with these events: what was painted.
+    fn search_frame(context: &egui::Context, editor: &mut Editor, popup: &mut SearchPopup, events: Vec<Event>) -> Vec<ClippedShape> {
+        let input = RawInput { screen_rect: Some(SCREEN), events, ..Default::default() };
+        let mut output = context.run_ui(input, |ui| {
+            show(ui, editor, popup, &mut Vec::new());
+        });
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        shapes
+    }
+
+    /// Frames enough for the popups' first-frame sizing to settle.
+    fn settle(context: &egui::Context, editor: &mut Editor, popup: &mut SearchPopup) -> Vec<ClippedShape> {
+        for _ in 0..5 {
+            search_frame(context, editor, popup, Vec::new());
+        }
+        search_frame(context, editor, popup, Vec::new())
+    }
+
+    /// Where the search's popup is.
+    fn search_rect(context: &egui::Context) -> Rect {
+        AreaState::load(context, Id::new("graph-search")).expect("the search shows").rect()
+    }
+
+    /// Where the "more..." submenu is: the one menu beside the search's.
+    fn more_rect(context: &egui::Context) -> Option<Rect> {
+        let layers = context.memory(|memory| memory.areas().visible_layer_ids());
+        let menus = layers.into_iter().filter(|layer| layer.order == Order::Foreground && layer.id != Id::new("graph-search"));
+        menus.into_iter().find_map(|layer| AreaState::load(context, layer.id)).map(|area| area.rect())
+    }
+
+    /// Where `text` was painted where it can be seen, if it was.
+    fn painted(shapes: &[ClippedShape], text: &str) -> Option<Rect> {
+        shapes.iter().find_map(|clipped| match &clipped.shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                let rect = shape.visual_bounding_rect();
+                clipped.clip_rect.contains_rect(rect).then_some(rect)
+            }
+            _ => None,
+        })
+    }
+
+    /// The search for `typed`, opened where the pointer is and settled.
+    fn search_for(typed: &str) -> (egui::Context, Editor, SearchPopup) {
+        let context = themed_context();
+        let mut editor = Editor::new(Document::new());
+        let mut popup = SearchPopup::new(SearchMode::Nodes { source: NodeSource::None }, OPENED_AT, [0.0, 0.0]);
+        popup.type_text(typed);
+        search_frame(&context, &mut editor, &mut popup, vec![Event::PointerMoved(OPENED_AT)]);
+        settle(&context, &mut editor, &mut popup);
+        (context, editor, popup)
+    }
+
+    /// The search for `typed` with the pointer on its "more..." row, and
+    /// the submenu settled.
+    fn more_open(typed: &str) -> (egui::Context, Editor, SearchPopup, Rect, Rect) {
+        let (context, mut editor, mut popup) = search_for(typed);
+        let search = search_rect(&context);
+        let margin = Frame::popup(&context.global_style()).total_margin().bottom;
+        let more = Pos2::new(search.center().x, search.bottom() - margin - RESULT_HEIGHT / 2.0);
+        search_frame(&context, &mut editor, &mut popup, vec![Event::PointerMoved(more)]);
+        settle(&context, &mut editor, &mut popup);
+        let submenu = more_rect(&context).expect("hovering \"more...\" opens it");
+        (context, editor, popup, search, submenu)
+    }
+
+    /// What the last result is called on its row.
+    fn last_result_name(editor: &Editor, popup: &SearchPopup) -> String {
+        match results(editor, popup).last().expect("results") {
+            Found::Node(spec) => spec.display_name.clone().unwrap_or_else(|| spec.name.clone()),
+            Found::Preset { name, .. } => name.clone(),
+            other => panic!("a node search found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn more_stays_on_screen_beside_the_search() {
+        let (_, editor, popup, search, submenu) = more_open("e");
+        let overflow = results(&editor, &popup).len() - editor.user.options.maximum_search_results();
+        assert!(overflow as f32 * RESULT_HEIGHT > SCREEN.height(), "{overflow} rows fit on the screen");
+        assert!(SCREEN.contains_rect(search), "the search runs off the screen at {search:?}");
+        assert!(SCREEN.contains_rect(submenu), "\"more...\" runs off the screen at {submenu:?}");
+        // Beside the search, not over its rows or "more..." itself.
+        assert!(submenu.left() >= search.right() || submenu.right() <= search.left(), "{submenu:?} covers {search:?}");
+        assert!(submenu.width() < 300.0, "\"more...\" is {} wide", submenu.width());
+    }
+
+    #[test]
+    fn more_scrolls_to_its_last_result() {
+        let (context, mut editor, mut popup, _, submenu) = more_open("e");
+        let last = last_result_name(&editor, &popup);
+        let shapes = search_frame(&context, &mut editor, &mut popup, Vec::new());
+        assert_eq!(painted(&shapes, &last), None, "{last} shows before scrolling");
+        let wheel = Event::MouseWheel { unit: MouseWheelUnit::Point, delta: Vec2::new(0.0, -100_000.0), phase: TouchPhase::Move, modifiers: Modifiers::NONE };
+        // The pointer onto "more..."'s rows, and the wheel turned there.
+        search_frame(&context, &mut editor, &mut popup, vec![Event::PointerMoved(submenu.center())]);
+        search_frame(&context, &mut editor, &mut popup, vec![wheel]);
+        for _ in 0..60 {
+            search_frame(&context, &mut editor, &mut popup, Vec::new());
+        }
+        let shapes = search_frame(&context, &mut editor, &mut popup, Vec::new());
+        let shown = painted(&shapes, &last).unwrap_or_else(|| panic!("{last} does not show after scrolling"));
+        assert!(SCREEN.contains_rect(shown) && submenu.contains_rect(shown), "{last} shows at {shown:?}, outside {submenu:?}");
+        // The submenu stayed open and where it was.
+        assert_eq!(more_rect(&context), Some(submenu));
+    }
+
+    #[test]
+    fn a_short_more_is_only_as_tall_as_its_rows() {
+        let (_, editor, popup, _, submenu) = more_open("ero");
+        let overflow = results(&editor, &popup).len() - editor.user.options.maximum_search_results();
+        assert!(overflow > 0, "nothing overflows");
+        // Its rows and its frame, and no more.
+        assert!(submenu.height() < overflow as f32 * RESULT_HEIGHT + 10.0, "{overflow} rows in {submenu:?}");
+    }
+
+    #[test]
+    fn the_search_stays_on_screen_as_its_results_grow() {
+        let (context, mut editor, mut popup) = search_for("");
+        let typed = vec![Event::Text("e".to_string())];
+        search_frame(&context, &mut editor, &mut popup, typed);
+        assert_eq!(popup.text, "e");
+        for frame in 0..4 {
+            search_frame(&context, &mut editor, &mut popup, Vec::new());
+            let search = search_rect(&context);
+            assert!(SCREEN.contains_rect(search), "frame {frame} after typing: the search runs off the screen at {search:?}");
+        }
     }
 }

@@ -1348,6 +1348,8 @@ fn option_cells(ui: &mut Ui, id: Id, list: Rect, entries: &[String], selected: O
         let text_color = if is_selected || hovered { theme::LABEL_EMPHASIS } else { theme::OPTIONS_LABEL };
         let shown_color = text_color.gamma_multiply(opacity);
         let galley = fitted_line(ui, entry, theme::interface(font_size), shown_color, item.width() - 2.0 * sizes.option_padding[0]);
+        // A cut entry is named in full under the pointer.
+        let response = if galley.elided { response.tooltip(entry) } else { response };
         ui.painter().galley(item.center() - galley.size() / 2.0, galley, shown_color);
         if response.clicked() && enabled && !is_selected {
             chosen = Some(index);
@@ -1695,12 +1697,12 @@ fn text_box(ui: &mut Ui, id: Id, label: &str, current: &str) -> Edit {
     if response.clicked() && ui.is_enabled() {
         slider_popups::open_typing(ui.ctx(), typing_id, current.to_string());
     }
-    // The header column in from the control, as wide as it less the
-    // column (96 at least), in the popup's own units.
+    // Over the value, as wide as it: both already in the editor's points;
+    // only the 96 at least is in the popup's own units.
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
-        top_left: Pos2::new(control.left() + header.width() * popup_scale, control.top()),
-        width: BoxWidth::Fixed(((control.width() - header.width()) * popup_scale).max(96.0 * popup_scale)),
+        top_left: field.min,
+        width: BoxWidth::Fixed(field.width().max(96.0 * popup_scale)),
         font: slider_popups::value_font(),
     };
     match slider_popups::typing_box(ui, typing_id, &typing_look) {
@@ -2276,6 +2278,30 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_option_is_named_in_full_on_hover() {
+        let context = themed_context();
+        let entries = vec!["Constant".to_string(), "Custom".to_string()];
+        let list = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(60.0, 40.0));
+        let frame = |events: Vec<egui::Event>| {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut output = context.run_ui(input, |ui| {
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(list));
+                option_list(&mut row, Id::new("options-test"), &entries, Some(1), 2, 11.0);
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            shapes
+        };
+        let whole = |shapes: &[egui::epaint::ClippedShape]| {
+            shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == "Constant" && !text.galley.elided))
+        };
+        assert!(!whole(&frame(Vec::new())), "Constant is cut in its cell");
+        frame(vec![egui::Event::PointerMoved(list.left_center() + Vec2::new(10.0, 0.0))]);
+        assert!((0..120).any(|_| whole(&frame(Vec::new()))), "Constant shows in full on hover");
+    }
+
+    #[test]
     fn long_paths_keep_their_root_and_end() {
         let context = themed_context();
         let input = egui::RawInput::default();
@@ -2417,6 +2443,50 @@ mod tests {
         }
         slider_frame(&context, 0.25, &spec, Vec::new());
         assert!(slider_popups::typing_text(&context, typing_id).is_none());
+    }
+
+    /// A `TextEditor` row wide enough for the whole header column.
+    const TEXT_ROW: Rect = Rect::from_min_max(Pos2::new(0.0, 40.0), Pos2::new(300.0, 70.0));
+
+    fn text_id() -> Id {
+        Id::new("text-test")
+    }
+
+    /// The row's value: past the header column to the row's end, 2 in
+    /// from its top and bottom.
+    fn text_field(context: &egui::Context) -> Rect {
+        let column = theme::sizes(context).header_column;
+        Rect::from_min_max(Pos2::new(TEXT_ROW.left() + column, TEXT_ROW.top() + 2.0), TEXT_ROW.max - Vec2::new(0.0, 2.0))
+    }
+
+    /// One frame of a text property holding `text`, with these events.
+    fn text_frame(context: &egui::Context, text: &str, events: Vec<egui::Event>) {
+        let output = context.run_ui(frame_input(events, egui::Modifiers::NONE), |ui| {
+            let mut row = ui.new_child(egui::UiBuilder::new().max_rect(TEXT_ROW));
+            text_box(&mut row, text_id(), "Variable Name", text);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn the_text_popup_covers_its_value_at_any_interface_scale() {
+        for scale in [1.0, 1.2, 1.5] {
+            let context = themed_context();
+            context.set_zoom_factor(scale);
+            let field = text_field(&context);
+            let on_value = field.center();
+            let events = [egui::Event::PointerMoved(on_value), press(on_value, egui::PointerButton::Primary, true), press(on_value, egui::PointerButton::Primary, false)];
+            for event in events {
+                text_frame(&context, "height", vec![event]);
+            }
+            // The box's first pass only sizes it (unseen, wherever it fits).
+            text_frame(&context, "height", Vec::new());
+            let area = text_id().with("text-typing").with("area");
+            let shown = context.memory(|memory| memory.area_rect(area)).expect("the popup shows");
+            // Areas sit on whole pixels: within one of the value.
+            let off = (shown.left() - field.left()).abs().max((shown.right() - field.right()).abs()).max((shown.top() - field.top()).abs());
+            assert!(off < 1.0 / scale, "at {scale}: {shown:?} over {field:?}");
+        }
     }
 
     #[test]
