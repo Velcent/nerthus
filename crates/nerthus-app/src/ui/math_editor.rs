@@ -72,7 +72,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor) {
     window = window.open(&mut open);
     window = window.collapsible(false);
     window = window.order(egui::Order::Foreground);
-    window = window.frame(egui::Frame::window(&ctx.global_style()).fill(theme::WINDOW_BACKGROUND).inner_margin(12));
+    window = window.frame(egui::Frame::window(&ctx.global_style()).fill(theme::WINDOW_BACKGROUND).inner_margin(tool_window::MARGIN));
     // 480 × 400 at the interface scale (the window's `UIScaler`).
     window = tool_window::place(ctx, window, window_id().with("window"), Vec2::new(480.0, 400.0));
     window.show(ctx, |ui| {
