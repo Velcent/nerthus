@@ -51,6 +51,10 @@ const BAKED_PANEL_KEY: usize = usize::MAX - 2;
 /// Their buttons' padding and margin (16 across, 8 down).
 const PANEL_BUTTON_PADDING: f32 = 8.0;
 const PANEL_BUTTON_MARGIN: Vec2 = Vec2::new(16.0, 8.0);
+/// A tinted note box (`DescendantAlert`): its text's padding all round,
+/// and the box's height when the text fits in less.
+const NOTICE_PADDING: f32 = 6.0;
+const NOTICE_MIN_HEIGHT: f32 = 40.0;
 
 /// The modifier toggles: icon, tooltip, modifier type, their gaps (left
 /// margins in `ModifierStack`) and accent (`Accent-Muted-Green`, else the
@@ -123,8 +127,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
     let modifiers_rect = Rect::from_min_max(Pos2::new(rect.left() + MODIFIER_PANEL_MARGIN, modifiers_top), rect.max - Vec2::splat(MODIFIER_PANEL_MARGIN));
     let mut body = Rect::from_min_max(Pos2::new(rect.left(), body_top), Pos2::new(rect.right(), modifiers_rect.top()));
     if let Some(alert) = descendant_alert(editor, node_id) {
-        let alert_rect = Rect::from_min_size(body.min + Vec2::new(16.0, 4.0), Vec2::new(body.width() - 32.0, 40.0));
-        notice(ui, alert_rect, alert, theme::ACCENT_TRANSPARENT_ORANGE, theme::ACCENT_STRONG_ORANGE);
+        let alert_rect = notice(ui, body.min + Vec2::new(16.0, 4.0), body.width() - 32.0, alert, theme::ACCENT_TRANSPARENT_ORANGE, theme::ACCENT_STRONG_ORANGE);
         body.min.y = alert_rect.bottom() + 4.0;
     }
     let can_add_ports = editor.document.node(node_id).is_some_and(|node| nerthus_engine::editing::can_add_ports(&node.type_name));
@@ -292,15 +295,21 @@ fn descendant_alert(editor: &Editor, node_id: i32) -> Option<&'static str> {
     Some("This node is not a descendant of the LOCKED node.\nChanges will not show in the current preview.")
 }
 
-/// A tinted note box (`Accent-Transparent-…` fill, `Accent-Strong-…` border).
-fn notice(ui: &mut Ui, rect: Rect, text: &str, fill: egui::Color32, border: egui::Color32) {
-    ui.painter().rect_filled(rect, 4.0, fill);
-    ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.5, border), egui::StrokeKind::Inside);
-    let mut job = egui::text::LayoutJob::simple(text.to_string(), theme::interface(10.0), theme::LABEL_EMPHASIS, rect.width() - 12.0);
+/// A tinted note box (`Accent-Transparent-…` fill, `Accent-Strong-…` border)
+/// `width` wide from `top_left`: its text wrapped `NOTICE_PADDING` in, the
+/// box as high as the text and that padding, but at least
+/// `NOTICE_MIN_HEIGHT`. Returns the box.
+fn notice(ui: &mut Ui, top_left: Pos2, width: f32, text: &str, fill: egui::Color32, border: egui::Color32) -> Rect {
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), theme::interface(10.0), theme::LABEL_EMPHASIS, width - 2.0 * NOTICE_PADDING);
     job.halign = Align::Center;
     let galley = ui.painter().layout_job(job);
+    let height = (galley.size().y + 2.0 * NOTICE_PADDING).max(NOTICE_MIN_HEIGHT);
+    let rect = Rect::from_min_size(top_left, Vec2::new(width, height));
+    ui.painter().rect_filled(rect, 4.0, fill);
+    ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.5, border), egui::StrokeKind::Inside);
     let position = Pos2::new(rect.center().x, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(position, galley, theme::LABEL_EMPHASIS);
+    rect
 }
 
 /// What was clicked on the note that a node can add inputs.
