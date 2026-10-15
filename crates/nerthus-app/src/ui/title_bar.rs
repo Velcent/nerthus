@@ -7,7 +7,8 @@
 //! the right first; the rest has what is left. As that runs out, the
 //! version box goes, then `bUpdate`, then the file name is elided, then
 //! the menus fold into one from Help back to File, then the brand goes.
-//! Undo and the window buttons always stay.
+//! Undo and the window buttons always stay. F10 opens the main menu
+//! (`menu_keys`).
 
 use egui::containers::menu::MenuButton;
 use egui::{Align, Color32, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
@@ -17,7 +18,7 @@ use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::elided_galley;
-use crate::ui::menus;
+use crate::ui::{menu_keys, menus};
 use crate::ui::tool_commands::ToolCommand;
 use crate::files::{FileCommand, AUTOSAVE_CHOICES};
 use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_button};
@@ -308,6 +309,8 @@ fn menu_items(ui: &mut Ui, shown: usize, editor: &Editor, ui_state: &UiState, co
         ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::NONE;
         ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(4);
         ui.visuals_mut().widgets.open.corner_radius = egui::CornerRadius::same(4);
+        // Each menu's popup, for the keys to go between them.
+        let mut popups = Vec::new();
         for name in &MENU_NAMES[..shown] {
             let text = RichText::new(*name).font(theme::interface(11.0)).color(theme::MENU_FOREGROUND);
             let slot = menu_slot(ui, name);
@@ -315,27 +318,29 @@ fn menu_items(ui: &mut Ui, shown: usize, editor: &Editor, ui_state: &UiState, co
             button = button.min_size(slot);
             button = button.frame_when_inactive(false);
             let menu = MenuButton::from_button(button);
-            menu.ui(ui, |ui| {
+            let (response, _) = menu.ui(ui, |ui| {
                 menu_style(ui);
                 menu_contents(ui, name, editor, ui_state, commands);
             });
+            popups.push(egui::Popup::default_response_id(&response));
         }
-        if shown == MENU_NAMES.len() {
-            return;
+        if shown < MENU_NAMES.len() {
+            let mut button = match icons::image("menu", icons::DEFAULT_SIZE, theme::MENU_FOREGROUND) {
+                Some(image) => egui::Button::image(image),
+                None => egui::Button::new(RichText::new("Menu").font(theme::interface(11.0)).color(theme::MENU_FOREGROUND)),
+            };
+            button = button.min_size(Vec2::new(OVERFLOW_WIDTH, TOP_LEVEL_HEIGHT));
+            button = button.frame_when_inactive(false);
+            let (response, _) = MenuButton::from_button(button).ui(ui, |ui| {
+                menu_style(ui);
+                for name in &MENU_NAMES[shown..] {
+                    submenu(ui, None, None, name, |ui| menu_contents(ui, name, editor, ui_state, commands));
+                }
+            });
+            popups.push(egui::Popup::default_response_id(&response));
+            response.on_hover_text("Menu");
         }
-        let mut button = match icons::image("menu", icons::DEFAULT_SIZE, theme::MENU_FOREGROUND) {
-            Some(image) => egui::Button::image(image),
-            None => egui::Button::new(RichText::new("Menu").font(theme::interface(11.0)).color(theme::MENU_FOREGROUND)),
-        };
-        button = button.min_size(Vec2::new(OVERFLOW_WIDTH, TOP_LEVEL_HEIGHT));
-        button = button.frame_when_inactive(false);
-        let (response, _) = MenuButton::from_button(button).ui(ui, |ui| {
-            menu_style(ui);
-            for name in &MENU_NAMES[shown..] {
-                submenu(ui, None, None, name, |ui| menu_contents(ui, name, editor, ui_state, commands));
-            }
-        });
-        response.on_hover_text("Menu");
+        menu_keys::bar(ui.ctx(), &popups);
     });
 }
 
@@ -745,6 +750,57 @@ mod tests {
                 assert_eq!(commands, [Command::Exit], "{name}: close at {width}");
             }
         }
+    }
+
+    /// Frames of the bar as the app draws it, the menus taking their keys
+    /// first: one for each of `keys`, each followed by two without.
+    fn keyed(context: &egui::Context, width: f32, editor: &Editor, keys: &[egui::Key]) -> Vec<Command> {
+        let ui_state = UiState::default();
+        let mut commands = Vec::new();
+        let pressed = |key: egui::Key| vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }];
+        for events in keys.iter().flat_map(|key| [pressed(*key), Vec::new(), Vec::new()]) {
+            let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, HEIGHT));
+            let output = context.run_ui(input(width, events), |ui| {
+                menu_keys::begin(ui.ctx());
+                show(ui, rect, editor, &ui_state, &mut commands);
+            });
+            output.drop_without_applying_deltas();
+        }
+        commands
+    }
+
+    #[test]
+    fn f10_opens_file_and_the_arrows_go_between_the_menus() {
+        use egui::Key::{ArrowLeft, ArrowRight, Enter, F10};
+        let editor = editor_named(NAMES[0]);
+        let width = 1600.0;
+        let context = themed_context(width);
+        assert_eq!(keyed(&context, width, &editor, &[F10, Enter]), [Command::NewProject]);
+        assert!(!egui::Popup::is_any_open(&context));
+        // Edit has nothing to choose with nothing selected; Graph's first
+        // row is New Graph Tab.
+        assert_eq!(keyed(&context, width, &editor, &[F10, ArrowRight, ArrowRight, Enter]), [Command::NewGraphTab]);
+        // Left from File goes round to Help.
+        let help = Command::Tools(ToolCommand::ShowDocs(crate::docs::HOME.to_string()));
+        assert_eq!(keyed(&context, width, &editor, &[F10, ArrowLeft, Enter]), [help]);
+        // F10 again closes the menu.
+        assert!(keyed(&context, width, &editor, &[F10]).is_empty());
+        assert!(egui::Popup::is_any_open(&context));
+        assert!(keyed(&context, width, &editor, &[F10]).is_empty());
+        assert!(!egui::Popup::is_any_open(&context));
+    }
+
+    #[test]
+    fn f10_opens_the_folded_menus_when_the_bar_has_no_room() {
+        use egui::Key::{ArrowRight, Enter, F10};
+        let editor = editor_named(NAMES[2]);
+        let widths = measured(&editor, None);
+        let least = Plan { brand: false, menus: 0, version: false, update: false, name_width: NAME_LEAST_WIDTH };
+        let width = total(&widths, &least);
+        assert_eq!(plan(&widths, width).menus, 0);
+        let context = themed_context(width);
+        // The menu of menus opens on File, whose first row Right opens.
+        assert_eq!(keyed(&context, width, &editor, &[F10, ArrowRight, Enter]), [Command::NewProject]);
     }
 
     #[test]
