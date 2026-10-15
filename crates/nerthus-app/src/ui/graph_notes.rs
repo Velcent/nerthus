@@ -86,6 +86,11 @@ pub fn note_rect(editor: &Editor, tab: usize, id: i32) -> Option<Rect> {
     notes.iter().find(|note| note.id == id).map(|note| note.rect)
 }
 
+/// The rectangles of the notes on `tab`, by id (`Extents`).
+pub fn note_rects(editor: &Editor, tab: usize) -> Vec<(i32, Rect)> {
+    layouts(editor, tab).into_iter().map(|note| (note.id, note.rect)).collect()
+}
+
 /// The note's Markdown as wrapped text: `#` headings in semibold, list
 /// items with bullets, emphasis markers dropped.
 pub(crate) fn markdown_job(markdown: &str, zoom: f32, width: f32) -> LayoutJob {

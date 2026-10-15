@@ -50,6 +50,8 @@ const CIRCUIT_RUN: f32 = 24.0;
 pub(crate) const SIMPLIFIED_ZOOM: f32 = 0.4;
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 2.0;
+/// The room Extents and Selection leave around what they frame.
+const FRAME_MARGIN: f32 = 60.0;
 /// How far from a port a dragged connection still snaps to it.
 const SNAP_DISTANCE: f32 = 18.0;
 /// `SnapToOtherShapes`: how near (canvas units) an edge or a centre snaps.
@@ -787,7 +789,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     name_portals(&mut layouts, editor);
     let by_id: HashMap<i32, usize> = layouts.iter().enumerate().map(|(index, layout)| (layout.id, index)).collect();
 
-    apply_zoom_request(state, &layouts, &frame.groups, editor, rect);
+    apply_zoom_request(state, &layouts, &frame, editor, rect);
 
     // The background takes clicks, drags and the context menu.
     let background_id = ui.id().with("graph-background");
@@ -958,7 +960,7 @@ pub fn connection_ends(editor: &Editor, state: &GraphState, to: i32, to_port: &s
     Some((view.to_screen(origin, start), view.to_screen(origin, end)))
 }
 
-fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], groups: &[GroupData], editor: &Editor, rect: Rect) {
+fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &GroupFrame, editor: &Editor, rect: Rect) {
     let Some(request) = state.zoom_request.take() else {
         return;
     };
@@ -973,7 +975,7 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], groups: &[
     let centred = match request {
         ZoomRequest::Center(id) => layouts.iter().find(|layout| layout.id == id).map(|layout| layout.rect),
         ZoomRequest::CenterNote(id) => crate::ui::graph_notes::note_rect(editor, tab, id),
-        ZoomRequest::CenterGroup(id) => groups.iter().find(|group| group.id == id).map(GroupData::bounds),
+        ZoomRequest::CenterGroup(id) => frame.groups.iter().find(|group| group.id == id).map(GroupData::bounds),
         _ => None,
     };
     if let Some(element) = centred {
@@ -981,24 +983,54 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], groups: &[
         view.location = element.center().to_vec2() - visible / 2.0;
         return;
     }
-    let chosen: Vec<&NodeLayout> = match request {
-        ZoomRequest::Selection => layouts.iter().filter(|layout| editor.selection.contains(&layout.id)).collect(),
-        _ => layouts.iter().collect(),
+    // Extents takes in the tab's groups and the notes no collapsed group
+    // hides as well as its nodes; Selection the selected nodes.
+    let items: Vec<Rect> = match request {
+        ZoomRequest::Selection => layouts.iter().filter(|layout| editor.selection.contains(&layout.id)).map(|layout| layout.rect).collect(),
+        _ => {
+            let nodes = layouts.iter().map(|layout| layout.rect);
+            let groups = frame.groups.iter().map(GroupData::bounds);
+            let notes = crate::ui::graph_notes::note_rects(editor, tab).into_iter();
+            let shown_notes = notes.filter(|(id, _)| !frame.hidden_in.contains_key(id)).map(|(_, note)| note);
+            nodes.chain(groups).chain(shown_notes).collect()
+        }
     };
-    let Some(first) = chosen.first() else {
+    let reach = rect.size() / MIN_ZOOM - Vec2::splat(2.0 * FRAME_MARGIN);
+    let focus = view.location + rect.size() / (2.0 * view.zoom);
+    let Some(bounds) = framed_bounds(&items, reach, focus.to_pos2()) else {
         return;
     };
-    let mut bounds = first.rect;
-    for layout in &chosen {
-        bounds = bounds.union(layout.rect);
-    }
-    let bounds = bounds.expand(60.0);
+    let bounds = bounds.expand(FRAME_MARGIN);
     let zoom_x = rect.width() / bounds.width();
     let zoom_y = rect.height() / bounds.height();
     let zoom = zoom_x.min(zoom_y).clamp(MIN_ZOOM, 1.0);
     view.zoom = zoom;
     let visible = rect.size() / zoom;
     view.location = bounds.center().to_vec2() - visible / 2.0;
+}
+
+/// What Extents and Selection frame: the bounds of all `items` when they
+/// fit within `reach` (the canvas the graph shows at the least zoom).
+/// Items too far apart for that leave the view on the most of them that
+/// fit around any one, the one nearest `focus` on a tie, rather than on
+/// the empty canvas between them.
+fn framed_bounds(items: &[Rect], reach: Vec2, focus: Pos2) -> Option<Rect> {
+    let all = items.iter().copied().reduce(Rect::union)?;
+    if all.width() <= reach.x && all.height() <= reach.y {
+        return Some(all);
+    }
+    let mut best: Option<(usize, f32, Rect)> = None;
+    for seed in items {
+        let window = Rect::from_center_size(seed.center(), reach);
+        let near = items.iter().filter(|item| window.contains_rect(**item));
+        let (count, bounds) = near.fold((0, *seed), |(count, bounds), item| (count + 1, bounds.union(*item)));
+        let distance = bounds.center().distance_sq(focus);
+        let better = best.is_none_or(|(most, nearest, _)| count > most || (count == most && distance < nearest));
+        if better {
+            best = Some((count, distance, bounds));
+        }
+    }
+    best.map(|(_, _, bounds)| bounds)
 }
 
 /// Pans with the middle button (anywhere on the graph) or a right drag on
@@ -2853,5 +2885,76 @@ mod tests {
         state.reset();
         assert_eq!(state.renaming, None);
         assert!(state.rename_text.is_empty());
+    }
+
+    /// The canvas the graph shows.
+    fn shown_canvas(state: &GraphState) -> Rect {
+        let view = state.view();
+        Rect::from_min_size(view.location.to_pos2(), state.rect.size() / view.zoom)
+    }
+
+    fn node_rect(editor: &Editor, id: i32) -> Rect {
+        layout_node(editor.document.node(id).unwrap(), editor.user.options.default_node_size()).rect
+    }
+
+    #[test]
+    fn extents_frames_notes_and_groups_as_well_as_nodes() {
+        let mut document = Document::new();
+        let node = document.add_node("Mountain", [26100.0, 26100.0]).unwrap();
+        let note = document.add_note([26100.0, 29000.0], 0);
+        let group = document.add_group(&[], [22000.0, 26000.0], [400.0, 300.0], 0);
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = shown_canvas(&state);
+        assert!(shown.contains_rect(node_rect(&editor, node)));
+        assert!(shown.contains_rect(crate::ui::graph_notes::note_rect(&editor, 0, note).unwrap()));
+        assert!(shown.contains_rect(editor.document.group(group).unwrap().bounds()));
+    }
+
+    #[test]
+    fn extents_too_wide_for_the_least_zoom_frames_the_bulk() {
+        let mut document = Document::new();
+        let bulk: Vec<i32> = [[26100.0, 26100.0], [26500.0, 26100.0], [26100.0, 26500.0]].into_iter().map(|at| document.add_node("Mountain", at).unwrap()).collect();
+        let stray = document.add_node("Mountain", [1_000_000.0, 1_000_000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = shown_canvas(&state);
+        for node in &bulk {
+            assert!(shown.contains_rect(node_rect(&editor, *node)), "{shown:?}");
+        }
+        assert!(!shown.intersects(node_rect(&editor, stray)));
+        // Selection does the same with selected nodes.
+        editor.selection = vec![bulk[0], stray];
+        state.zoom_request = Some(ZoomRequest::Selection);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = shown_canvas(&state);
+        assert!(shown.contains_rect(node_rect(&editor, bulk[0])));
+        assert!(!shown.intersects(node_rect(&editor, stray)));
+    }
+
+    #[test]
+    fn extents_of_lone_nodes_far_apart_frames_the_nearer() {
+        let mut document = Document::new();
+        let near = document.add_node("Mountain", [-100_000.0, -100_000.0]).unwrap();
+        let far = document.add_node("Mountain", [1_000_000.0, 1_000_000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = shown_canvas(&state);
+        assert!(shown.contains_rect(node_rect(&editor, near)), "{shown:?}");
+        assert!(!shown.intersects(node_rect(&editor, far)));
+        // Asked again, it stays put.
+        let view = state.view();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        assert_eq!(state.view(), view);
     }
 }
