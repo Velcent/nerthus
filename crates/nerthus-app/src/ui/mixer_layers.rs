@@ -16,7 +16,8 @@ use serde_json::{json, Value};
 
 use crate::icons;
 use crate::theme;
-use crate::ui::editors::{dropdown_box, option_list, range_slider, slider, Edit, RangeSpec, SliderSpec};
+use crate::ui::editors::{dropdown_box, fitted_line, option_list, range_slider, slider, Edit, RangeSpec, SliderSpec};
+use crate::ui::widgets::Tooltips;
 
 /// `MaskSource` as the source list names it.
 const SOURCES: [(&str, &str); 5] = [("Constant", "None"), ("Height", "Height"), ("Slope", "Slope"), ("Both", "Mixed"), ("Custom", "Custom")];
@@ -106,6 +107,51 @@ fn source_name(node: &NodeData, nodes: &IndexMap<i32, NodeData>, port: &str, fal
     source.map(|source| source.name.clone()).unwrap_or_else(|| fallback.to_string())
 }
 
+/// `LayerListItem`'s height: the 32 preview, padding 4 and the border.
+const LAYER_ROW_HEIGHT: f32 = 32.0 + 8.0 + 2.0;
+
+/// Where a `LayerListItem`'s parts go in its row.
+struct LayerRowLayout {
+    eye: Rect,
+    preview: Rect,
+    /// Between the preview and the simplify eye: the source's and the
+    /// layer's names side by side.
+    names: Rect,
+    /// The names one above the other: 8 clear of the preview and into
+    /// the simplify eye's padding, so "Layer 15" fits where the property
+    /// area is narrowest.
+    stacked_names: Rect,
+    simplify: Rect,
+    swatch: Rect,
+}
+
+impl LayerRowLayout {
+    fn of(row: Rect) -> Self {
+        let content = row.shrink2(Vec2::new(16.0, 4.0));
+        // `toggle` (`IconX-Toggle`, padding 8, margin 0, 0, 8, 0), then the
+        // preview (32).
+        let eye = Rect::from_min_size(Pos2::new(content.left() + 8.0, content.center().y - 8.0), Vec2::splat(16.0));
+        let preview = Rect::from_min_size(Pos2::new(eye.right() + 8.0 + 8.0, content.center().y - 16.0), Vec2::splat(32.0));
+        // From the right: the swatch (margin 8, 2, 0, 2) and the simplify
+        // eye (`IconX-Toggle-Colored`, margin 8, 0, 0, 0).
+        let swatch = Rect::from_min_size(Pos2::new(content.right() - 18.0, content.top() + 2.0), Vec2::new(18.0, content.height() - 4.0));
+        let simplify = Rect::from_min_size(Pos2::new(swatch.left() - 8.0 - 8.0 - 16.0, content.center().y - 8.0), Vec2::splat(16.0));
+        let between = |left: f32, right: f32| Rect::from_min_max(Pos2::new(left, content.top()), Pos2::new(right.max(left), content.bottom()));
+        let names = between(preview.right() + 8.0 + 4.0, simplify.left() - 8.0 - 4.0);
+        let stacked_names = between(preview.right() + 8.0, simplify.left() - 4.0);
+        LayerRowLayout { eye, preview, names, stacked_names, simplify, swatch }
+    }
+}
+
+/// The gap between the source's name and the layer's beside it.
+const NAME_GAP: f32 = 4.0;
+
+/// Whether the source's name and the layer's fit side by side in `room`.
+fn names_fit(ui: &Ui, label: &str, key: &str, room: f32) -> bool {
+    let width = |text: String| ui.painter().layout_no_wrap(text, theme::monospace(12.0), Color32::WHITE).size().x;
+    width(label.to_string()) + NAME_GAP + width(humanize_title(key)) <= room
+}
+
 /// A `MixerListBoxItem` (`ModifierBorder`: cladding, padding 16, 4; the
 /// first and last rounded; `#343a40` when chosen; a pale outline under the
 /// pointer). Returns the row's rect and response.
@@ -158,14 +204,19 @@ pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData
         }
         // Black layers all take the colour at the layer count in the list.
         let list_fallback = palette[list.len() % palette.len()];
-        for layer in &list {
+        let labels: Vec<String> = list.iter().map(|layer| source_name(node, nodes, &layer.key, &layer.key)).collect();
+        // Where any row's names would not fit side by side, every row
+        // puts them one above the other.
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(ui.available_width(), LAYER_ROW_HEIGHT));
+        let room = LayerRowLayout::of(row).names.width();
+        let stacked = !list.iter().zip(&labels).all(|(layer, label)| names_fit(ui, label, &layer.key, room));
+        for (layer, label) in list.iter().zip(&labels) {
             let first = row_index == 0;
             let last = row_index + 1 == row_count;
             row_index += 1;
             let is_selected = selected.as_deref() == Some(layer.key.as_str());
             let color = own_color(&layer.value).unwrap_or(list_fallback);
-            let label = source_name(node, nodes, &layer.key, &layer.key);
-            if let Some(edit) = layer_row(ui, id, layer, &label, color, first, last, is_selected, &mut selected) {
+            if let Some(edit) = layer_row(ui, id, layer, label, color, first, last, is_selected, stacked, &mut selected) {
                 edits.push((layer.key.clone(), edit));
             }
         }
@@ -187,53 +238,62 @@ pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData
 
 /// A `LayerListItem`: the visibility eye, a 32 preview, the source's name
 /// in the layer's colour, the layer's name, the simplify eye and the
-/// colour swatch (18 wide).
+/// colour swatch (18 wide). `stacked`, the source's name goes above the
+/// layer's, each cut with "…" to the room, and the row's tooltip names
+/// them in full when either is cut.
 #[allow(clippy::too_many_arguments)]
-fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, first: bool, last: bool, is_selected: bool, selected: &mut Option<String>) -> Option<Edit> {
-    let (row, response) = list_item(ui, 32.0 + 8.0 + 2.0, first, last, is_selected, Sense::click());
-    let content = row.shrink2(Vec2::new(16.0, 4.0));
+fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, first: bool, last: bool, is_selected: bool, stacked: bool, selected: &mut Option<String>) -> Option<Edit> {
+    let (row, response) = list_item(ui, LAYER_ROW_HEIGHT, first, last, is_selected, Sense::click());
+    let layout = LayerRowLayout::of(row);
     let mut edit = None;
 
-    // `toggle` (`IconX-Toggle`, padding 8, margin 0, 0, 8, 0).
     let visible = layer.value.get("IsVisible").and_then(Value::as_bool).unwrap_or(true);
-    let eye_rect = Rect::from_min_size(Pos2::new(content.left() + 8.0, content.center().y - 8.0), Vec2::splat(16.0));
-    let eye = ui.interact(eye_rect.expand(8.0), id.with(("eye", &layer.key)), Sense::click());
+    let eye = ui.interact(layout.eye.expand(8.0), id.with(("eye", &layer.key)), Sense::click());
     let eye_icon = if visible { "eye" } else { "eye-closed" };
-    icons::paint(ui, eye_rect, eye_icon, theme::ICON_DEFAULT);
+    icons::paint(ui, layout.eye, eye_icon, theme::ICON_DEFAULT);
     if eye.clicked() {
         let mut changed = layer.value.clone();
         changed["IsVisible"] = json!(!visible);
         edit = Some(Edit::Set(changed));
     }
     // The preview (32, `Accent-Muted-Gray` border): the layer's colour.
-    let preview = Rect::from_min_size(Pos2::new(eye_rect.right() + 8.0 + 8.0, content.center().y - 16.0), Vec2::splat(32.0));
-    ui.painter().rect_filled(preview, 0.0, color);
-    ui.painter().rect_stroke(preview, 0.0, Stroke::new(1.0, theme::ACCENT_MUTED_GRAY), StrokeKind::Inside);
+    ui.painter().rect_filled(layout.preview, 0.0, color);
+    ui.painter().rect_stroke(layout.preview, 0.0, Stroke::new(1.0, theme::ACCENT_MUTED_GRAY), StrokeKind::Inside);
 
-    // From the right: the swatch (margin 8, 2, 0, 2), the simplify eye
-    // (`IconX-Toggle-Colored`, margin 8, 0, 0, 0) and the layer's name.
-    let swatch = Rect::from_min_size(Pos2::new(content.right() - 18.0, content.top() + 2.0), Vec2::new(18.0, content.height() - 4.0));
-    ui.painter().rect_filled(swatch, 2.0, color);
+    ui.painter().rect_filled(layout.swatch, 2.0, color);
     let simplified = layer.value.get("IsSimplified").and_then(Value::as_bool).unwrap_or(false);
-    let simplify_rect = Rect::from_min_size(Pos2::new(swatch.left() - 8.0 - 8.0 - 16.0, content.center().y - 8.0), Vec2::splat(16.0));
-    let simplify = ui.interact(simplify_rect.expand(8.0), id.with(("simplify", &layer.key)), Sense::click());
+    let simplify = ui.interact(layout.simplify.expand(8.0), id.with(("simplify", &layer.key)), Sense::click());
     let simplify_color = if simplified { theme::ACCENT_MUTED_MAGENTA } else { theme::ICON_DARKISH };
-    icons::paint(ui, simplify_rect, "eye-dotted", simplify_color);
+    icons::paint(ui, layout.simplify, "eye-dotted", simplify_color);
     if simplify.clicked() {
         let mut changed = layer.value.clone();
         changed["IsSimplified"] = json!(!simplified);
         edit = Some(Edit::Set(changed));
     }
-    let layer_galley = ui.painter().layout_no_wrap(humanize_title(&layer.key), theme::monospace(12.0), theme::LABEL_DEFAULT);
-    let layer_position = Pos2::new(simplify_rect.left() - 8.0 - 4.0 - layer_galley.size().x, content.center().y - layer_galley.size().y / 2.0);
-    let name_right = layer_position.x - 4.0;
-    ui.painter().galley(layer_position, layer_galley, theme::LABEL_DEFAULT);
-    let mut job = egui::text::LayoutJob::simple_singleline(label.to_string(), theme::monospace(12.0), color);
-    job.wrap.max_width = (name_right - preview.right() - 8.0 - 4.0).max(0.0);
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    let name_galley = ui.painter().layout_job(job);
-    ui.painter().galley(Pos2::new(preview.right() + 8.0 + 4.0, content.center().y - name_galley.size().y / 2.0), name_galley, color);
+
+    // The names, kept to their room.
+    let names = if stacked { layout.stacked_names } else { layout.names };
+    let painter = ui.painter_at(names);
+    let font = theme::monospace(12.0);
+    let layer_name = humanize_title(&layer.key);
+    let mut cut = false;
+    if stacked {
+        let source_galley = fitted_line(ui, label, font.clone(), color, names.width());
+        let layer_galley = fitted_line(ui, &layer_name, font, theme::LABEL_DEFAULT, names.width());
+        cut = source_galley.elided || layer_galley.elided;
+        let top = names.center().y - (source_galley.size().y + layer_galley.size().y) / 2.0;
+        let layer_top = top + source_galley.size().y;
+        painter.galley(Pos2::new(names.left(), top), source_galley, color);
+        painter.galley(Pos2::new(names.left(), layer_top), layer_galley, theme::LABEL_DEFAULT);
+    } else {
+        // The source's name from the left, the layer's from the right.
+        let layer_galley = ui.painter().layout_no_wrap(layer_name.clone(), font.clone(), theme::LABEL_DEFAULT);
+        let layer_position = Pos2::new(names.right() - layer_galley.size().x, names.center().y - layer_galley.size().y / 2.0);
+        painter.galley(layer_position, layer_galley, theme::LABEL_DEFAULT);
+        let source_galley = ui.painter().layout_no_wrap(label.to_string(), font, color);
+        painter.galley(Pos2::new(names.left(), names.center().y - source_galley.size().y / 2.0), source_galley, color);
+    }
+    let response = if cut { response.tooltip(format!("{label}\n{layer_name}")) } else { response };
 
     if response.clicked() {
         *selected = Some(layer.key.clone());
@@ -241,22 +301,43 @@ fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, fi
     edit
 }
 
+/// `text` wrapped to `width` in at most `rows` lines, the last cut with
+/// "…".
+fn wrapped(ui: &Ui, text: String, font: egui::FontId, color: Color32, width: f32, rows: usize) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(text, font, color, width.max(0.0));
+    job.wrap.max_rows = rows;
+    job.wrap.overflow_character = Some('…');
+    ui.painter().layout_job(job)
+}
+
 /// The ground layer (disabled): the In map's 48 preview and "(Ground
-/// Layer)" with its note.
+/// Layer)" with its note, both wrapped to the row (taller as they need)
+/// and named in full by its tooltip when cut.
 fn ground_layer(ui: &mut Ui, node: &NodeData, nodes: &IndexMap<i32, NodeData>, first: bool) {
-    let (row, _) = list_item(ui, 48.0 + 16.0 + 8.0, first, true, false, Sense::hover());
+    // The text: 8 right of the preview, as far as the row's padding.
+    let text_width = ui.available_width() - 16.0 - 48.0 - 8.0 - 16.0;
+    let source = source_name(node, nodes, "In", "");
+    let title_text = format!("{source} (Ground Layer)");
+    let note_text = "Each layer is added above this, bottom to top.";
+    let title = wrapped(ui, title_text.clone(), theme::semibold(12.0), theme::LABEL_DEFAULT, text_width, 2);
+    let note = wrapped(ui, note_text.to_string(), theme::interface(10.0), theme::ICON_DEFAULT, text_width, 3);
+    let cut = title.elided || note.elided;
+    let text_height = title.size().y + note.size().y;
+    let height = (48.0_f32 + 16.0 + 8.0).max(4.0 + 8.0 + 8.0 + text_height + 8.0);
+    let (row, response) = list_item(ui, height, first, true, false, Sense::hover());
     let content = row.shrink2(Vec2::new(16.0, 4.0));
     let preview = Rect::from_min_size(Pos2::new(content.left(), content.top() + 8.0), Vec2::splat(48.0));
     ui.painter().rect_filled(preview, 0.0, theme::PANEL_BACKGROUND);
     ui.painter().rect_stroke(preview, 0.0, Stroke::new(1.0, theme::ACCENT_MUTED_GRAY), StrokeKind::Inside);
-    let source = source_name(node, nodes, "In", "");
-    let title = ui.painter().layout_no_wrap(format!("{source} (Ground Layer)"), theme::semibold(12.0), theme::LABEL_DEFAULT);
-    let note = ui.painter().layout_no_wrap("Each layer is added above this, bottom to top.".to_string(), theme::interface(10.0), theme::ICON_DEFAULT);
     let text_left = preview.right() + 8.0;
     let text_top = preview.top() + 8.0;
     let note_top = text_top + title.size().y;
-    ui.painter().galley(Pos2::new(text_left, text_top), title, theme::LABEL_DEFAULT);
-    ui.painter().galley(Pos2::new(text_left, note_top), note, theme::ICON_DEFAULT);
+    let painter = ui.painter_at(Rect::from_min_max(Pos2::new(text_left, content.top()), content.max));
+    painter.galley(Pos2::new(text_left, text_top), title, theme::LABEL_DEFAULT);
+    painter.galley(Pos2::new(text_left, note_top), note, theme::ICON_DEFAULT);
+    if cut {
+        response.tooltip(format!("{title_text}\n{note_text}"));
+    }
 }
 
 /// `LayerEditor` (margin 16; its stack 4 wider each side) for one layer;
@@ -277,11 +358,21 @@ fn layer_editor(ui: &mut Ui, id: Id, layer: &Value, label: &str, key: &str, colo
         let layer_position = Pos2::new(header.right() - 8.0 - layer_name.size().x, header.center().y - layer_name.size().y / 2.0);
         ui.painter().galley(layer_position, layer_name, theme::LABEL_DEFAULT);
 
-        // The mask source (`lstSource`: `ListBox-OptionsX` at 10).
+        // The mask source (`lstSource`: `ListBox-OptionsX` at 10), in one
+        // row; as `OptionsX` wraps, two columns narrower than 300 and one
+        // narrower than 200.
         let source = layer.get("Mask").and_then(Value::as_str).unwrap_or("Height").to_string();
         let entries: Vec<String> = SOURCES.iter().map(|(_, text)| text.to_string()).collect();
         let current = SOURCES.iter().position(|(member, _)| *member == source);
-        if let Some(index) = option_list(ui, id.with("source"), &entries, current, entries.len(), 10.0) {
+        let width = ui.available_width();
+        let columns = if width < 200.0 {
+            1
+        } else if width < 300.0 {
+            2
+        } else {
+            entries.len()
+        };
+        if let Some(index) = option_list(ui, id.with("source"), &entries, current, columns, 10.0) {
             changed["Mask"] = json!(SOURCES[index].0);
             any = true;
         }
@@ -376,6 +467,139 @@ fn layer_editor(ui: &mut Ui, id: Id, layer: &Value, label: &str, key: &str, colo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Document;
+    use egui::epaint::{ClippedShape, Shape, TextShape};
+
+    /// What the panel has at 1600 by 960 and 120%: the property area at
+    /// its narrowest.
+    const DEFAULT_WIDTH: f32 = 234.0;
+    const WIDTHS: [f32; 6] = [DEFAULT_WIDTH, 260.0, 300.0, 340.0, 420.0, 640.0];
+
+    fn themed_context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        context
+    }
+
+    /// A Mixer with `layers` layers.
+    fn mixer(layers: usize) -> (Document, i32) {
+        let mut document = Document::new();
+        let mixer = document.add_node("Mixer", [26000.0, 26000.0]).unwrap();
+        while layers_of(&document, mixer).len() < layers {
+            document.add_new_input(mixer).unwrap();
+        }
+        (document, mixer)
+    }
+
+    fn layers_of(document: &Document, mixer: i32) -> Vec<Layer> {
+        let node = document.node(mixer).unwrap();
+        layers(&node.values, node)
+    }
+
+    /// One frame of the panel `width` across: what it drew.
+    fn frame(context: &egui::Context, document: &Document, mixer: i32, width: f32) -> Vec<ClippedShape> {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1200.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let node = document.node(mixer).unwrap();
+        let nodes = &document.project.assets[0].terrain.nodes;
+        let mut output = context.run_ui(input, |ui| {
+            let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(20.0, 0.0), Vec2::new(width, 1200.0))));
+            panel.spacing_mut().item_spacing = Vec2::ZERO;
+            show(&mut panel, Id::new("mixer-test"), node, nodes, &node.values);
+        });
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        shapes
+    }
+
+    /// The topmost text saying `text` (in the list rather than the chosen
+    /// layer's header below it) and its clip.
+    fn text_saying<'a>(shapes: &'a [ClippedShape], text: &str) -> (Rect, &'a TextShape) {
+        let found = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            Shape::Text(shape) if shape.galley.text() == text => Some((clipped.clip_rect, shape)),
+            _ => None,
+        });
+        let topmost = found.min_by(|(_, one), (_, other)| one.pos.y.total_cmp(&other.pos.y));
+        topmost.unwrap_or_else(|| panic!("{text:?} shows"))
+    }
+
+    #[test]
+    fn layer_names_keep_clear_of_each_other_and_the_preview() {
+        let context = themed_context();
+        let (document, mixer) = mixer(3);
+        for width in WIDTHS {
+            let shapes = frame(&context, &document, mixer, width);
+            for index in 1..=3 {
+                let (source_clip, source) = text_saying(&shapes, &format!("Layer{index}"));
+                let (layer_clip, layer) = text_saying(&shapes, &format!("Layer {index}"));
+                let source_rect = source.visual_bounding_rect();
+                let layer_rect = layer.visual_bounding_rect();
+                assert!(!source_rect.intersects(layer_rect), "at {width}, the source {source_rect:?} clears the layer's name {layer_rect:?}");
+                assert!(source_clip.contains_rect(source_rect) && layer_clip.contains_rect(layer_rect), "at {width}, layer {index}'s names are not cut off by the edge of their room");
+                assert!(source.galley.rows[0].glyphs.len() > 1, "at {width}, more of the source than \"…\" shows");
+                // Clear of the preview (32 wide, 8 + 16 + 8 + 8 in from
+                // the row, 4 inside the list).
+                let preview_right = 20.0 + 4.0 + 16.0 + 8.0 + 16.0 + 8.0 + 8.0 + 32.0;
+                assert!(source_rect.left() > preview_right && layer_rect.left() > preview_right, "at {width}, layer {index}'s names clear the preview");
+            }
+        }
+    }
+
+    #[test]
+    fn layer_names_show_whole_at_the_default_width() {
+        let context = themed_context();
+        let (document, mixer) = mixer(15);
+        let shapes = frame(&context, &document, mixer, DEFAULT_WIDTH);
+        for name in ["Layer1", "Layer 1", "Layer15", "Layer 15"] {
+            let (clip, shape) = text_saying(&shapes, name);
+            assert!(!shape.galley.elided, "{name} shows whole");
+            assert!(clip.contains_rect(shape.visual_bounding_rect()), "{name} is not cut off");
+        }
+    }
+
+    #[test]
+    fn layer_names_sit_side_by_side_where_they_fit() {
+        let context = themed_context();
+        let (document, mixer) = mixer(3);
+        let shapes = frame(&context, &document, mixer, 420.0);
+        let source = text_saying(&shapes, "Layer2").1.visual_bounding_rect();
+        let layer = text_saying(&shapes, "Layer 2").1.visual_bounding_rect();
+        assert!(source.right() < layer.left() && source.center().y == layer.center().y, "{source:?} beside {layer:?}");
+    }
+
+    #[test]
+    fn the_ground_layer_note_stays_inside_the_list() {
+        let context = themed_context();
+        let (document, mixer) = mixer(2);
+        for width in WIDTHS {
+            let shapes = frame(&context, &document, mixer, width);
+            let list_right = 20.0 + width - 4.0;
+            for text in [" (Ground Layer)", "Each layer is added above this, bottom to top."] {
+                let (clip, shape) = text_saying(&shapes, text);
+                let rect = shape.visual_bounding_rect();
+                assert!(rect.right() <= list_right - 16.0, "at {width}, {text:?} ({rect:?}) stays inside the list ({list_right})");
+                assert!(clip.contains_rect(rect), "at {width}, {text:?} is not cut off");
+                if width >= DEFAULT_WIDTH {
+                    assert!(!shape.galley.elided, "at {width}, {text:?} shows whole");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mask_sources_show_whole() {
+        let context = themed_context();
+        let (document, mixer) = mixer(1);
+        for width in WIDTHS.into_iter().chain([200.0, 224.0, 312.0, 324.0]) {
+            let shapes = frame(&context, &document, mixer, width);
+            for (_, text) in SOURCES {
+                let (_, shape) = text_saying(&shapes, text);
+                assert!(!shape.galley.elided, "at {width}, {text} shows whole");
+            }
+        }
+    }
 
     #[test]
     fn palette_shuffle_is_a_permutation() {
