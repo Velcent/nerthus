@@ -9,6 +9,7 @@ use egui::{Align, Align2, Color32, Id, Layout, RichText, Sense, Stroke, Ui, Vec2
 
 use crate::theme;
 use crate::ui::markdown;
+use crate::ui::tool_window;
 use crate::ui::widgets::{self, dialog_button, dialog_button_row, DialogFit};
 use crate::updates::{UpdateAnswer, UpdateToken};
 
@@ -119,11 +120,18 @@ pub fn show(ctx: &egui::Context, help: &mut HelpWindows) {
     }
 }
 
+/// The least room left beside a dialog in the body: the dialogs' margin
+/// at each side. Above and below it takes none: the title bar and the
+/// status bar already stand between it and the window's edges.
+const DIALOG_MARGIN: Vec2 = Vec2::new(widgets::DIALOG_SCREEN_MARGIN, 0.0);
+
 /// A borderless dialog (`Window-Dark` on `Menu-Border`,
-/// rounded, with a shadow), centred at this size or the dialogs' room
-/// (`widgets::dialog_room`) when that is smaller.
+/// rounded, with a shadow), centred in the shell's body at this size or
+/// the body's less a margin. The title bar's menus then show above it
+/// however short the window is.
 pub fn dialog_window(ctx: &egui::Context, id: &str, wanted: Vec2) -> egui::Window<'static> {
-    let size = wanted.min(widgets::dialog_room(ctx));
+    let body = tool_window::body(ctx);
+    let size = wanted.min((body.size() - 2.0 * DIALOG_MARGIN).max(Vec2::ZERO));
     let mut frame = egui::Frame::new();
     frame = frame.fill(theme::WINDOW_DARK);
     frame = frame.stroke(Stroke::new(1.0, theme::MENU_BORDER));
@@ -138,6 +146,8 @@ pub fn dialog_window(ctx: &egui::Context, id: &str, wanted: Vec2) -> egui::Windo
     window = window.collapsible(false);
     window = window.frame(frame);
     window = window.fixed_size(size);
+    // egui anchors a window in the rect it keeps it to: here, the body.
+    window = window.constrain_to(body);
     window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
     window = window.order(egui::Order::Foreground);
     window
@@ -211,16 +221,20 @@ fn shortcuts_window(ctx: &egui::Context) -> bool {
     let mut open = !close_key(ctx);
     let window = dialog_window(ctx, "shortcut-guide", Vec2::new(680.0, 920.0));
     window.show(ctx, |ui| {
-        let height = ui.available_height();
         ui.vertical_centered(|ui| {
             ui.add_space(16.0);
             ui.label(RichText::new("Shortcut Guide").font(theme::interface(32.0)).color(theme::LABEL_EMPHASIS));
             ui.add_space(16.0);
         });
-        let footer = 18.0 + 2.0 * 8.0 + 8.0 + 32.0;
+        // The text has what the title leaves less the Close button (its
+        // text 8 in from its edges), 8 above it and 32 below, so that the
+        // window keeps its size.
+        let spacing = ui.spacing().item_spacing.y;
+        let button = ui.fonts_mut(|fonts| fonts.row_height(&theme::interface(18.0))) + 2.0 * 8.0;
+        let footer = spacing + 8.0 + button + spacing + 32.0;
         let mut scroll = egui::ScrollArea::vertical();
         scroll = scroll.id_salt("shortcut-guide-text");
-        scroll = scroll.max_height((height - 80.0 - footer).max(100.0));
+        scroll = scroll.max_height((ui.available_height() - footer).max(100.0));
         scroll = scroll.auto_shrink([false, false]);
         // The scroll area 12 in from the dialog's sides, so that its bar
         // keeps clear of the border, and the text 24 further in: 36 in all.
@@ -550,6 +564,47 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
 mod tests {
     use super::*;
     use crate::ui::widgets::fit_checks;
+    use crate::ui::{status_bar, title_bar};
+    use egui::{AreaState, Pos2, RawInput, Rect};
+
+    /// The screen, in points, of 1920 × 1200, 1920 × 1080, 1600 × 960,
+    /// 1366 × 768, 800 × 600 and 640 × 480 at the default 120%.
+    const SCREENS: [Vec2; 6] = [
+        Vec2::new(1600.0, 1000.0),
+        Vec2::new(1600.0, 900.0),
+        Vec2::new(1333.0, 800.0),
+        Vec2::new(1138.0, 640.0),
+        Vec2::new(666.0, 500.0),
+        Vec2::new(533.0, 400.0),
+    ];
+
+    /// Where the window `id` settles with `help` open on this screen.
+    fn settled(help: &mut HelpWindows, id: &str, screen: Vec2) -> Rect {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        for _ in 0..10 {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), ..Default::default() };
+            let output = context.run_ui(input, |ui| show(ui.ctx(), help));
+            output.drop_without_applying_deltas();
+        }
+        let area = AreaState::load(&context, Id::new(id)).filter(|area| area.size.is_some());
+        area.map(|area| area.rect()).unwrap_or_else(|| panic!("no {id} at {screen:?}"))
+    }
+
+    #[test]
+    fn dialogs_keep_clear_of_the_title_bar() {
+        for screen in SCREENS {
+            let body = Rect::from_min_max(Pos2::new(0.0, title_bar::HEIGHT), Pos2::new(screen.x, screen.y - status_bar::HEIGHT));
+            let shortcuts = HelpWindows { shortcuts: true, ..Default::default() };
+            let whats_new = HelpWindows { whats_new: Some(0), ..Default::default() };
+            for (mut help, id) in [(shortcuts, "shortcut-guide"), (whats_new, "whats-new")] {
+                let window = settled(&mut help, id, screen);
+                assert!(body.expand(0.5).contains_rect(window), "{id} at {window:?} leaves the body {body:?} at {screen:?}");
+                assert!((window.center() - body.center()).length() <= 1.0, "{id} at {window:?} is off the body's middle at {screen:?}");
+            }
+        }
+    }
 
     #[test]
     fn about_keeps_its_title_and_close_in_small_windows() {

@@ -679,6 +679,7 @@ fn finish(editor: &mut Editor, onboard: &Onboard) {
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::ui::{status_bar, title_bar};
     use egui::epaint::ClippedShape;
     use egui::{AreaState, Event, Id, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, Shape, TouchPhase};
 
@@ -861,6 +862,17 @@ mod tests {
         assert_eq!(parts.welcome, Rect::from_min_size(Pos2::new(72.0, 64.0), Vec2::new(1094.0, 80.0)));
         assert_eq!(parts.headers, Rect::from_min_max(Pos2::new(72.0, 160.0), Pos2::new(272.0, 628.0)));
         assert_eq!(parts.page, Rect::from_min_max(Pos2::new(312.0, 168.0), Pos2::new(1210.0, 620.0)));
+    }
+
+    #[test]
+    fn the_window_keeps_clear_of_the_title_bar() {
+        for screen in SMALL_SCREENS.into_iter().chain([FULL_SCREEN]) {
+            let context = context();
+            let (mut editor, mut onboard) = setup(0, false);
+            let (_, window) = settle(&context, screen, &mut editor, &mut onboard);
+            let body = Rect::from_min_max(Pos2::new(0.0, title_bar::HEIGHT), Pos2::new(screen.x, screen.y - status_bar::HEIGHT));
+            assert!(body.expand(0.5).contains_rect(window), "the window at {window:?} leaves the body {body:?} at {screen:?}");
+        }
     }
 
     #[test]
