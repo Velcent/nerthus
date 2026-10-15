@@ -365,7 +365,9 @@ fn resize_menus(ui: &mut Ui, column: Rect, mode: ToolboxMode, options: &mut User
 #[allow(clippy::too_many_arguments)]
 fn category_button(ui: &mut Ui, rect: Rect, category: &str, mode: ToolboxMode, look: &EntryLook, state: &mut GraphState, commands: &mut Vec<Command>, settings: &mut Vec<SettingsChange>) {
     let response = ui.interact(rect, ui.id().with(("toolbox-category", category)), Sense::click());
-    let popup_id = egui::Popup::default_response_id(&response);
+    // The flyout has its own id: the right-click menu takes the response's
+    // default popup id, and two popups on one id clash and close each other.
+    let popup_id = response.id.with("category-flyout");
     let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
     let hovered = response.hovered();
     let fill = if open {
@@ -395,7 +397,7 @@ fn category_button(ui: &mut Ui, rect: Rect, category: &str, mode: ToolboxMode, l
     // long: its rows scroll in the room beside the button (egui's anchor).
     let info = UiStackInfo::new(UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, MenuConfig::default());
     let anchor = egui::PopupAnchor::from(&response).rect(popup_id, ui.ctx()).unwrap_or(response.interact_rect);
-    let mut popup = egui::Popup::menu(&response);
+    let mut popup = egui::Popup::menu(&response).id(popup_id);
     popup = popup.align(egui::RectAlign::RIGHT_START);
     popup = popup.gap(6.0);
     popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
@@ -713,6 +715,22 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) -> Vec<Command> {
+            let (commands, output) = self.run(events);
+            output.drop_without_applying_deltas();
+            commands
+        }
+
+        /// The text a frame with no input draws.
+        fn text(&mut self) -> Vec<String> {
+            let (_, output) = self.run(Vec::new());
+            let mut drawn = Vec::new();
+            output.shapes.iter().for_each(|clipped| texts(&clipped.shape, &mut drawn));
+            output.drop_without_applying_deltas();
+            drawn
+        }
+
+        /// A frame with `events`: what it asked for and what it drew.
+        fn run(&mut self, events: Vec<egui::Event>) -> (Vec<Command>, egui::FullOutput) {
             let mut commands = Vec::new();
             let area = graph_area(self.screen);
             let output = self.context.run_ui(input(self.screen, events), |ui| match self.drawn {
@@ -725,8 +743,7 @@ mod tests {
                     });
                 }
             });
-            output.drop_without_applying_deltas();
-            commands
+            (commands, output)
         }
 
         /// A frame with `events`, then the frames after as the app draws
@@ -801,6 +818,15 @@ mod tests {
         }
     }
 
+    /// The text in `shape`, nested shapes' too.
+    fn texts(shape: &egui::Shape, into: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => into.push(text.galley.text().to_string()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, into)),
+            _ => {}
+        }
+    }
+
     /// `menu` on a window of `screen`: under the title bar and in the
     /// window.
     fn assert_in_the_window(menu: Rect, screen: Vec2, what: &str) {
@@ -849,5 +875,36 @@ mod tests {
             let commands = window.click_last_row(primitive);
             assert_eq!(commands, [Command::AddNode { type_name: last.to_string(), position: None }], "at {screen:?}");
         }
+    }
+
+    #[test]
+    fn a_right_click_on_a_category_opens_the_settings() {
+        let mut window = Window::new(WINDOWS[0], Drawn::Toolbox);
+        window.frame(Vec::new());
+        let button = window.button("Primitive");
+        let commands = window.click(button.center(), egui::PointerButton::Secondary);
+        assert!(commands.is_empty(), "right-clicking Primitive gave {commands:?}");
+        // The settings stay open, without egui's ID clash warning: the
+        // category's menu used to share the right-click menu's id.
+        let drawn = window.text();
+        for setting in ["Panel", "Menus", "Flat List", "Nested", "Long", "Compact", "Expanded", "Pin To Top", "Highlight"] {
+            assert!(drawn.iter().any(|text| text == setting), "{setting} missing from {drawn:?}");
+        }
+        assert!(!drawn.iter().any(|text| text.contains("widget ID")), "{drawn:?}");
+    }
+
+    #[test]
+    fn a_click_on_a_category_opens_its_menu_not_the_settings() {
+        let mut window = Window::new(WINDOWS[0], Drawn::Toolbox);
+        window.frame(Vec::new());
+        let button = window.button("Primitive");
+        window.click(button.center(), egui::PointerButton::Primary);
+        let drawn = window.text();
+        // The flat list's first family caption, at its top.
+        let families = category_families("Primitive", &window.editor.user.options, &|_| 0);
+        let first = families.keys().next().expect("Primitive has families");
+        assert!(drawn.iter().any(|text| text.eq_ignore_ascii_case(first)), "{first} missing from {drawn:?}");
+        assert!(!drawn.iter().any(|text| text == "Pin To Top"), "{drawn:?}");
+        assert!(!drawn.iter().any(|text| text.contains("widget ID")), "{drawn:?}");
     }
 }
