@@ -10,7 +10,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{elided_galley, GraphState, SIMPLIFIED_ZOOM};
+use crate::ui::graph_canvas::{drag_origin, elided_galley, GraphState, SIMPLIFIED_ZOOM};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::{icon_grid, swatch_grid};
 use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, menu_style};
@@ -162,7 +162,7 @@ fn select_group(editor: &mut Editor, state: &mut GraphState, id: i32, additive: 
 
 fn start_drag(ui: &Ui, editor: &mut Editor, state: &mut GraphState, group: &GroupData, kind: GroupDragKind, response: &Response, origin: Pos2) {
     let view = state.view();
-    let pointer = response.interact_pointer_pos().or_else(|| ui.input(|input| input.pointer.interact_pos())).unwrap_or(origin);
+    let pointer = drag_origin(ui, response).or_else(|| ui.input(|input| input.pointer.interact_pos())).unwrap_or(origin);
     let pointer_start = view.to_canvas(origin, pointer);
     let label = if kind == GroupDragKind::Move { "Move" } else { "Group resized" };
     editor.document.checkpoint(label);

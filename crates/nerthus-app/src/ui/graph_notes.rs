@@ -14,7 +14,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{GraphState, GraphView};
+use crate::ui::graph_canvas::{drag_origin, GraphState, GraphView};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
 use crate::ui::widgets::{menu_caption, menu_item, menu_separator, menu_style};
@@ -156,18 +156,17 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
             commands.push(Command::Graph(GraphCommand::ToggleNoteType(*id)));
         }
         response.context_menu(|ui| note_menu(ui, *id, commands));
-        let pointer = response.interact_pointer_pos();
         if let (Some(thumb), Some(note)) = (thumb, notes.iter().find(|note| note.id == *id))
             && thumb.drag_started()
         {
             let start = [note.rect.width(), note.rect.height()];
-            let pointer_start = thumb.interact_pointer_pos().map(|point| view.to_canvas(origin, point)).unwrap_or_default();
+            let pointer_start = drag_origin(ui, thumb).map(|point| view.to_canvas(origin, point)).unwrap_or_default();
             editor.document.set_note_vector(*id, "Size", start, true);
             state.note_drag = Some(NoteDrag { id: *id, resizing: true, pointer_start, start });
         }
         if response.drag_started_by(egui::PointerButton::Primary)
             && state.note_drag.is_none()
-            && let (Some(point), Some(note)) = (pointer, notes.iter().find(|note| note.id == *id))
+            && let (Some(point), Some(note)) = (drag_origin(ui, response), notes.iter().find(|note| note.id == *id))
         {
             let start = [note.rect.left(), note.rect.top()];
             editor.document.set_note_vector(*id, "Position", start, true);
