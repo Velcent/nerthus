@@ -119,6 +119,13 @@ impl GraphView {
     }
 }
 
+/// Where a drag began: the point the button went down. By the frame egui
+/// reports the drag, the pointer is already past the click distance (and
+/// further on a slow frame), so its position there would lose that much.
+pub(crate) fn drag_origin(ui: &Ui, response: &Response) -> Option<Pos2> {
+    ui.input(|input| input.pointer.press_origin()).or_else(|| response.interact_pointer_pos())
+}
+
 /// Where the editor's areas were this frame, for the Lazy Menu to move
 /// the pointer into (`SetCursorPosition`).
 #[derive(Clone, Copy, Debug)]
@@ -1759,7 +1766,7 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
                 state.clear_element_selection();
                 editor.select(Some(id));
             }
-            let pointer = response.interact_pointer_pos().unwrap_or(origin);
+            let pointer = drag_origin(ui, &response).unwrap_or(origin);
             let pointer_start = view.to_canvas(origin, pointer);
             start_element_drag(editor, state, id, pointer_start);
         }
@@ -2200,14 +2207,13 @@ fn handle_background(
         }
     }
     if background.drag_started_by(PointerButton::Primary) && state.drag.is_none() {
+        // The push and the box both reach back to where the button went down.
+        let press = drag_origin(ui, background).unwrap_or(origin);
         if pushing {
-            // The push reaches back to where the button went down.
-            let press = ui.input(|input| input.pointer.press_origin()).unwrap_or(origin);
             let canvas = view.to_canvas(origin, press);
             start_push(editor, state, canvas);
         } else {
-            let start = background.interact_pointer_pos().unwrap_or(origin);
-            state.drag = Some(Drag::Marquee { start, additive });
+            state.drag = Some(Drag::Marquee { start: press, additive });
         }
     }
     push_elements(ui, editor, state, origin);
