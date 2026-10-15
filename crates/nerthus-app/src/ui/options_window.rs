@@ -618,14 +618,6 @@ fn reset_question(ctx: &egui::Context, options: &mut OptionsState) {
     }
 }
 
-/// A part of the window, drawn at `rect` and kept to it: what does not
-/// fit is cut off rather than making the window larger.
-fn part(ui: &mut Ui, id: &str, rect: Rect, layout: Layout) -> Ui {
-    let mut part = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(rect).layout(layout));
-    part.set_clip_rect(rect.intersect(ui.clip_rect()));
-    part
-}
-
 /// Esc is Cancel (`IsCancel`) while the window shows: taken before the
 /// shell's keys, so that it does not stop a build as well. A message box,
 /// the reset question or a list dropped down on the page takes it instead.
@@ -676,7 +668,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
         let page = body.with_min_x((list.right() + 8.0).min(body.right()));
         let footer = rect.with_min_y((body.bottom() + 12.0).min(rect.bottom()));
 
-        let mut list_ui = part(ui, "options-list", list, Layout::top_down(Align::Min));
+        let mut list_ui = tool_window::part(ui, "options-list", list, Layout::top_down(Align::Min));
         let mut tabs = egui::ScrollArea::vertical();
         tabs = tabs.id_salt("options-tabs");
         tabs = tabs.auto_shrink([false, false]);
@@ -686,7 +678,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
         // inside it, whatever the page holds.
         let border = Stroke::new(1.5, theme::ACCENT_MUTED_PURPLE);
         ui.painter().rect_stroke(page, 3.0, border, egui::StrokeKind::Inside);
-        let mut page_ui = part(ui, "options-page", page.shrink(border.width), Layout::top_down(Align::Min));
+        let mut page_ui = tool_window::part(ui, "options-page", page.shrink(border.width), Layout::top_down(Align::Min));
         egui::Frame::new().inner_margin(8.0).show(&mut page_ui, |ui| {
             // The page's size less the frame's margin and border.
             let inside = (page.size() - Vec2::splat(19.0)).max(Vec2::ZERO);
@@ -709,7 +701,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
 
         // The footer (margin 146, 8, 8, 0): Reset on the left, Accept
         // Changes and Cancel on the right.
-        let mut footer_ui = part(ui, "options-footer", footer, Layout::left_to_right(Align::Min));
+        let mut footer_ui = tool_window::part(ui, "options-footer", footer, Layout::left_to_right(Align::Min));
         footer_ui.add_space(146.0);
         if button(&mut footer_ui, "Reset this page", false, true).clicked() {
             if options.tab == OptionsTab::Compute {
