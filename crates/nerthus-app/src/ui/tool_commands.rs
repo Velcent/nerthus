@@ -10,6 +10,7 @@ use crate::editor::Editor;
 use crate::ui::artifact_explorer::{self, ArtifactExplorer};
 use crate::ui::commands::Command;
 use crate::ui::console_window::{self, ConsoleWindow};
+use crate::ui::consume_shortcut;
 use crate::ui::diagnostics_window::{self, DiagnosticsRequest, DiagnosticsWindow};
 use crate::ui::docs_window::{self, DocsWindow};
 use crate::ui::help_windows::{self, UpdateDialog};
@@ -209,16 +210,16 @@ pub fn shortcuts(ctx: &egui::Context, pending: &mut Vec<Command>) {
         pending.push(Command::Tools(ToolCommand::CancelPreviewBuild));
     }
     let console = KeyboardShortcut::new(Modifiers::NONE, Key::F12);
-    if ctx.input_mut(|input| input.consume_shortcut(&console)) {
+    if ctx.input_mut(|input| consume_shortcut(input, &console)) {
         pending.push(Command::Tools(ToolCommand::ShowConsole));
     }
     // The backtick (`Key.Oem3`): suspend or resume.
     let backtick = KeyboardShortcut::new(Modifiers::NONE, Key::Backtick);
-    if ctx.input_mut(|input| input.consume_shortcut(&backtick)) {
+    if ctx.input_mut(|input| consume_shortcut(input, &backtick)) {
         pending.push(Command::ToggleEngine);
     }
     let add_modifiers = KeyboardShortcut::new(Modifiers::NONE, Key::M);
-    if ctx.input_mut(|input| input.consume_shortcut(&add_modifiers)) {
+    if ctx.input_mut(|input| consume_shortcut(input, &add_modifiers)) {
         let id = egui::Id::new(ADD_MODIFIERS_ID);
         ctx.data_mut(|data| data.insert_temp(id, true));
     }
