@@ -140,10 +140,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
         body_top = warning_row(ui, rect, body_top, &error);
     }
 
-    let modifiers_width = rect.width() - 2.0 * MODIFIER_PANEL_MARGIN;
-    let measure = Rect::from_min_size(Pos2::ZERO, Vec2::new(modifiers_width, 0.0));
-    let (_, modifiers_height) = layout_modifier_groups(measure);
-    let modifiers_top = rect.bottom() - MODIFIER_PANEL_MARGIN - modifiers_height;
+    let modifiers_top = rect.bottom() - modifier_panel_height(rect.width());
     let modifiers_rect = Rect::from_min_max(Pos2::new(rect.left() + MODIFIER_PANEL_MARGIN, modifiers_top), rect.max - Vec2::splat(MODIFIER_PANEL_MARGIN));
     let mut body = Rect::from_min_max(Pos2::new(rect.left(), body_top), Pos2::new(rect.right(), modifiers_rect.top()));
     if let Some(alert) = descendant_alert(editor, node_id) {
@@ -153,8 +150,11 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
     let can_add_ports = editor.document.node(node_id).is_some_and(|node| nerthus_engine::editing::can_add_ports(&node.type_name));
     let port_note_id = ui.id().with("port-note-dismissed");
     let port_note_dismissed: bool = ui.data(|data| data.get_temp(port_note_id)).unwrap_or(false);
-    if can_add_ports && !port_note_dismissed {
-        let (note_rect, click) = port_note(ui, Pos2::new(body.left() + 16.0, body.bottom() - 4.0), (body.width() - 32.0).max(0.0));
+    let note_width = (body.width() - 32.0).max(0.0);
+    // Where it would leave the parameters no room, the note steps aside.
+    let note_fits = || body.height() - (port_note_layout(ui, note_width).size.y + 8.0) >= least_body(sizes);
+    if can_add_ports && !port_note_dismissed && note_fits() {
+        let (note_rect, click) = port_note(ui, Pos2::new(body.left() + 16.0, body.bottom() - 4.0), note_width);
         match click {
             Some(PortNoteClick::Dismiss) => {
                 ui.data_mut(|data| data.insert_temp(port_note_id, true));
@@ -175,11 +175,15 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
         body.min.y = note_rect.bottom() + 4.0;
     }
 
+    // Kept between the notes and the modifier toolbar, however short.
+    body.max.y = body.max.y.max(body.min.y);
     let builder = UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min));
     let mut body_ui = ui.new_child(builder);
     let mut scroll = ScrollArea::vertical();
     scroll = scroll.id_salt(("properties", node_id));
     scroll = scroll.auto_shrink([false, false]);
+    // Not egui's least of 64 past the body, over the modifier toolbar.
+    scroll = scroll.min_scrolled_height(0.0);
     let area_width = rect.width();
     scroll.show(&mut body_ui, |ui| {
         let content_width = (ui.available_width() - SCROLL_PADDING).max(0.0);
@@ -192,6 +196,35 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
     for action in actions {
         node_states::apply(ui, editor, node_id, action, commands);
     }
+}
+
+/// The least height the area is laid out in `width` wide without its
+/// parts drawn over each other, at the default sizes (the larger): its
+/// header, a command row and the modifier toolbar, and between them room
+/// for the parameters to show a group panel's header and first row
+/// (`least_body`). The port note steps aside for that room; the other
+/// notes and a warning take theirs from it.
+pub fn least_height(width: f32) -> f32 {
+    let sizes = &theme::DEFAULT_SIZES;
+    let header = sizes.toolbar_margin + sizes.toolbar_min_height + sizes.toolbar_margin;
+    let [_, above, _, below] = sizes.property_border;
+    let command_row = above + sizes.toolbar_min_height + below;
+    header + command_row + least_body(sizes) + modifier_panel_height(width)
+}
+
+/// The least the parameters are given: a group panel's header and its
+/// first row.
+fn least_body(sizes: &theme::Sizes) -> f32 {
+    sizes.expander_margin[1] + sizes.expander_header + sizes.slider_height + 2.0 * f32::from(ROW_MARGIN)
+}
+
+/// The modifier toolbar's height at the foot of an area `width` wide,
+/// with its margin.
+fn modifier_panel_height(width: f32) -> f32 {
+    let modifiers_width = width - 2.0 * MODIFIER_PANEL_MARGIN;
+    let measure = Rect::from_min_size(Pos2::ZERO, Vec2::new(modifiers_width, 0.0));
+    let (_, modifiers_height) = layout_modifier_groups(measure);
+    MODIFIER_PANEL_MARGIN + modifiers_height
 }
 
 /// The command row (`CommandBorder`, a toolbar with the margins
@@ -1496,6 +1529,72 @@ mod tests {
                 assert!(layout.galley.rows.len() <= 2, "{name} note: its message takes more than two rows");
             }
         });
+    }
+
+    /// A Combine node (a command row, the port note, a parameter group)
+    /// in the property area `height` high at its least width: the area,
+    /// and what it drew there.
+    fn combine_shown(height: f32) -> (Rect, Vec<egui::epaint::ClippedShape>) {
+        let mut document = Document::new();
+        let combine = document.add_node("Combine", [26000.0, 26000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.select(Some(combine));
+        let context = egui::Context::default();
+        theme::apply(&context);
+        // Icons as icons, not egui's ⚠ for an image it cannot load.
+        egui_extras::install_image_loaders(&context);
+        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let rect = Rect::from_min_size(Pos2::new(10.0, 50.0), Vec2::new(crate::ui::MIN_PROPERTIES - 4.0, height));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0));
+        let mut shapes = Vec::new();
+        // Laid out again once it has measured itself.
+        for _ in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let mut commands = Vec::new();
+            let mut output = context.run_ui(input, |ui| show(ui, rect, &mut editor, &mut commands));
+            shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+        }
+        (rect, shapes)
+    }
+
+    /// The texts drawn, each with the part of it that shows.
+    fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect)> {
+        let text = |clipped: &egui::epaint::ClippedShape| match &clipped.shape {
+            egui::Shape::Text(text) => Some((text.galley.text().to_string(), text.visual_bounding_rect().intersect(clipped.clip_rect))),
+            _ => None,
+        };
+        shapes.iter().filter_map(text).collect()
+    }
+
+    #[test]
+    fn the_parameters_keep_above_the_modifier_toolbar_at_the_least_height() {
+        let width = crate::ui::MIN_PROPERTIES - 4.0;
+        let least = least_height(width);
+        let (rect, shapes) = combine_shown(least);
+        let toolbar_top = rect.bottom() - modifier_panel_height(rect.width());
+        let shown = texts(&shapes);
+        for (text, visible) in &shown {
+            assert!(!visible.is_positive() || visible.bottom() <= toolbar_top + 0.5, "{text:?} shows at {visible:?}, over the modifier toolbar from {toolbar_top}");
+        }
+        // The command row, the group and its first row show; the port
+        // note steps aside for them.
+        let showing = |name: &str| shown.iter().any(|(text, visible)| text == name && visible.is_positive());
+        assert!(showing("Swap Inputs") && showing("Combine") && showing("Ratio"), "{shown:?}");
+        let note = "This node can add additional input ports.";
+        assert!(!showing(note));
+        // With room for it, the note shows too, above the toolbar.
+        let (_, shapes) = combine_shown(least + 60.0);
+        let shown = texts(&shapes);
+        let note_shown = shown.iter().find(|(text, _)| text == note).expect("the port note shows");
+        assert!(note_shown.1.bottom() <= rect.top() + least + 60.0 - modifier_panel_height(rect.width()));
+        // Shorter still (as on a screen too small for the least window),
+        // the parameters are cut off, not drawn over the toolbar.
+        let (rect, shapes) = combine_shown(least - 70.0);
+        let toolbar_top = rect.bottom() - modifier_panel_height(rect.width());
+        for (text, visible) in texts(&shapes) {
+            assert!(!visible.is_positive() || visible.bottom() <= toolbar_top + 0.5, "{text:?} shows at {visible:?}, over the modifier toolbar from {toolbar_top}");
+        }
     }
 
     #[test]

@@ -160,6 +160,9 @@ fn main() {
     app.add_systems(Startup, spawn_ui_camera);
     app.add_systems(EguiPrimaryContextPass, ui::draw);
     app.add_systems(Update, ui::floating_viewport::manage);
+    // The page sizes the web build's canvas, however small.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(Update, ui::keep_min_window_size);
     // The frame rate the Antialiasing choice gives the 3D view.
     app.insert_resource(ui::frame_pacing(30));
     app.add_systems(Update, ui::pace_frames);
