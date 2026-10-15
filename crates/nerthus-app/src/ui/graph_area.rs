@@ -37,23 +37,33 @@ const SPLITTER: f32 = 4.0;
 const MIN_GRAPH: f32 = 160.0;
 
 pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut UiState, commands: &mut Vec<Command>) {
+    // The star columns left of the toolbar: the graph `5*`, the Data View
+    // `1.05*` (at least 340) while open. The graph keeps `MIN_GRAPH`
+    // first, so the Data View gives up width to it, and steps aside while
+    // not even its tabs would fit (it comes back with the room).
+    let toolbar_body = toolbar_width(theme::sizes(ui.ctx()));
+    let toolbar_right_margin = AREA_MARGIN + viewport_area::TOOLBAR_MARGIN;
+    let stars = (graph_grid.width() - toolbar_body - toolbar_right_margin).max(0.0);
+    let least = data_view::least_width(ui) + AREA_MARGIN;
+    let data_width = if ui_state.data_view.expanded { data_view_width(stars, ui_state.data_view.share, least) } else { 0.0 };
+    let data_shown = data_width > 0.0;
+
     // The toolbar column (auto): margin 2, or 0, 2, 2, 2 against the open
     // Data View (`ToggleCollapse`). On the right it also keeps the viewport
     // toolbar's margin, so the two toolbars share their edges.
-    let expanded = ui_state.data_view.expanded;
-    let toolbar_left_margin = if expanded { 0.0 } else { AREA_MARGIN };
-    let toolbar_right_margin = AREA_MARGIN + viewport_area::TOOLBAR_MARGIN;
-    let toolbar_column_width = toolbar_left_margin + toolbar_width(theme::sizes(ui.ctx())) + toolbar_right_margin;
+    let toolbar_left_margin = if data_shown { 0.0 } else { AREA_MARGIN };
+    let toolbar_column_width = toolbar_left_margin + toolbar_body + toolbar_right_margin;
     let toolbar_column = Rect::from_min_max(Pos2::new(graph_grid.right() - toolbar_column_width, graph_grid.top()), graph_grid.max);
     let toolbar_rect = Rect::from_min_max(toolbar_column.min + Vec2::new(toolbar_left_margin, AREA_MARGIN), toolbar_column.max - Vec2::new(toolbar_right_margin, AREA_MARGIN));
 
-    // The star columns: the graph `5*`, the Data View `1.05*` (at least
-    // 340) while open.
-    let stars = (toolbar_column.left() - graph_grid.left()).max(0.0);
-    let data_width = if expanded { data_view_width(stars, ui_state.data_view.share) } else { 0.0 };
     let split = (toolbar_column.left() - data_width).round();
     let graph_column = Rect::from_min_max(graph_grid.min, Pos2::new(split, graph_grid.bottom()));
     let area = graph_column.shrink(AREA_MARGIN);
+    // What the graph draws keeps to its column: tabs and toolbox too long
+    // for it are cut off at its edge, not drawn under the Data View or the
+    // status bar.
+    let outer_clip = ui.clip_rect();
+    ui.shrink_clip_rect(area);
     ui.painter().rect_filled(area, 4.0, theme::PANEL_BACKGROUND);
     ui_state.graph.dimmed = data_view::dimmed_nodes(editor, ui_state.data_view.terrain.filter);
 
@@ -99,30 +109,32 @@ pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut U
         let outline_top = if tabs_hidden { 4.0 } else { 28.0 };
         engine_suspended_outline(ui, grid, outline_top);
     }
+    ui.set_clip_rect(outer_clip);
 
-    if expanded {
+    if data_shown {
         let data_column = Rect::from_min_max(Pos2::new(split, graph_column.top()), Pos2::new(toolbar_column.left(), graph_column.bottom()));
         let data_rect = Rect::from_min_max(data_column.min + Vec2::splat(AREA_MARGIN), data_column.max - Vec2::new(0.0, AREA_MARGIN));
         data_view::show(ui, data_rect, editor, &mut ui_state.data_view, &mut ui_state.graph, commands);
-        data_view_splitter(ui, graph_column, stars, ui_state);
+        data_view_splitter(ui, graph_column, stars, data_width, ui_state);
         ui_state.graph.areas.data_view = Some(data_rect);
     } else {
         ui_state.graph.areas.data_view = None;
     }
-    graph_toolbar(ui, toolbar_rect, editor, ui_state, commands);
+    graph_toolbar(ui, toolbar_rect, data_shown, editor, ui_state, commands);
 }
 
-/// The Data View's width in the star space: its share, at least 340 and
-/// leaving the graph some room.
-fn data_view_width(stars: f32, share: f32) -> f32 {
-    let wanted = (stars * share).max(data_view::MIN_WIDTH);
-    let room = (stars - MIN_GRAPH).max(data_view::MIN_WIDTH);
-    wanted.min(room).min(stars)
+/// The Data View's width in the star space: its share, at least 340 (and
+/// `least`), but no more than leaves the graph `MIN_GRAPH`; 0 when that
+/// is narrower than `least`, and the Data View steps aside.
+fn data_view_width(stars: f32, share: f32, least: f32) -> f32 {
+    let wanted = (stars * share).max(data_view::MIN_WIDTH).max(least);
+    let width = wanted.min(stars - MIN_GRAPH);
+    if width < least { 0.0 } else { width }
 }
 
 /// `gsVertical1` (enabled while the Data View is open): dragging it moves
-/// width between the graph and the Data View.
-fn data_view_splitter(ui: &mut Ui, graph_column: Rect, stars: f32, ui_state: &mut UiState) {
+/// width between the graph and the Data View, now `current` wide.
+fn data_view_splitter(ui: &mut Ui, graph_column: Rect, stars: f32, current: f32, ui_state: &mut UiState) {
     let handle = Rect::from_min_max(Pos2::new(graph_column.right() - SPLITTER, graph_column.top()), graph_column.max);
     let response = ui.interact(handle, ui.id().with("data-view-splitter"), Sense::drag());
     if response.hovered() || response.dragged() {
@@ -131,7 +143,6 @@ fn data_view_splitter(ui: &mut Ui, graph_column: Rect, stars: f32, ui_state: &mu
     if !response.dragged() || stars <= 0.0 {
         return;
     }
-    let current = data_view_width(stars, ui_state.data_view.share);
     let wanted = current - response.drag_delta().x;
     ui_state.data_view.share = (wanted / stars).clamp(0.0, 1.0);
 }
@@ -451,21 +462,30 @@ fn engine_suspended_outline(ui: &Ui, area: Rect, top: f32) {
 }
 
 /// The toolbar right of the graph (`GraphToolbarBorder`, `Menu-Border`
-/// 1.5): its corners square on the left while the Data View is open.
-fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, editor: &Editor, ui_state: &mut UiState, commands: &mut Vec<Command>) {
-    let expanded = ui_state.data_view.expanded;
-    let corners = if expanded { CornerRadius { nw: 0, ne: 4, sw: 0, se: 4 } } else { CornerRadius::same(4) };
+/// 1.5): its corners square on the left while the Data View shows beside
+/// it (`data_shown`).
+fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, data_shown: bool, editor: &Editor, ui_state: &mut UiState, commands: &mut Vec<Command>) {
+    let corners = if data_shown { CornerRadius { nw: 0, ne: 4, sw: 0, se: 4 } } else { CornerRadius::same(4) };
     toolbar_background_corners(ui, toolbar_rect, corners, theme::MENU_BORDER, 1.5);
     let [padding_across, padding_down] = theme::sizes(ui.ctx()).toolbar_padding;
     let inner = toolbar_rect.shrink(1.5).shrink2(Vec2::new(padding_across, padding_down));
 
     let top_builder = UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Center));
     let mut top = ui.new_child(top_builder);
+    top.shrink_clip_rect(toolbar_rect);
     top.spacing_mut().item_spacing.y = 0.0;
-    // `btnExpandToggle`.
-    let chevron = if expanded { "chevron-right" } else { "chevron-left" };
-    if icon_button(&mut top, chevron, "Data View", None).clicked() {
-        ui_state.data_view.toggle();
+    // `btnExpandToggle`. While the graph leaves the open Data View no room
+    // it shows shut, and the chevron can't open it until there is.
+    if ui_state.data_view.expanded && !data_shown {
+        top.add_enabled_ui(false, |ui| {
+            let tip = "Data View: no room beside the graph (widen the window or the graph area)";
+            icon_button(ui, "chevron-left", "Data View", None).on_disabled_hover_text(tip);
+        });
+    } else {
+        let chevron = if data_shown { "chevron-right" } else { "chevron-left" };
+        if icon_button(&mut top, chevron, "Data View", None).clicked() {
+            ui_state.data_view.toggle();
+        }
     }
     toolbar_separator(&mut top, 8.0, 8.0);
     icon_menu(&mut top, "bookmarks", "Node Bookmarks", None, |ui| {
@@ -503,9 +523,14 @@ fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, editor: &Editor, ui_state: &mu
 
     // Docked bottom, first at the bottom: Graph Commands, the engine
     // toggle (`Accent-Muted-Red`; `Accent-Red` outline while suspended),
-    // Mutate and Refresh, with separators (margin 2, 8) between.
-    let bottom_builder = UiBuilder::new().max_rect(inner).layout(Layout::bottom_up(Align::Center));
+    // Mutate and Refresh, with separators (margin 2, 8) between. They
+    // take what the top ones leave: in a toolbar too short for both they
+    // are cut off under them (Refresh first), never drawn over them.
+    let top_end = top.min_rect().bottom().min(inner.bottom());
+    let below = Rect::from_min_max(Pos2::new(inner.left(), top_end), inner.max);
+    let bottom_builder = UiBuilder::new().max_rect(below).layout(Layout::bottom_up(Align::Center));
     let mut bottom = ui.new_child(bottom_builder);
+    bottom.shrink_clip_rect(Rect::from_min_max(Pos2::new(toolbar_rect.left(), top_end), toolbar_rect.max));
     bottom.spacing_mut().item_spacing.y = 0.0;
     icon_menu(&mut bottom, "menu-deep", "Graph Commands", None, |ui| {
         menus::graph_commands(ui, editor, ui_state, commands);
@@ -623,6 +648,165 @@ mod tests {
     fn a_graph_with_no_room_paints_no_strip() {
         let (_, _, shapes, _) = painted_footer(2.0 * FOOTER_INSET, 0.0);
         assert!(shapes.is_empty());
+    }
+
+    /// One frame of the graph grid in `grid` on a 1600 by 960 screen, with
+    /// `events`: the shapes painted and the commands asked for.
+    fn grid_frame(context: &egui::Context, grid: Rect, editor: &mut Editor, ui_state: &mut UiState, events: Vec<egui::Event>) -> (Vec<egui::epaint::ClippedShape>, Vec<Command>) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 960.0))), events, ..Default::default() };
+        let mut commands = Vec::new();
+        let mut output = context.run_ui(input, |ui| show(ui, grid, editor, ui_state, &mut commands));
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        (shapes, commands)
+    }
+
+    /// A click at `at` over three frames: onto it, pressed, released.
+    fn click(context: &egui::Context, grid: Rect, editor: &mut Editor, ui_state: &mut UiState, at: Pos2) -> Vec<Command> {
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        grid_frame(context, grid, editor, ui_state, vec![egui::Event::PointerMoved(at)]);
+        grid_frame(context, grid, editor, ui_state, vec![button(true)]);
+        grid_frame(context, grid, editor, ui_state, vec![button(false)]).1
+    }
+
+    fn graph_grid_context() -> (egui::Context, Editor, UiState) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        (context, Editor::new(Document::new()), UiState::default())
+    }
+
+    /// The Data View's least width, as `show` measures it.
+    fn least_width(context: &egui::Context) -> f32 {
+        let mut least = 0.0;
+        let output = context.run_ui(egui::RawInput::default(), |ui| least = data_view::least_width(ui));
+        output.drop_without_applying_deltas();
+        least
+    }
+
+    /// The toolbar column's width while the Data View is shut.
+    fn shut_toolbar_column(context: &egui::Context) -> f32 {
+        AREA_MARGIN + toolbar_width(theme::sizes(context)) + AREA_MARGIN + viewport_area::TOOLBAR_MARGIN
+    }
+
+    /// Where the Data View chevron, the toolbar's first button, sits.
+    fn chevron_at(context: &egui::Context, grid: Rect) -> Pos2 {
+        let sizes = theme::sizes(context);
+        let toolbar_right = grid.right() - AREA_MARGIN - viewport_area::TOOLBAR_MARGIN;
+        let x = toolbar_right - toolbar_width(sizes) / 2.0;
+        let y = grid.top() + AREA_MARGIN + 1.5 + sizes.toolbar_padding[1] + sizes.toolbar_button / 2.0;
+        Pos2::new(x, y)
+    }
+
+    /// The graph frame's edges round the canvas: the area's margins, the
+    /// grid's 1 on the right and the border with its margin of 2.
+    const CANVAS_INSET: f32 = 2.0 * AREA_MARGIN + 1.0 + 2.0 * (TAB_BORDER + 2.0);
+
+    #[test]
+    fn the_data_view_gives_up_width_to_the_graph() {
+        let least = 240.0;
+        let share = data_view::DEFAULT_SHARE;
+        // Room for both: its share, at least 340.
+        assert_eq!(data_view_width(1000.0, share, least), data_view::MIN_WIDTH);
+        assert_eq!(data_view_width(3000.0, share, least), 3000.0 * share);
+        assert_eq!(data_view_width(800.0, 0.9, least), 800.0 - MIN_GRAPH);
+        // Less room than 340 and the graph's minimum: it narrows.
+        assert_eq!(data_view_width(450.0, share, least), 450.0 - MIN_GRAPH);
+        assert_eq!(data_view_width(MIN_GRAPH + least, share, least), least);
+        // Less than its least: it steps aside.
+        for stars in [MIN_GRAPH + least - 1.0, 300.0, MIN_GRAPH, 100.0, 0.0] {
+            assert_eq!(data_view_width(stars, share, least), 0.0, "{stars}");
+        }
+        // A least wider than 340 holds too.
+        assert_eq!(data_view_width(1000.0, share, 360.0), 360.0);
+        for stars in (0..2000).map(|stars| stars as f32) {
+            for share in [0.0, share, 0.5, 1.0] {
+                let width = data_view_width(stars, share, least);
+                assert!(width == 0.0 || (width >= least && stars - width >= MIN_GRAPH), "{stars} at {share}: {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_graph_keeps_its_minimum_beside_the_open_data_view() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        ui_state.data_view.expanded = true;
+        let least = least_width(&context);
+        let mut narrowed = false;
+        let mut stepped_aside = false;
+        for width in (250..=1400).step_by(10) {
+            let grid = Rect::from_min_size(Pos2::new(4.0, 300.0), Vec2::new(width as f32, 400.0));
+            grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+            let canvas = ui_state.graph.rect;
+            assert!(canvas.width() + CANVAS_INSET >= MIN_GRAPH - 0.5, "{width}: the graph is {} wide", canvas.width());
+            match ui_state.graph.areas.data_view {
+                Some(data) => {
+                    assert!(data.left() >= canvas.right(), "{width}: the Data View at {} over the graph to {}", data.left(), canvas.right());
+                    assert!(data.width() >= least - 0.5, "{width}: the Data View is {} wide, its tabs {least}", data.width());
+                    narrowed |= data.width() + AREA_MARGIN < data_view::MIN_WIDTH - 0.5;
+                }
+                None => {
+                    // The graph reaches the toolbar.
+                    let reach = grid.right() - shut_toolbar_column(&context) - AREA_MARGIN - 1.0 - TAB_BORDER - 2.0;
+                    assert!((canvas.right() - reach).abs() <= 0.5, "{width}: the graph ends at {} short of {reach}", canvas.right());
+                    stepped_aside = true;
+                }
+            }
+            if width >= 1000 {
+                let data = ui_state.graph.areas.data_view.expect("room for the Data View");
+                assert!(data.width() + AREA_MARGIN >= data_view::MIN_WIDTH - 0.5, "{width}: the Data View is {} wide", data.width());
+            }
+        }
+        assert!(narrowed && stepped_aside);
+        assert!(ui_state.data_view.expanded, "stepping aside leaves the Data View open for when the room is back");
+    }
+
+    #[test]
+    fn what_the_graph_draws_keeps_to_its_column() {
+        // A graph narrower than its tab and shorter than its toolbox, the
+        // toolbar shorter than its buttons.
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(150.0, 140.0));
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let area_right = grid.right() - shut_toolbar_column(&context) - AREA_MARGIN;
+        for clipped in &shapes {
+            let visible = clipped.shape.visual_bounding_rect().intersect(clipped.clip_rect);
+            if !visible.is_positive() {
+                continue;
+            }
+            assert!(grid.expand(0.5).contains_rect(visible), "{:?} painted at {visible:?} outside the grid {grid:?}", clipped.shape);
+            if visible.left() < area_right {
+                assert!(visible.right() <= area_right + 0.5, "{:?} painted at {visible:?} past the graph's edge {area_right}", clipped.shape);
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_toolbar_keeps_the_data_view_chevron_clickable() {
+        // Too short for both groups: the bottom one (Refresh at its top)
+        // gives way under the top one.
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, 150.0));
+        let commands = click(&context, grid, &mut editor, &mut ui_state, chevron_at(&context, grid));
+        assert!(!commands.iter().any(|command| matches!(command, Command::Refresh)));
+        assert!(ui_state.data_view.expanded);
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        assert!(ui_state.graph.areas.data_view.is_some());
+    }
+
+    #[test]
+    fn the_chevron_waits_for_room_for_the_data_view() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        ui_state.data_view.expanded = true;
+        let narrow = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(300.0, 500.0));
+        click(&context, narrow, &mut editor, &mut ui_state, chevron_at(&context, narrow));
+        assert!(ui_state.data_view.expanded);
+        assert_eq!(ui_state.graph.areas.data_view, None);
+        let wide = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, 500.0));
+        grid_frame(&context, wide, &mut editor, &mut ui_state, Vec::new());
+        assert!(ui_state.graph.areas.data_view.is_some());
+        click(&context, wide, &mut editor, &mut ui_state, chevron_at(&context, wide));
+        assert!(!ui_state.data_view.expanded);
     }
 
     #[test]

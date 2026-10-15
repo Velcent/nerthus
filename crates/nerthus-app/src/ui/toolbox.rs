@@ -379,7 +379,7 @@ fn show_panel(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphSta
     let inner = panel.shrink2(Vec2::new(5.0, 0.0));
     let builder = UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min));
     let mut panel_ui = ui.new_child(builder);
-    panel_ui.set_clip_rect(panel);
+    panel_ui.shrink_clip_rect(panel);
     let categorized = look.editor.user.options.toolbox_categorized();
     ScrollArea::vertical().id_salt("toolbox-panel-scroll").max_height(inner.height()).show(&mut panel_ui, |ui| {
         ui.set_width(width);
