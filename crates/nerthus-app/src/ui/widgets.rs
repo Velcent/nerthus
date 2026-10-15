@@ -4,10 +4,11 @@
 //! and dialog buttons.
 
 use egui::containers::menu::{MenuButton, MenuConfig, SubMenu};
-use egui::{Button, Color32, CornerRadius, FontId, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Button, Color32, CornerRadius, FontId, Id, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::icons;
 use crate::theme;
+use crate::ui::menu_keys;
 
 /// `Toolbar.ButtonSize` as the size theme has it.
 pub fn toolbar_button(ui: &Ui) -> f32 {
@@ -22,6 +23,8 @@ const MENU_ROW_HEIGHT: f32 = 23.0;
 const MENU_ICON_COLUMN: f32 = 30.0;
 const MENU_ARROW_COLUMN: f32 = 20.0;
 const MENU_MIN_WIDTH: f32 = 190.0;
+/// A disabled row's icon, text and arrow are drawn at half opacity.
+const MENU_DISABLED_OPACITY: f32 = 0.5;
 
 /// Paints a toolbar's cladding (`Panel-Cladding`, 4px corners).
 pub fn toolbar_background(ui: &Ui, rect: Rect, border: Color32, border_width: f32) {
@@ -156,8 +159,10 @@ pub fn menu_config() -> MenuConfig {
     MenuConfig::default()
 }
 
-/// Inside a menu: no gaps between rows, at least 190 wide.
+/// Inside a menu: no gaps between rows, at least 190 wide. Notes the
+/// menu as open for the keys (`menu_keys`).
 pub fn menu_style(ui: &mut Ui) {
+    menu_keys::menu(ui);
     let style = ui.style_mut();
     style.visuals.override_text_color = Some(theme::MENU_FOREGROUND);
     style.spacing.item_spacing = Vec2::ZERO;
@@ -195,26 +200,44 @@ pub fn menu_row_width(ui: &Ui, content_width: f32) -> f32 {
     ui.available_width().max(needed)
 }
 
+/// A row's shortcut colour: `Menu-Gesture`, or, when the row is disabled,
+/// its label's grey. The gesture's slate dimmed by half as well would all
+/// but vanish on the menu (under 2:1).
+fn shortcut_color(enabled: bool) -> Color32 {
+    if enabled {
+        theme::MENU_GESTURE
+    } else {
+        theme::MENU_FOREGROUND.gamma_multiply(MENU_DISABLED_OPACITY)
+    }
+}
+
 /// One menu row: the hover fill (inset 1, corners 4), the icon centred in
 /// its column, the text 2 past it (11px, white when highlighted), the
-/// shortcut in monospace 10 at the right and, for submenus, the arrow.
-fn menu_row(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, shortcut: &str, enabled: bool, arrow: bool, open: bool) -> Response {
-    menu_row_styled(ui, icon, text, RowText::default(), shortcut, enabled, arrow, open)
+/// shortcut in monospace 10 at the right and, for a submenu (`submenu`,
+/// `open` while it shows), the arrow. Highlighted under the pointer, or
+/// with the keys on it (`menu_keys`).
+fn menu_row(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, shortcut: &str, enabled: bool, submenu: Option<Id>, open: bool) -> Response {
+    menu_row_styled(ui, icon, text, RowText::default(), shortcut, enabled, submenu, open)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn menu_row_styled(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, style: RowText, shortcut: &str, enabled: bool, arrow: bool, open: bool) -> Response {
+fn menu_row_styled(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, style: RowText, shortcut: &str, enabled: bool, submenu: Option<Id>, open: bool) -> Response {
     let text_width = row_galley(ui, text, style, Color32::WHITE).size().x;
     let shortcut_width = if shortcut.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(shortcut.to_string(), theme::monospace(10.0), Color32::WHITE).size().x + 2.0 + 8.0 };
     let content_width = MENU_ICON_COLUMN + 2.0 + text_width + 2.0 + shortcut_width.max(MENU_ARROW_COLUMN);
     let width = menu_row_width(ui, content_width);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, MENU_ROW_HEIGHT), sense);
-    let highlighted = enabled && (response.hovered() || open);
+    let highlighted = if enabled {
+        menu_keys::row(ui, &response, submenu) || open
+    } else {
+        menu_keys::menu(ui);
+        false
+    };
     if highlighted {
         ui.painter().rect_filled(rect.shrink(1.0), 4.0, theme::MENU_BACKGROUND_HOVER);
     }
-    let opacity = if enabled { 1.0 } else { 0.5 };
+    let opacity = if enabled { 1.0 } else { MENU_DISABLED_OPACITY };
     if let Some((name, color)) = icon {
         let icon_center = Pos2::new(rect.left() + MENU_ICON_COLUMN / 2.0, rect.center().y);
         let icon_rect = Rect::from_center_size(icon_center, Vec2::splat(icons::DEFAULT_SIZE));
@@ -226,12 +249,12 @@ fn menu_row_styled(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, style
     let text_position = Pos2::new(rect.left() + MENU_ICON_COLUMN + 2.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(text_position, galley, text_color);
     if !shortcut.is_empty() {
-        let shortcut_color = theme::MENU_GESTURE.gamma_multiply(0.75 * opacity);
+        let shortcut_color = shortcut_color(enabled);
         let shortcut_galley = ui.painter().layout_no_wrap(shortcut.to_string(), theme::monospace(10.0), shortcut_color);
         let shortcut_position = Pos2::new(rect.right() - 8.0 - shortcut_galley.size().x, rect.center().y - shortcut_galley.size().y / 2.0);
         ui.painter().galley(shortcut_position, shortcut_galley, shortcut_color);
     }
-    if arrow {
+    if submenu.is_some() {
         let arrow_center = Pos2::new(rect.right() - MENU_ARROW_COLUMN / 2.0, rect.center().y);
         let arrow_rect = Rect::from_center_size(arrow_center, Vec2::splat(icons::DEFAULT_SIZE));
         icons::paint(ui, arrow_rect, "chevron-right", theme::MENU_ICON.gamma_multiply(opacity));
@@ -247,7 +270,7 @@ pub fn menu_item(ui: &mut Ui, icon: Option<&str>, accent: Option<Color32>, text:
 pub fn menu_item_enabled(ui: &mut Ui, icon: Option<&str>, accent: Option<Color32>, text: &str, shortcut: &str, enabled: bool) -> Response {
     let tint = accent.unwrap_or(theme::MENU_ICON);
     let icon = icon.map(|name| (name, tint));
-    let response = menu_row(ui, icon, text, shortcut, enabled, false, false);
+    let response = menu_row(ui, icon, text, shortcut, enabled, None, false);
     if response.clicked() {
         ui.close();
     }
@@ -258,7 +281,7 @@ pub fn menu_item_enabled(ui: &mut Ui, icon: Option<&str>, accent: Option<Color32
 /// stands where the icon goes.
 pub fn check_item(ui: &mut Ui, checked: bool, text: &str, shortcut: &str) -> Response {
     let icon = if checked { Some(("check", theme::ACCENT_BLUE)) } else { None };
-    let response = menu_row(ui, icon, text, shortcut, true, false, false);
+    let response = menu_row(ui, icon, text, shortcut, true, None, false);
     if response.clicked() {
         ui.close();
     }
@@ -275,31 +298,34 @@ pub fn checked_icon_item(ui: &mut Ui, checked: bool, icon: Option<&str>, accent:
 
 /// A greyed caption inside a menu (`IsEnabled="False"` headers).
 pub fn menu_caption(ui: &mut Ui, text: &str) {
-    menu_row(ui, None, text, "", false, false, false);
+    menu_row(ui, None, text, "", false, None, false);
 }
 
 /// A submenu entry (`SubmenuHeader`): the row with its arrow, opening
 /// `contents` beside it.
 pub fn submenu<R>(ui: &mut Ui, icon: Option<&str>, accent: Option<Color32>, text: &str, contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
-    let next_id = ui.next_auto_id();
-    let open = egui::Popup::is_id_open(ui.ctx(), SubMenu::id_from_widget_id(next_id));
     let tint = accent.unwrap_or(theme::MENU_ICON);
     let icon = icon.map(|name| (name, tint));
-    let response = menu_row(ui, icon, text, "", true, true, open);
-    let shown = SubMenu::new().show(ui, &response, |ui| {
-        menu_style(ui);
-        contents(ui)
-    });
-    shown.map(|inner| inner.inner)
+    submenu_row(ui, contents, |ui, child, open| menu_row(ui, icon, text, "", true, Some(child), open))
 }
 
 /// A family header with its submenu (the toolbox's `Tag="HEADER"` items):
 /// icon and small-caps text in `color`.
 pub fn header_submenu<R>(ui: &mut Ui, icon: &str, color: Color32, text: &str, contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
-    let next_id = ui.next_auto_id();
-    let open = egui::Popup::is_id_open(ui.ctx(), SubMenu::id_from_widget_id(next_id));
     let style = RowText { color: Some(color), small_caps: true };
-    let response = menu_row_styled(ui, Some((icon, color)), text, style, "", true, true, open);
+    submenu_row(ui, contents, |ui, child, open| menu_row_styled(ui, Some((icon, color)), text, style, "", true, Some(child), open))
+}
+
+/// The row `draw` draws (given its submenu's id and whether it is open)
+/// and the submenu beside it. While the keys are in use, only they open
+/// submenus.
+fn submenu_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R, draw: impl FnOnce(&mut Ui, Id, bool) -> Response) -> Option<R> {
+    let child = SubMenu::id_from_widget_id(ui.next_auto_id());
+    let open = menu_keys::submenu_open(ui, child);
+    let response = draw(ui, child, open);
+    if !open && menu_keys::active(ui.ctx()) {
+        return None;
+    }
     let shown = SubMenu::new().show(ui, &response, |ui| {
         menu_style(ui);
         contents(ui)
@@ -472,5 +498,194 @@ mod tests {
     fn a_submenu_with_no_room_on_the_right_opens_on_the_left() {
         let (menu, _, submenu) = open_bake(640.0, 520.0);
         assert!(submenu.right() <= menu.left(), "{submenu:?} covers {menu:?}");
+    }
+
+    /// The WCAG contrast of `color`, laid over `background` as egui blends
+    /// (in gamma space), against `background`.
+    fn contrast(color: Color32, background: Color32) -> f32 {
+        let luminance = |color: Color32| {
+            let [red, green, blue] = theme::sc_rgb(color);
+            0.2126 * red + 0.7152 * green + 0.0722 * blue
+        };
+        let front = luminance(background.blend(color));
+        let back = luminance(background);
+        (front.max(back) + 0.05) / (front.min(back) + 0.05)
+    }
+
+    #[test]
+    fn shortcuts_stay_legible_when_disabled() {
+        let enabled = contrast(shortcut_color(true), theme::MENU_BACKGROUND);
+        let disabled = contrast(shortcut_color(false), theme::MENU_BACKGROUND);
+        assert!(enabled >= 3.0, "an enabled shortcut is {enabled:.2}:1");
+        assert!(disabled >= 3.0, "a disabled shortcut is {disabled:.2}:1");
+    }
+
+    /// A frame of a File-like menu with the keys taken as the app takes
+    /// them: what had the focus and was highlighted, what was clicked.
+    #[derive(Default)]
+    struct Keyed {
+        button: Pos2,
+        open: bool,
+        submenu: bool,
+        focused: Option<&'static str>,
+        highlighted: Vec<&'static str>,
+        clicked: Vec<&'static str>,
+        rows: Vec<(&'static str, Rect)>,
+    }
+
+    fn keyed_frame(context: &egui::Context, events: Vec<egui::Event>) -> Keyed {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let keyed = std::cell::RefCell::new(Keyed::default());
+        let note_row = |name: &'static str, rect: Rect, focused: bool, clicked: bool| {
+            let mut keyed = keyed.borrow_mut();
+            if focused {
+                keyed.focused = Some(name);
+            }
+            if clicked {
+                keyed.clicked.push(name);
+            }
+            keyed.rows.push((name, rect));
+        };
+        let note = |name: &'static str, response: &Response| note_row(name, response.rect, response.has_focus(), response.clicked());
+        let output = context.run_ui(input, |ui| {
+            menu_keys::begin(ui.ctx());
+            let slot = Rect::from_min_size(Pos2::new(200.0, 0.0), Vec2::new(60.0, 24.0));
+            let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(slot));
+            let (response, inner) = MenuButton::new("File").config(menu_config()).ui(&mut bar, |ui| {
+                menu_style(ui);
+                note("New", &menu_item(ui, None, None, "New", "Ctrl N"));
+                note("Open", &menu_item(ui, None, None, "Open", ""));
+                menu_separator(ui);
+                menu_caption(ui, "Recent Files");
+                // The submenu's row, as `submenu` lays it out.
+                let (row, at, width) = (ui.next_auto_id(), ui.cursor().min, ui.available_width());
+                let shown = submenu(ui, None, None, "Recent", |ui| {
+                    note("One", &menu_item(ui, None, None, "One", ""));
+                    note("Two", &menu_item(ui, None, None, "Two", ""));
+                });
+                note_row("Recent", Rect::from_min_size(at, Vec2::new(width, MENU_ROW_HEIGHT)), ui.memory(|memory| memory.has_focus(row)), false);
+                keyed.borrow_mut().submenu = shown.is_some();
+                note("Share", &menu_item_enabled(ui, None, None, "Share", "", false));
+                note("Exit", &menu_item(ui, None, None, "Exit", ""));
+            });
+            let mut keyed = keyed.borrow_mut();
+            keyed.button = response.rect.center();
+            keyed.open = inner.is_some();
+        });
+        // The fills painted (a highlighted row's is inset 1; the menu
+        // fades in, so its colour is not yet the theme's).
+        let fills: Vec<Rect> = output.shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Rect(rect) if rect.fill != Color32::TRANSPARENT => Some(rect.rect),
+            _ => None,
+        }).collect();
+        output.drop_without_applying_deltas();
+        let mut keyed = keyed.into_inner();
+        keyed.highlighted = keyed.rows.iter().filter(|(_, rect)| fills.contains(&rect.shrink(1.0))).map(|(name, _)| *name).collect();
+        keyed
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    fn press(context: &egui::Context, pressed: egui::Key) -> Keyed {
+        let keyed = keyed_frame(context, vec![key(pressed, egui::Modifiers::NONE)]);
+        // The frames after, as the app draws them.
+        keyed_frame(context, Vec::new());
+        let settled = keyed_frame(context, Vec::new());
+        Keyed { clicked: keyed.clicked, ..settled }
+    }
+
+    /// Opens the menu with a click and leaves the pointer at `rest`.
+    fn opened(rest: Pos2) -> egui::Context {
+        let context = themed_context();
+        let button = keyed_frame(&context, Vec::new()).button;
+        keyed_frame(&context, vec![egui::Event::PointerMoved(button), click(button, true)]);
+        keyed_frame(&context, vec![click(button, false)]);
+        keyed_frame(&context, vec![egui::Event::PointerMoved(rest)]);
+        let shown = keyed_frame(&context, Vec::new());
+        assert!(shown.open, "the menu opens");
+        context
+    }
+
+    #[test]
+    fn the_arrows_move_a_highlight_through_the_rows_and_enter_clicks_it() {
+        // The pointer off the menu, up in the title bar.
+        let context = opened(Pos2::new(600.0, 5.0));
+        assert_eq!(keyed_frame(&context, Vec::new()).highlighted, Vec::<&str>::new());
+        let shown = press(&context, egui::Key::ArrowDown);
+        assert_eq!(shown.focused, Some("New"));
+        assert_eq!(shown.highlighted, ["New"]);
+        // The caption and the disabled row are passed over.
+        assert_eq!(press(&context, egui::Key::ArrowDown).focused, Some("Open"));
+        assert_eq!(press(&context, egui::Key::ArrowDown).highlighted, ["Recent"]);
+        assert_eq!(press(&context, egui::Key::ArrowDown).focused, Some("Exit"));
+        // Round to the first, and back.
+        assert_eq!(press(&context, egui::Key::ArrowDown).focused, Some("New"));
+        assert_eq!(press(&context, egui::Key::ArrowUp).focused, Some("Exit"));
+        assert_eq!(press(&context, egui::Key::Home).focused, Some("New"));
+        let clicked = press(&context, egui::Key::Enter);
+        assert_eq!(clicked.clicked, ["New"]);
+        assert!(!clicked.open, "the menu closes on the click");
+    }
+
+    #[test]
+    fn right_opens_a_submenu_on_its_first_row_and_left_closes_it() {
+        let context = opened(Pos2::new(600.0, 5.0));
+        for _ in 0..3 {
+            press(&context, egui::Key::ArrowDown);
+        }
+        let shown = press(&context, egui::Key::ArrowRight);
+        assert!(shown.submenu, "Right opens Recent");
+        assert_eq!(shown.focused, Some("One"));
+        // The submenu's row stays highlighted with its own.
+        assert_eq!(shown.highlighted, ["One", "Recent"]);
+        assert_eq!(press(&context, egui::Key::ArrowDown).focused, Some("Two"));
+        let back = press(&context, egui::Key::ArrowLeft);
+        assert!(!back.submenu && back.open);
+        assert_eq!(back.focused, Some("Recent"));
+        // Enter opens it too; Escape closes only it, then the menu.
+        assert_eq!(press(&context, egui::Key::Enter).focused, Some("One"));
+        let escaped = press(&context, egui::Key::Escape);
+        assert!(!escaped.submenu && escaped.open);
+        assert_eq!(escaped.focused, Some("Recent"));
+        assert!(!press(&context, egui::Key::Escape).open);
+    }
+
+    #[test]
+    fn tab_steps_like_down_and_enter_clicks_a_row_in_a_submenu() {
+        let context = opened(Pos2::new(600.0, 5.0));
+        press(&context, egui::Key::Tab);
+        assert_eq!(press(&context, egui::Key::Tab).focused, Some("Open"));
+        let back = keyed_frame(&context, vec![key(egui::Key::Tab, egui::Modifiers::SHIFT)]);
+        assert_eq!(back.focused, Some("New"));
+        press(&context, egui::Key::ArrowUp);
+        press(&context, egui::Key::ArrowUp);
+        press(&context, egui::Key::ArrowRight);
+        let clicked = press(&context, egui::Key::Space);
+        assert_eq!(clicked.clicked, ["One"]);
+        assert!(!clicked.open);
+    }
+
+    #[test]
+    fn the_keys_hold_their_submenu_while_the_pointer_rests_on_another_row() {
+        let rows = keyed_frame(&opened(Pos2::new(600.0, 5.0)), Vec::new()).rows;
+        let exit = rows.iter().find(|(name, _)| *name == "Exit").unwrap().1.center();
+        let context = opened(exit);
+        assert_eq!(keyed_frame(&context, Vec::new()).highlighted, ["Exit"]);
+        // From the row under the pointer.
+        assert_eq!(press(&context, egui::Key::ArrowUp).focused, Some("Recent"));
+        let shown = press(&context, egui::Key::ArrowRight);
+        assert!(shown.submenu, "the pointer resting on Exit closed Recent");
+        assert_eq!(shown.highlighted, ["One", "Recent"]);
+        for _ in 0..3 {
+            assert!(keyed_frame(&context, Vec::new()).submenu);
+        }
+        // Moved, the pointer takes over.
+        keyed_frame(&context, vec![egui::Event::PointerMoved(exit + Vec2::new(4.0, 0.0))]);
+        let moved = keyed_frame(&context, Vec::new());
+        assert!(moved.highlighted.contains(&"Exit"), "{:?}", moved.highlighted);
+        assert!(!moved.submenu);
     }
 }

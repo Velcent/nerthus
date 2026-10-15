@@ -5,6 +5,7 @@
 //! build each (the current settings first, mutations reset), Add Mutation
 //! the chosen profile as the next mutation. The script can be edited,
 //! saved, and started: it runs on its own while the editor carries on.
+//! Esc closes it while it is the window being worked in.
 //!
 //! The script, its file and the mutation count last until Nerthus closes,
 //! whichever project is open.
@@ -12,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use crossbeam_channel::Receiver;
-use egui::{Align, Id, Layout, RichText, Stroke, Vec2};
+use egui::{Align, Id, Key, LayerId, Layout, Modifiers, Order, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use nerthus_engine::region;
 use nerthus_export::swarm;
 
@@ -26,6 +27,21 @@ const NO_PROFILE: &str = "Current Settings (No Profile)";
 
 /// The key Save Batch File's dialog answers under.
 const SAVE_KEY: &str = "batch-build-save";
+
+/// The window's size when it first opens, title bar and frame included.
+const DEFAULT_SIZE: Vec2 = Vec2::new(750.0, 450.0);
+/// The smallest it can be made: room for the rows of buttons and a few
+/// lines of the script.
+const MIN_SIZE: Vec2 = Vec2::new(480.0, 280.0);
+/// The Build Profile label's height.
+const LABEL_HEIGHT: f32 = 16.0;
+/// The height of the profile list and of each row of buttons.
+const ROW_HEIGHT: f32 = 20.0;
+
+/// The script's editor, which Esc leaves before it closes the window.
+fn script_id() -> Id {
+    Id::new("batch-script-text")
+}
 
 /// What lasts between openings of the window.
 #[derive(Default)]
@@ -47,6 +63,10 @@ pub struct BatchWindow {
     profile: usize,
     /// The script as shown (`batch`).
     text: String,
+    /// Whether it is the window being worked in, the one Esc closes: from
+    /// when it opens until the shell or another window is pressed, and
+    /// again once it is pressed.
+    active: bool,
 }
 
 /// The first line of a script (`REM Nerthus Batch Build Version …`, with
@@ -108,7 +128,7 @@ impl BatchWindow {
     /// `BatchBuildWindow_Loaded`: the current settings chosen, the script
     /// shown.
     pub fn open(session: &mut BatchSession) -> BatchWindow {
-        BatchWindow { profile: 0, text: session.reload() }
+        BatchWindow { profile: 0, text: session.reload(), active: true }
     }
 
     /// The profile chosen, by name (`None` for the current settings).
@@ -198,6 +218,36 @@ fn run_script(file: &Path) -> Result<(), String> {
     if status.success() { Ok(()) } else { Err(format!("the script ended with {status}")) }
 }
 
+/// Esc closes the window while it is the one being worked in: taken
+/// before the shell's keys, so that it does not stop a build as well. Esc
+/// in the script only leaves it, as in any text field, and a list dropped
+/// down takes it instead.
+pub fn take_escape(ctx: &egui::Context, window: &mut Option<BatchWindow>) {
+    if !window.as_ref().is_some_and(|shown| shown.active) || egui::Popup::is_any_open(ctx) {
+        return;
+    }
+    // egui has already taken the keyboard from the script for this Esc.
+    let typing = ctx.memory(|memory| memory.had_focus_last_frame(script_id()));
+    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) && !typing {
+        *window = None;
+    }
+}
+
+/// A press in the window makes it the one being worked in, and a press in
+/// the shell or another window stops it being; a list or menu dropped
+/// down changes nothing.
+fn note_press(ctx: &egui::Context, window: &mut BatchWindow, layer: LayerId) {
+    let pressed = ctx.input(|input| if input.pointer.any_pressed() { input.pointer.press_origin() } else { None });
+    let Some(position) = pressed else {
+        return;
+    };
+    // The shell draws under every window, so a press on no window is on it.
+    let under = ctx.layer_id_at(position);
+    if under.is_none_or(|under| matches!(under.order, Order::Background | Order::Middle)) {
+        window.active = under == Some(layer);
+    }
+}
+
 /// The window. Returns false once closed.
 pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut BatchWindow, session: &mut BatchSession, dialogs: &mut FileDialogs) -> bool {
     if let Some(answer) = dialogs.take(SAVE_KEY)
@@ -220,23 +270,37 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut BatchWindow, 
     let mut frame = egui::Window::new("Batch Build Manager");
     frame = frame.collapsible(false);
     frame = frame.resizable(true);
-    frame = tool_window::place(ctx, frame, Id::new("batch-build"), Vec2::new(750.0, 450.0));
+    // Before `place`, which can fix the size for a frame.
+    frame = frame.min_size(MIN_SIZE);
+    frame = tool_window::place(ctx, frame, Id::new("batch-build"), DEFAULT_SIZE);
     frame = frame.open(&mut open);
-    frame.show(ctx, |ui| {
-        ui.add_space(8.0);
-        ui.label(RichText::new("Build Profile").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
+    let shown = frame.show(ctx, |ui| {
+        // The room inside, split between the parts whatever they hold: the
+        // label and the rows keep their heights and the script gets the
+        // rest, so that nothing makes the window larger than it is.
+        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        let row = |top: f32, height: f32| Rect::from_min_size(Pos2::new(rect.left(), top), Vec2::new(rect.width(), height));
+        let label = row(rect.top() + 8.0, LABEL_HEIGHT);
+        let profiles = row(label.bottom() + 4.0, ROW_HEIGHT);
+        let adds = row(profiles.bottom() + 8.0, ROW_HEIGHT);
+        let script_top = adds.bottom() + 16.0;
+        let footer = row((rect.bottom() - ROW_HEIGHT).max(script_top + 8.0), ROW_HEIGHT);
+        let script_rect = Rect::from_min_max(Pos2::new(rect.left(), script_top), Pos2::new(rect.right(), footer.top() - 8.0));
+
+        let mut label_ui = tool_window::part(ui, "batch-label", label, Layout::left_to_right(Align::Center));
+        label_ui.label(RichText::new("Build Profile").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
+        let mut profiles_ui = tool_window::part(ui, "batch-profiles", profiles, Layout::left_to_right(Align::Center));
         let current = if window.profile == 0 { NO_PROFILE.to_string() } else { names[window.profile - 1].clone() };
         let mut combo = egui::ComboBox::from_id_salt("batch-profile");
         combo = combo.selected_text(current);
-        combo = combo.width(ui.available_width());
-        combo.show_ui(ui, |ui| {
+        combo = combo.width(profiles.width());
+        combo.show_ui(&mut profiles_ui, |ui| {
             ui.selectable_value(&mut window.profile, 0, NO_PROFILE);
             for (index, name) in names.iter().enumerate() {
                 ui.selectable_value(&mut window.profile, index + 1, name.as_str());
             }
         });
-        ui.add_space(8.0);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        tool_window::part(ui, "batch-adds", adds, Layout::right_to_left(Align::Center)).scope(|ui| {
             let can_clear = session.contents != script_header();
             if ui.add_enabled(can_clear, egui::Button::new("Clear Batch Build")).on_hover_text("Clears the below Batch Build list.").clicked() {
                 window.clear(session);
@@ -261,18 +325,16 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut BatchWindow, 
                 window.add(session, editor, profile.as_deref());
             }
         });
-        ui.add_space(16.0);
-        let footer = 36.0;
         let mut script = egui::TextEdit::multiline(&mut window.text);
+        script = script.id(script_id());
         script = script.font(theme::monospace(12.0));
         script = script.code_editor();
         script = script.desired_width(f32::INFINITY);
-        let height = (ui.available_height() - footer).max(120.0);
-        egui::ScrollArea::both().id_salt("batch-script").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
-            ui.add_sized(Vec2::new(ui.available_width(), height), script);
+        let mut script_ui = tool_window::part(ui, "batch-script", script_rect, Layout::top_down(Align::Min));
+        egui::ScrollArea::both().id_salt("batch-script").auto_shrink([false, false]).show(&mut script_ui, |ui| {
+            ui.add_sized(ui.available_size(), script);
         });
-        ui.add_space(8.0);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        tool_window::part(ui, "batch-footer", footer, Layout::right_to_left(Align::Center)).scope(|ui| {
             if ui.button("Close").clicked() {
                 close = true;
             }
@@ -297,5 +359,172 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut BatchWindow, 
             }
         });
     });
+    if let Some(shown) = shown {
+        note_press(ctx, window, shown.response.layer_id);
+    }
     !(close || !open)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use egui::{AreaState, Event, PointerButton, RawInput};
+
+    /// The screen, in points, of 1600 × 960 at the default 120%.
+    const LARGE: Vec2 = Vec2::new(1333.0, 800.0);
+    /// 800 × 600 and 640 × 480 at 120%.
+    const SMALL_SCREENS: [Vec2; 2] = [Vec2::new(666.0, 500.0), Vec2::new(533.0, 400.0)];
+
+    /// What the shell keeps for the window.
+    struct Shell {
+        context: egui::Context,
+        editor: Editor,
+        session: BatchSession,
+        window: Option<BatchWindow>,
+        dialogs: FileDialogs,
+    }
+
+    impl Shell {
+        /// Project › Execute Batch Build… chosen.
+        fn open() -> Shell {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            let mut session = BatchSession::default();
+            let window = Some(BatchWindow::open(&mut session));
+            Shell { context, editor: Editor::new(Document::new()), session, window, dialogs: FileDialogs::default() }
+        }
+
+        /// A frame at this screen size with these events, Esc taken before
+        /// the window as the shell does. Returns the window's rect, and
+        /// whether the shell saw an Esc.
+        fn frame_seen(&mut self, screen: Vec2, events: Vec<Event>) -> (Rect, bool) {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
+            let context = self.context.clone();
+            let mut seen = false;
+            let output = context.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                take_escape(&ctx, &mut self.window);
+                seen = ctx.input(|input| input.key_pressed(Key::Escape));
+                if let Some(window) = self.window.as_mut()
+                    && !show(&ctx, &mut self.editor, window, &mut self.session, &mut self.dialogs)
+                {
+                    self.window = None;
+                }
+            });
+            output.drop_without_applying_deltas();
+            let area = AreaState::load(&self.context, Id::new("batch-build")).filter(|area| area.size.is_some());
+            (area.map(|area| area.rect()).unwrap_or(Rect::NOTHING), seen)
+        }
+
+        fn frame(&mut self, screen: Vec2, events: Vec<Event>) -> Rect {
+            self.frame_seen(screen, events).0
+        }
+
+        /// Frames enough for egui's first-frame sizing to settle.
+        fn settle(&mut self, screen: Vec2) -> Rect {
+            for _ in 0..4 {
+                self.frame(screen, Vec::new());
+            }
+            self.frame(screen, Vec::new())
+        }
+
+        /// A click at `position`.
+        fn click(&mut self, screen: Vec2, position: Pos2) {
+            let button = |pressed| Event::PointerButton { pos: position, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            self.frame(screen, vec![Event::PointerMoved(position)]);
+            self.frame(screen, vec![button(true)]);
+            self.frame(screen, vec![button(false)]);
+        }
+
+        /// Whether the script has the keyboard.
+        fn typing(&self) -> bool {
+            self.context.memory(|memory| memory.has_focus(script_id()))
+        }
+    }
+
+    fn escape() -> Event {
+        Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    fn close(a: Rect, b: Rect) -> bool {
+        (a.min - b.min).abs().max_elem() <= 1.0 && (a.max - b.max).abs().max_elem() <= 1.0
+    }
+
+    #[test]
+    fn the_window_opens_at_its_size_and_keeps_it() {
+        let mut shell = Shell::open();
+        let opened = shell.settle(LARGE);
+        let body = tool_window::body(&shell.context);
+        assert!((opened.size() - DEFAULT_SIZE).abs().max_elem() <= 1.0, "{opened:?} is not {DEFAULT_SIZE:?}");
+        assert!((opened.center() - body.center()).length() <= 1.0, "{opened:?} is not centred in {body:?}");
+        // It grew every frame, off the top and bottom within seconds.
+        for _ in 0..240 {
+            shell.frame(LARGE, Vec::new());
+        }
+        let later = shell.frame(LARGE, Vec::new());
+        assert!(close(later, opened), "{later:?} grew from {opened:?}");
+    }
+
+    #[test]
+    fn the_window_stays_in_small_bodies() {
+        for screen in SMALL_SCREENS {
+            let mut shell = Shell::open();
+            let opened = shell.settle(screen);
+            for _ in 0..240 {
+                shell.frame(screen, Vec::new());
+            }
+            let later = shell.frame(screen, Vec::new());
+            let body = tool_window::body(&shell.context);
+            assert!(body.expand(0.5).contains_rect(later), "at {screen:?}: {later:?} is outside {body:?}");
+            assert!(close(later, opened), "at {screen:?}: {later:?} grew from {opened:?}");
+        }
+    }
+
+    #[test]
+    fn close_is_in_reach() {
+        // Close is the footer's last button, in the window's bottom right
+        // corner past the frame (7).
+        let at = |rect: Rect| Pos2::new(rect.right() - 7.0 - 12.0, rect.bottom() - 7.0 - ROW_HEIGHT / 2.0);
+        for screen in [LARGE, SMALL_SCREENS[0], SMALL_SCREENS[1]] {
+            let mut shell = Shell::open();
+            let rect = shell.settle(screen);
+            shell.click(screen, at(rect));
+            assert!(shell.window.is_none(), "Close at {screen:?} did not close the window");
+        }
+    }
+
+    #[test]
+    fn escape_closes_the_window_and_not_the_build() {
+        let mut shell = Shell::open();
+        shell.settle(LARGE);
+        let (_, seen) = shell.frame_seen(LARGE, vec![escape()]);
+        assert!(shell.window.is_none() && !seen);
+    }
+
+    #[test]
+    fn escape_in_the_script_only_leaves_it() {
+        let mut shell = Shell::open();
+        let rect = shell.settle(LARGE);
+        shell.click(LARGE, rect.center());
+        assert!(shell.typing());
+        shell.frame(LARGE, vec![escape()]);
+        assert!(shell.window.is_some() && !shell.typing());
+        shell.frame(LARGE, vec![escape()]);
+        assert!(shell.window.is_none());
+    }
+
+    #[test]
+    fn escape_is_the_shells_once_it_is_pressed() {
+        let mut shell = Shell::open();
+        let rect = shell.settle(LARGE);
+        let body = tool_window::body(&shell.context);
+        shell.click(LARGE, body.left_top() + Vec2::splat(20.0));
+        let (_, seen) = shell.frame_seen(LARGE, vec![escape()]);
+        assert!(shell.window.is_some() && seen);
+        // Pressed again, by its title bar.
+        shell.click(LARGE, rect.center_top() + Vec2::new(0.0, 12.0));
+        shell.frame(LARGE, vec![escape()]);
+        assert!(shell.window.is_none());
+    }
 }

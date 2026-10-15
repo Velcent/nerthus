@@ -10,7 +10,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{drag_origin, elided_galley, GraphState, SIMPLIFIED_ZOOM};
+use crate::ui::graph_canvas::{drag_origin, drag_pointer, elided_galley, GraphState, SIMPLIFIED_ZOOM};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::{icon_grid, swatch_grid};
 use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, menu_style};
@@ -56,6 +56,13 @@ pub struct GroupDrag {
     children: Option<Rect>,
 }
 
+impl GroupDrag {
+    /// Whether the group moves (rather than takes a new size).
+    pub(crate) fn moves(&self) -> bool {
+        self.kind == GroupDragKind::Move
+    }
+}
+
 /// `GetGroupBounds`: the box the group's nodes and notes take.
 fn children_bounds(editor: &Editor, group: &GroupData) -> Option<Rect> {
     let default_size = editor.user.options.default_node_size().to_string();
@@ -93,7 +100,7 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         let header = Rect::from_min_size(screen.min, Vec2::new(screen.width(), header_height));
         let header_response = ui.interact(header, ui.id().with(("group-header", group.id)), Sense::click_and_drag());
         let tooltip_text = group.name.clone();
-        let header_response = header_response.on_hover_text(tooltip_text);
+        let header_response = header_response.on_hover_text_at_pointer(tooltip_text);
         if header_response.clicked() {
             select_group(editor, state, group.id, modifiers.command || modifiers.shift);
         }
@@ -186,7 +193,8 @@ fn continue_drag(ui: &Ui, editor: &mut Editor, state: &mut GraphState, origin: P
         return;
     };
     let view = state.view();
-    if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+    let pointer = if drag.moves() { drag_pointer(ui, state.rect) } else { ui.input(|input| input.pointer.interact_pos()) };
+    if let Some(pointer) = pointer {
         let current = view.to_canvas(origin, pointer);
         let delta = current - drag.pointer_start;
         let min_height = drag.children.map_or(0.0, |children| children.bottom() - drag.position[1] + ELEMENTS_PADDING);

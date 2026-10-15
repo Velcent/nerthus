@@ -14,7 +14,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{drag_origin, GraphState, GraphView};
+use crate::ui::graph_canvas::{drag_origin, drag_pointer, GraphState, GraphView};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
 use crate::ui::widgets::{menu_caption, menu_item, menu_separator, menu_style};
@@ -35,6 +35,13 @@ pub struct NoteDrag {
     resizing: bool,
     pointer_start: Pos2,
     start: [f32; 2],
+}
+
+impl NoteDrag {
+    /// Whether the note moves (rather than takes a new size).
+    pub(crate) fn moves(&self) -> bool {
+        !self.resizing
+    }
 }
 
 struct NoteLayout {
@@ -86,6 +93,11 @@ pub fn note_rect(editor: &Editor, tab: usize, id: i32) -> Option<Rect> {
     notes.iter().find(|note| note.id == id).map(|note| note.rect)
 }
 
+/// The rectangles of the notes on `tab`, by id (`Extents`).
+pub fn note_rects(editor: &Editor, tab: usize) -> Vec<(i32, Rect)> {
+    layouts(editor, tab).into_iter().map(|note| (note.id, note.rect)).collect()
+}
+
 /// The note's Markdown as wrapped text: `#` headings in semibold, list
 /// items with bullets, emphasis markers dropped.
 pub(crate) fn markdown_job(markdown: &str, zoom: f32, width: f32) -> LayoutJob {
@@ -128,7 +140,7 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         }
         draw(ui, painter, note, screen, zoom, state.selected_note == Some(note.id));
         let response = ui.interact(screen, ui.id().with(("note", note.id)), Sense::click_and_drag());
-        let response = if note.icon_only && !note.markdown.is_empty() { response.on_hover_text(note.markdown.clone()) } else { response };
+        let response = if note.icon_only && !note.markdown.is_empty() { response.on_hover_text_at_pointer(note.markdown.clone()) } else { response };
         let thumb = if note.icon_only {
             None
         } else {
@@ -180,7 +192,8 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
     };
     let held = ui.input(|input| input.pointer.primary_down());
     let mut corner = drag.start;
-    if let Some(point) = ui.input(|input| input.pointer.interact_pos()) {
+    let pointer = if drag.moves() { drag_pointer(ui, state.rect) } else { ui.input(|input| input.pointer.interact_pos()) };
+    if let Some(point) = pointer {
         let delta = view.to_canvas(origin, point) - drag.pointer_start;
         if drag.resizing {
             let size = [(drag.start[0] + delta.x).max(MIN_TEXT_WIDTH), (drag.start[1] + delta.y).max(MIN_HEIGHT)];

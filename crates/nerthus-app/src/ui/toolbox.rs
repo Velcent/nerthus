@@ -265,6 +265,32 @@ pub fn show(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphState
 /// icons, Compact two, Expanded one of icons with names.
 fn show_menus(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphState, commands: &mut Vec<Command>) {
     let mode = editor.user.options.toolbox_mode();
+    let (column, button, per_row) = menus_layout(ui, area, mode);
+    let look = EntryLook { editor, average: average_usage(editor) };
+    let mut settings: Vec<SettingsChange> = Vec::new();
+    for (index, category) in CATEGORIES.iter().enumerate() {
+        let row = (index / per_row) as f32;
+        let place = (index % per_row) as f32;
+        let corner = column.min + Vec2::new(place * button.x, row * button.y);
+        let rect = Rect::from_min_size(corner, button);
+        category_button(ui, rect, category, mode, &look, state, commands, &mut settings);
+    }
+    resize_menus(ui, column, mode, &mut editor.user.options, state);
+    apply_settings(&mut editor.user.options, state, settings);
+}
+
+/// Where `show` puts the toolbox in `area`, worked out before it is drawn
+/// so the graph under it can leave room for it.
+pub fn place(ui: &Ui, area: Rect, options: &UserOptions) -> Rect {
+    match options.toolbox_style() {
+        ToolboxStyle::Menus => menus_layout(ui, area, options.toolbox_mode()).0,
+        ToolboxStyle::Panel => panel_rect(area, options.toolbox_columns()),
+    }
+}
+
+/// The menus' column at the top-left of `area` (margin 10), a button's
+/// size and how many buttons share a row.
+fn menus_layout(ui: &Ui, area: Rect, mode: ToolboxMode) -> (Rect, Vec2, usize) {
     let font = theme::semibold(10.0);
     let line_height = ui.painter().layout_no_wrap("Primitive".to_string(), font, theme::LABEL_DEFAULT).size().y;
     let button_height = line_height + 2.0 * TEXT_PADDING;
@@ -275,18 +301,13 @@ fn show_menus(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphSta
     };
     let rows = CATEGORIES.len().div_ceil(per_row);
     let column = Rect::from_min_size(area.min + Vec2::new(10.0, 10.0), Vec2::new(width, rows as f32 * button_height));
-    let look = EntryLook { editor, average: average_usage(editor) };
-    let mut settings: Vec<SettingsChange> = Vec::new();
-    for (index, category) in CATEGORIES.iter().enumerate() {
-        let row = (index / per_row) as f32;
-        let place = (index % per_row) as f32;
-        let corner = column.min + Vec2::new(place * button_width, row * button_height);
-        let rect = Rect::from_min_size(corner, Vec2::new(button_width, button_height));
-        category_button(ui, rect, category, mode, &look, state, commands, &mut settings);
-    }
-    resize_menus(ui, column, mode, &mut editor.user.options, state);
-    apply_settings(&mut editor.user.options, state, settings);
-    state.toolbox_rect = column;
+    (column, Vec2::new(button_width, button_height), per_row)
+}
+
+/// The panel down the left of `area`, `columns` buttons wide.
+fn panel_rect(area: Rect, columns: usize) -> Rect {
+    let width = columns as f32 * PANEL_COLUMN;
+    Rect::from_min_max(area.min, Pos2::new(area.left() + width + 10.0, area.bottom()))
 }
 
 /// The toolbox's right edge (`GridSplitter`): dragged wider or narrower,
@@ -370,7 +391,7 @@ fn show_panel(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphSta
     let options = &editor.user.options;
     let columns = options.toolbox_columns();
     let width = columns as f32 * PANEL_COLUMN;
-    let panel = Rect::from_min_max(area.min, Pos2::new(area.left() + width + 10.0, area.bottom()));
+    let panel = panel_rect(area, columns);
     ui.painter().rect_filled(panel, 0.0, theme::PANEL_BACKGROUND);
     let look = EntryLook { editor, average: average_usage(editor) };
     let mut settings: Vec<SettingsChange> = Vec::new();
@@ -379,7 +400,7 @@ fn show_panel(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphSta
     let inner = panel.shrink2(Vec2::new(5.0, 0.0));
     let builder = UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min));
     let mut panel_ui = ui.new_child(builder);
-    panel_ui.set_clip_rect(panel);
+    panel_ui.shrink_clip_rect(panel);
     let categorized = look.editor.user.options.toolbox_categorized();
     ScrollArea::vertical().id_salt("toolbox-panel-scroll").max_height(inner.height()).show(&mut panel_ui, |ui| {
         ui.set_width(width);
@@ -406,7 +427,6 @@ fn show_panel(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphSta
     });
     resize_panel(ui, panel, &mut editor.user.options, state);
     apply_settings(&mut editor.user.options, state, settings);
-    state.toolbox_rect = panel;
 }
 
 fn toggle(set: &mut HashSet<&'static str>, category: &'static str) {
