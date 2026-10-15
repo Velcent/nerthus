@@ -8,6 +8,7 @@ use egui::{Align, Layout, RichText, Vec2};
 
 use crate::icons;
 use crate::theme;
+use crate::ui::widgets;
 
 const TITLE: &str = "WARNING!";
 const HEADING: &str = "Nahimic may prevent Nerthus from working";
@@ -24,7 +25,7 @@ pub struct NahimicWarning {
 /// the box ticked, it no longer shows by itself.
 pub fn show(ctx: &egui::Context, warning: &mut NahimicWarning) -> bool {
     let mut closed = false;
-    let modal = egui::Modal::new(egui::Id::new("nahimic-warning"));
+    let modal = widgets::dialog(ctx, egui::Id::new("nahimic-warning"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(460.0);
         ui.label(RichText::new(TITLE).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));

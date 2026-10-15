@@ -13,6 +13,7 @@ use crate::icons;
 use crate::theme;
 use crate::ui::markdown::{self, Document, View};
 use crate::ui::tool_window;
+use crate::ui::widgets::Tooltips;
 
 /// The contents' width as the window opens.
 const CONTENTS_WIDTH: f32 = 280.0;
@@ -231,7 +232,7 @@ fn icon_button(ui: &mut Ui, icon: &str, tooltip: &str, enabled: bool) -> egui::R
     }
     let tint = if enabled { theme::MENU_ICON } else { theme::ICON_DARKISH };
     icons::paint(ui, rect.shrink(4.0), icon, tint);
-    response.on_hover_text(tooltip)
+    response.tooltip(tooltip)
 }
 
 /// The contents: groups open and close with their chevrons, the page shown

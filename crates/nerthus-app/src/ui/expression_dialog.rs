@@ -15,6 +15,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::syntax_box;
+use crate::ui::widgets::{self, Tooltips};
 
 /// The window (480) less its margin (12 each side).
 const CONTENT_WIDTH: f32 = 480.0 - 24.0;
@@ -84,11 +85,8 @@ fn box_id() -> Id {
 /// A dialog's window: `Window-Background` with a margin of 12 (the
 /// dialog's `DockPanel Margin="12"`).
 fn window(ctx: &egui::Context, id: &str) -> egui::Modal {
-    let mut frame = egui::Frame::popup(&ctx.global_style());
-    frame.fill = theme::WINDOW_BACKGROUND;
-    frame.inner_margin = egui::Margin::same(12);
-    let modal = egui::Modal::new(Id::new(id));
-    modal.frame(frame)
+    let frame = widgets::dialog_frame(ctx).fill(theme::WINDOW_BACKGROUND);
+    egui::Modal::new(Id::new(id)).frame(frame)
 }
 
 /// The dialog, while one is open, with the task dialogs it opens.
@@ -252,7 +250,7 @@ fn examples_button(ui: &mut Ui) -> egui::Response {
     let response = ui.interact(rect, Id::new("edit-expression-examples"), Sense::click());
     let colour = if response.hovered() { theme::ACCENT_GRAY } else { theme::ICON_DEFAULT };
     icons::paint(ui, rect, "info-square-rounded", colour);
-    response.on_hover_text("Show examples of expressions")
+    response.tooltip("Show examples of expressions")
 }
 
 #[derive(Clone, Copy, PartialEq)]

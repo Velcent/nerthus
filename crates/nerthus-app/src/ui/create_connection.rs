@@ -10,7 +10,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::elided_galley;
 use crate::ui::graph_commands::GraphCommand;
-use crate::ui::widgets::{dialog_button, DIALOG_BUTTON_HEIGHT};
+use crate::ui::widgets::{dialog_button, DIALOG_BUTTON_HEIGHT, Tooltips};
 
 /// The window's `Border`: the window's 440 less the 20 its shadow takes
 /// each side, and what lies inside its line (`Padding` 1 and the panel's
@@ -179,7 +179,7 @@ fn row_height(ui: &Ui) -> f32 {
 fn port_row(ui: &mut Ui, port: &ListedPort, chosen: bool, height: f32) -> bool {
     let size = Vec2::new(ui.available_width(), height);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let response = response.on_hover_text(port.name.as_str());
+    let response = response.tooltip(port.name.as_str());
     let hovered = response.hovered();
     if chosen {
         ui.painter().rect_filled(rect, 2.0, theme::OPTIONS_SELECTION);

@@ -68,7 +68,7 @@ pub fn confirm(ctx: &egui::Context, editor: &Editor, ui_state: &mut UiState, com
     let mut start = false;
     let mut close = false;
     let mut cancel = false;
-    let modal = egui::Modal::new(egui::Id::new("build-and-export"));
+    let modal = widgets::dialog(ctx, egui::Id::new("build-and-export"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(460.0);
         let window_title = RichText::new("Build and Export?");

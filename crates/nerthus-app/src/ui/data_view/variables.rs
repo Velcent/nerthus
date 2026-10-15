@@ -16,7 +16,7 @@ use crate::ui::commands::Command;
 use crate::ui::data_view::{toolbar, toolbar_divider, toolbar_row};
 use crate::ui::editors::{dropdown_box, palette_color, range_slider, slider, toggle, RangeSpec, SliderSpec};
 use crate::ui::slider_popups::{self, BoxWidth, TypingLook};
-use crate::ui::widgets::{icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator};
+use crate::ui::widgets::{dialog, dialog_button, icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator};
 
 /// `Create Variable`'s entries: header, icon (`Accent-Muted-Teal`).
 const VARIABLE_KINDS: [(&str, &str); 7] = [
@@ -828,21 +828,22 @@ fn confirm_delete_all(ui: &mut Ui, editor: &mut Editor, state: &mut VariablesSta
     if !state.confirm_delete_all {
         return;
     }
-    let modal = egui::Modal::new(egui::Id::new("confirm-delete-variables"));
+    let modal = dialog(ui.ctx(), egui::Id::new("confirm-delete-variables"));
     let response = modal.show(ui.ctx(), |ui| {
         ui.set_width(340.0);
         let title = egui::RichText::new("Are you sure you want to delete all variables?").font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS);
         ui.label(title);
         ui.add_space(6.0);
         ui.label("All variables in the current project will be removed");
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if ui.button("Yes").clicked() {
-                editor.document.delete_all_variables();
-                editor.changed();
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if dialog_button(ui, "No", false).clicked() {
                 state.confirm_delete_all = false;
             }
-            if ui.button("No").clicked() {
+            if dialog_button(ui, "Yes", false).clicked() {
+                editor.document.delete_all_variables();
+                editor.changed();
                 state.confirm_delete_all = false;
             }
         });

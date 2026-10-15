@@ -16,7 +16,7 @@ use crate::ui::commands::Command;
 use crate::ui::graph_canvas::GraphState;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_search::SearchPopup;
-use crate::ui::widgets::{menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu};
+use crate::ui::widgets::{menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, Tooltips};
 
 /// A menu's least width (`Default-Menu-Item`'s menus).
 const MENU_WIDTH: f32 = 190.0;
@@ -266,7 +266,7 @@ fn portals_menu(ui: &mut Ui, editor: &Editor, node: i32, commands: &mut Vec<Comm
                     if row.inner {
                         commands.push(Command::Graph(GraphCommand::PortalSearch { node, port: port.name.clone() }));
                     }
-                    let disconnect = disconnect_button(ui).on_hover_text("Disconnect");
+                    let disconnect = disconnect_button(ui).tooltip("Disconnect");
                     if disconnect.clicked() {
                         commands.push(Command::Graph(GraphCommand::DisconnectPortalInput { node, port: port.name.clone() }));
                         ui.close();
@@ -471,7 +471,7 @@ pub fn swatch_grid(ui: &mut Ui) -> Option<&'static str> {
         if response.hovered() {
             ui.painter().rect_filled(swatch.shrink(3.0), 0.0, theme::MENU_BACKGROUND_HOVER.gamma_multiply(0.4));
         }
-        let response = response.on_hover_text(humanize_title(name));
+        let response = response.tooltip(humanize_title(name));
         if response.clicked() {
             chosen = Some(*name);
         }

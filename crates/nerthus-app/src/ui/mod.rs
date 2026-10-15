@@ -67,7 +67,7 @@ mod turntable_window;
 mod variable_dialog;
 pub mod viewport_2d;
 mod viewport_area;
-mod widgets;
+pub(crate) mod widgets;
 
 pub(crate) use data_view::stats::byte_size;
 
@@ -76,7 +76,7 @@ use std::panic::AssertUnwindSafe;
 use bevy::camera::Viewport;
 use bevy::diagnostic::{DiagnosticsStore, SystemInformationDiagnosticsPlugin};
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{Monitor, OnMonitor, PrimaryMonitor, PrimaryWindow, WindowResizeConstraints};
 use bevy_egui::{egui, EguiContexts};
 use egui::{CursorIcon, Key, KeyboardShortcut, LayerId, Modifiers, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
 use bevy::ecs::system::SystemParam;
@@ -889,6 +889,64 @@ fn split_layout(ui: &mut Ui, grid: Rect, state: &mut UiState, floating: bool) ->
     Areas { viewport, graph, properties }
 }
 
+/// The window's least inner size in points: the `Root` grid's columns
+/// and rows at their narrowest (`split_layout` keeps them no narrower),
+/// and the property area as short as it lays out at its narrowest, in
+/// the grid's margins, between the title and status bars.
+fn min_window_points() -> Vec2 {
+    let width = ROOT_MARGIN + MIN_LEFT + MIN_PROPERTIES + ROOT_MARGIN;
+    let properties = AREA_MARGIN + property_area::least_height(MIN_PROPERTIES - 2.0 * AREA_MARGIN) + AREA_MARGIN;
+    let grid = (MIN_ROW + MIN_ROW).max(properties);
+    let height = title_bar::HEIGHT + ROOT_MARGIN + grid + ROOT_MARGIN + status_bar::HEIGHT;
+    Vec2::new(width, height)
+}
+
+/// `min_window_points` in the window's logical pixels at the interface
+/// `scale`, but no more than the `screen` it is on (logical pixels too):
+/// a window that cannot be made that small is at least shown whole.
+fn min_window_size(scale: f32, screen: Option<Vec2>) -> Vec2 {
+    let least = min_window_points() * scale;
+    match screen {
+        Some(screen) => least.min(screen),
+        None => least,
+    }
+}
+
+/// Keeps the editor window no smaller than its areas need
+/// (`min_window_size`); at Bevy's own least, 180 by 120, they were drawn
+/// over each other. As the interface scale grows so does the least size,
+/// and a window now smaller is grown to it, which X11 and Wayland do not
+/// do themselves. That happens once per change, so a window manager that
+/// will not have it is not asked every frame.
+pub fn keep_min_window_size(
+    editor: Res<Editor>,
+    ui_state: Res<UiState>,
+    window: Single<(&mut Window, Option<&OnMonitor>), With<PrimaryWindow>>,
+    monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
+) {
+    let (mut window, on_monitor) = window.into_inner();
+    // The monitor the window is on; the primary one until that is known.
+    let current = on_monitor.and_then(|on| monitors.get(on.0).ok());
+    let monitor = current.or_else(|| monitors.iter().find(|(_, primary)| *primary));
+    let screen = monitor.map(|(monitor, _)| Vec2::new(monitor.physical_width as f32, monitor.physical_height as f32) / monitor.scale_factor as f32);
+    let least = min_window_size(editor.user.options.ui_scale(), screen);
+    let constraints = window.resize_constraints;
+    if constraints.min_width == least.x && constraints.min_height == least.y {
+        return;
+    }
+    window.resize_constraints = WindowResizeConstraints { min_width: least.x, min_height: least.y, ..constraints };
+    // Maximised, it already fills the screen it is not made smaller than.
+    if ui_state.maximized || (window.width() >= least.x && window.height() >= least.y) {
+        return;
+    }
+    // In whole physical pixels, rounded up to reach the least size.
+    let scale_factor = window.scale_factor();
+    let physical = |logical: f32| (logical * scale_factor).ceil() as u32;
+    let width = window.physical_width().max(physical(least.x));
+    let height = window.physical_height().max(physical(least.y));
+    window.resolution.set_physical_resolution(width, height);
+}
+
 /// The 3D camera draws only into the viewport host.
 fn fit_camera(camera: &mut Camera, scale: f32, physical_size: UVec2, host: Rect) {
     let physical_width = physical_size.x;
@@ -1124,5 +1182,120 @@ mod tests {
         assert!(frame(true));
         assert!(frame(false));
         assert!(!frame(false));
+    }
+
+    /// The areas `split_layout` gives a window `size` points big, its
+    /// splitters where `split_x` and `split_y` put them.
+    fn areas_at(size: Vec2, split_x: f32, split_y: f32) -> Areas {
+        let context = egui::Context::default();
+        let mut state = UiState::default();
+        state.split_x = split_x;
+        state.split_y = split_y;
+        let mut areas = None;
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            let top = Pos2::new(0.0, title_bar::HEIGHT);
+            let body = Rect::from_min_max(top, Pos2::new(size.x, size.y - status_bar::HEIGHT));
+            areas = Some(split_layout(ui, body.shrink(ROOT_MARGIN), &mut state, false));
+        });
+        output.drop_without_applying_deltas();
+        areas.unwrap()
+    }
+
+    #[test]
+    fn the_least_window_keeps_every_area_its_minimum() {
+        let least = min_window_points();
+        // As far as the splitters go either way (`split_layout`'s drags).
+        for split_x in [0.2, 0.5, 0.95] {
+            for split_y in [0.1, 0.5, 0.9] {
+                let areas = areas_at(least, split_x, split_y);
+                assert!(areas.viewport.width() >= MIN_LEFT, "{split_x}, {split_y}");
+                assert!(areas.properties.width() >= MIN_PROPERTIES, "{split_x}, {split_y}");
+                assert!(areas.viewport.height() >= MIN_ROW, "{split_x}, {split_y}");
+                assert!(areas.graph.height() >= MIN_ROW, "{split_x}, {split_y}");
+                let properties = areas.properties.shrink(AREA_MARGIN);
+                assert!(properties.height() >= property_area::least_height(properties.width()), "{split_x}, {split_y}");
+                assert!(areas.properties.right() <= least.x - ROOT_MARGIN, "{split_x}, {split_y}");
+                assert!(areas.graph.bottom() <= least.y - status_bar::HEIGHT - ROOT_MARGIN, "{split_x}, {split_y}");
+            }
+        }
+        // Any smaller, and the property area would be squeezed.
+        let narrower = areas_at(least - Vec2::new(10.0, 0.0), 0.95, 0.5);
+        assert!(narrower.properties.width() < MIN_PROPERTIES);
+    }
+
+    #[test]
+    fn the_least_window_grows_with_the_scale_up_to_the_screen() {
+        // As tall as the property area needs, more than the two rows.
+        let at_one = min_window_size(1.0, None);
+        assert_eq!(at_one, Vec2::new(568.0, 336.0));
+        // 120%, the scale Nerthus starts at: the 517 by 403 of the issue
+        // is too small.
+        let at_default = min_window_size(1.2, None);
+        assert!((at_default.x - 681.6).abs() < 0.01 && (at_default.y - 403.2).abs() < 0.01);
+        assert_eq!(min_window_size(1.75, None), at_one * 1.75);
+        // A screen too small for it keeps the window to its own size.
+        let small_screen = Vec2::new(1366.0, 768.0);
+        assert_eq!(min_window_size(3.0, Some(small_screen)), small_screen);
+        assert_eq!(min_window_size(1.2, Some(small_screen)), at_default);
+    }
+
+    #[test]
+    fn the_window_is_kept_to_its_least_size_and_grown_to_it() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::window::WindowResolution;
+
+        let mut world = World::new();
+        world.insert_resource(Editor::new(crate::document::Document::new()));
+        world.insert_resource(UiState::default());
+        let small = Window { resolution: WindowResolution::new(517, 403), ..default() };
+        let window = world.spawn((small, PrimaryWindow)).id();
+        let run = |world: &mut World| world.run_system_once(keep_min_window_size).unwrap();
+        let window_of = |world: &World| world.get::<Window>(window).unwrap().clone();
+
+        run(&mut world);
+        let shown = window_of(&world);
+        let least = min_window_size(1.2, None);
+        assert_eq!((shown.resize_constraints.min_width, shown.resize_constraints.min_height), (least.x, least.y));
+        assert!(shown.resize_constraints.max_width.is_infinite());
+        // Grown to fit, in whole pixels.
+        assert_eq!((shown.physical_width(), shown.physical_height()), (682, 404));
+
+        // A window manager that keeps it smaller is not asked again.
+        world.get_mut::<Window>(window).unwrap().resolution.set_physical_resolution(600, 400);
+        run(&mut world);
+        assert_eq!((window_of(&world).physical_width(), window_of(&world).physical_height()), (600, 400));
+
+        // A larger interface scale: larger again.
+        world.resource_mut::<Editor>().user.options.set_ui_scale(1.75);
+        run(&mut world);
+        let shown = window_of(&world);
+        assert_eq!(shown.resize_constraints.min_width, min_window_size(1.75, None).x);
+        assert_eq!((shown.physical_width(), shown.physical_height()), (994, 588));
+
+        // Then no larger than the screen it is on.
+        world.resource_mut::<Editor>().user.options.set_ui_scale(3.0);
+        let monitor = Monitor {
+            name: None,
+            physical_width: 1366,
+            physical_height: 768,
+            physical_position: IVec2::ZERO,
+            refresh_rate_millihertz: None,
+            scale_factor: 1.0,
+            video_modes: Vec::new(),
+        };
+        world.spawn((monitor, PrimaryMonitor));
+        run(&mut world);
+        let shown = window_of(&world);
+        assert_eq!((shown.resize_constraints.min_width, shown.resize_constraints.min_height), (1366.0, 768.0));
+        assert_eq!((shown.physical_width(), shown.physical_height()), (1366, 768));
+
+        // Maximised, the window is left the size it is.
+        world.resource_mut::<UiState>().maximized = true;
+        world.resource_mut::<Editor>().user.options.set_ui_scale(1.0);
+        world.get_mut::<Window>(window).unwrap().resolution.set_physical_resolution(300, 200);
+        run(&mut world);
+        let shown = window_of(&world);
+        assert_eq!(shown.resize_constraints.min_width, 568.0);
+        assert_eq!((shown.physical_width(), shown.physical_height()), (300, 200));
     }
 }

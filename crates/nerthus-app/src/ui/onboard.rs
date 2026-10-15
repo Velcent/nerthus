@@ -22,6 +22,7 @@ use crate::editor::Editor;
 use crate::theme;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::help_windows::{self, SideTab, ACCENT_ORANGE};
+use crate::ui::widgets;
 use crate::user::ToolboxStyle;
 
 /// The file whose presence says the setup is done.
@@ -459,7 +460,7 @@ fn refusal(ctx: &egui::Context, onboard: &mut Onboard) {
     if !onboard.refused {
         return;
     }
-    let modal = egui::Modal::new(egui::Id::new("onboard-invalid-location"));
+    let modal = widgets::dialog(ctx, egui::Id::new("onboard-invalid-location"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(380.0);
         ui.label(RichText::new("Invalid Location").font(theme::semibold(14.0)).color(theme::ACCENT_MUTED_BLUE));

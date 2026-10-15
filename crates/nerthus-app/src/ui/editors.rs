@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use crate::icons;
 use crate::theme;
 use crate::ui::slider_popups::{self, BoxWidth, Nudge, NudgeLook, RangeEnd, TypingLook};
+use crate::ui::widgets::Tooltips;
 
 /// While a slider holds its default, its shading, thumb and value show at
 /// this opacity (`SliderX.AnimateSlider`).
@@ -804,8 +805,8 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
         text_painter.galley(content.center() - name_galley.size() / 2.0, name_galley, text_color);
     }
     // Each value's `ToolTip` is its text.
-    ui.interact(low_rect, id.with("low-value"), Sense::hover()).on_hover_text(low_text);
-    ui.interact(high_rect, id.with("high-value"), Sense::hover()).on_hover_text(high_text);
+    ui.interact(low_rect, id.with("low-value"), Sense::hover()).tooltip(low_text);
+    ui.interact(high_rect, id.with("high-value"), Sense::hover()).tooltip(high_text);
 
     // The two `SliderBase`s (margin 2) and their thumbs.
     let track = content.shrink(2.0);
@@ -1122,7 +1123,7 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     if button.secondary_clicked() && enabled {
         slider_popups::open_typing(ui.ctx(), typing_id, seed.to_string());
     }
-    let button = button.on_hover_text("New seed");
+    let button = button.tooltip("New seed");
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
         top_left: Pos2::new(button.rect.left(), button.rect.top() - 4.0 * popup_scale),
@@ -1504,7 +1505,7 @@ fn file_browser(ui: &mut Ui, id: Id, label: &str, path: &str) -> Edit {
             let galley = fitted_line(ui, &shown, font.clone(), theme::TEXTBOX_FILE_FOREGROUND, text_rect.width());
             ui.painter().galley(Pos2::new(text_rect.left(), field.center().y - galley.size().y / 2.0), galley, theme::TEXTBOX_FILE_FOREGROUND);
             if !path.is_empty() {
-                text_response.on_hover_text(path);
+                text_response.tooltip(path);
             }
         }
     }
