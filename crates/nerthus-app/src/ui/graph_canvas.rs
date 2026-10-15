@@ -2,10 +2,11 @@
 //! with the toolbox category's colour on the title, icon, ports and
 //! outgoing connections, borders that show the build state, "circuit"
 //! connections, groups and notes behind the nodes, and the mouse
-//! handling (drag to move or connect, marquee selection, Ctrl Shift drag
-//! to push elements aside, wheel zoom, middle or right drag to pan, a
-//! connection dropped into the node search or onto another output, files
-//! and toolbox entries dropped onto the graph).
+//! handling (drag to move, the view scrolling at the graph's edge, or to
+//! connect, marquee selection, Ctrl Shift drag to push elements aside,
+//! wheel zoom, middle or right drag to pan, a connection dropped into the
+//! node search or onto another output, files and toolbox entries dropped
+//! onto the graph).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -58,6 +59,13 @@ const SNAP_DISTANCE: f32 = 18.0;
 const SNAP_ITEMS_DISTANCE: f32 = 36.0;
 /// `Line-SnapLine-Stroke`.
 const SNAP_LINE: Color32 = Color32::from_rgb(0x60, 0x53, 0x8f);
+/// The view scrolls under an element dragged within `AUTO_PAN_MARGIN`
+/// screen points of the graph's edge, or past it: `AUTO_PAN_RATE` points
+/// a second for each point the pointer is beyond the margin, counting no
+/// more than `AUTO_PAN_REACH` of them.
+const AUTO_PAN_MARGIN: f32 = 24.0;
+const AUTO_PAN_RATE: f32 = 12.0;
+const AUTO_PAN_REACH: f32 = 100.0;
 /// `CreateCollapsedPortElement`: the port standing in for a compact or
 /// small node's ports past the first when it has more than two.
 pub const COLLAPSED_PORT: &str = "CollapsedPort";
@@ -800,6 +808,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     if pan_started && editor.user.options.record_graph_movements() {
         editor.document.checkpoint("Graph panned");
     }
+    auto_pan(ui, state, rect);
 
     let view = state.view();
     let zoom = view.zoom;
@@ -1075,6 +1084,44 @@ fn handle_pan_and_zoom(ui: &Ui, background: &Response, state: &mut GraphState, r
     let after_offset = (point - rect.min) / view.zoom;
     view.location = before.to_vec2() - after_offset;
     pan_started
+}
+
+/// While nodes, a group or a note are moved with the pointer near or past
+/// the graph's edge, the view scrolls that way, so what is dragged can go
+/// anywhere on the canvas (`drag_pointer` keeps it in sight meanwhile).
+fn auto_pan(ui: &Ui, state: &mut GraphState, rect: Rect) {
+    let moving = matches!(state.drag, Some(Drag::Elements { .. })) || state.group_drag.is_some_and(|drag| drag.moves()) || state.note_drag.is_some_and(|drag| drag.moves());
+    let (held, pointer, dt) = ui.input(|input| (input.pointer.primary_down(), input.pointer.interact_pos(), input.stable_dt.min(0.1)));
+    let Some(pointer) = pointer.filter(|_| moving && held) else {
+        return;
+    };
+    let velocity = auto_pan_velocity(rect, pointer);
+    if velocity == Vec2::ZERO {
+        return;
+    }
+    let view = state.view_mut();
+    view.location += velocity * dt / view.zoom;
+    // The pointer may rest there: the view keeps scrolling without events.
+    ui.ctx().request_repaint();
+}
+
+/// How fast (screen points a second) the view scrolls with the pointer at
+/// `pointer`: towards each edge it is within `AUTO_PAN_MARGIN` of or past.
+fn auto_pan_velocity(rect: Rect, pointer: Pos2) -> Vec2 {
+    let axis = |low: f32, high: f32, at: f32| {
+        let margin = AUTO_PAN_MARGIN.min((high - low) / 4.0);
+        let past_low = (low + margin - at).clamp(0.0, AUTO_PAN_REACH);
+        let past_high = (at - (high - margin)).clamp(0.0, AUTO_PAN_REACH);
+        (past_high - past_low) * AUTO_PAN_RATE
+    };
+    Vec2::new(axis(rect.left(), rect.right(), pointer.x), axis(rect.top(), rect.bottom(), pointer.y))
+}
+
+/// Where a moved element's pointer counts (screen): kept inside the
+/// graph, so what is dragged past its edge stays in sight, at the edge,
+/// while `auto_pan` scrolls the view under it.
+pub(crate) fn drag_pointer(ui: &Ui, rect: Rect) -> Option<Pos2> {
+    ui.input(|input| input.pointer.interact_pos()).map(|point| point.clamp(rect.min, rect.max))
 }
 
 /// `SnapElementToGrid`: to the nearer multiple of the unit, halves down
@@ -1743,8 +1790,7 @@ fn drag_elements(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layouts: 
     };
     let view = state.view();
     let dragging = ui.input(|input| input.pointer.primary_down());
-    let pointer = ui.input(|input| input.pointer.interact_pos());
-    if let Some(pointer) = pointer {
+    if let Some(pointer) = drag_pointer(ui, state.rect) {
         let current = view.to_canvas(origin, pointer);
         let delta = current - pointer_start;
         let place = |start: [f32; 2]| {
@@ -2707,6 +2753,66 @@ mod tests {
         let (_, panels, _) = frame_amid_panels(&context, &mut editor, &mut state, vec![button(false)]);
         assert!(panels.clicked());
         assert!(!editor.selection.contains(&node));
+    }
+
+    #[test]
+    fn the_view_scrolls_faster_the_further_past_the_edge() {
+        let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0));
+        assert_eq!(auto_pan_velocity(rect, Pos2::new(400.0, 300.0)), Vec2::ZERO);
+        assert_eq!(auto_pan_velocity(rect, Pos2::new(AUTO_PAN_MARGIN, 300.0)), Vec2::ZERO);
+        // Near the top right corner: up and to the right.
+        let near = auto_pan_velocity(rect, Pos2::new(790.0, 5.0));
+        assert!(near.x > 0.0 && near.y < 0.0);
+        let past = auto_pan_velocity(rect, Pos2::new(900.0, 300.0));
+        assert!(past.x > near.x && past.y == 0.0);
+        // Up to a point.
+        let fastest = AUTO_PAN_REACH * AUTO_PAN_RATE;
+        assert_eq!(auto_pan_velocity(rect, Pos2::new(5000.0, 300.0)), Vec2::new(fastest, 0.0));
+        assert_eq!(auto_pan_velocity(rect, Pos2::new(400.0, -5000.0)), Vec2::new(0.0, -fastest));
+    }
+
+    #[test]
+    fn nodes_dragged_past_the_edge_scroll_the_view_and_stay_in_sight() {
+        let mut editor = Editor::new(Document::new());
+        let mut state = GraphState::default();
+        let context = themed_context();
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+        let view = state.view();
+        let corner = view.to_canvas(GRAPH.min, GRAPH.center());
+        let node = editor.document.add_node("Mountain", [corner.x, corner.y]).unwrap();
+
+        // Taken by its title and moved well inside the graph: the view
+        // stays.
+        let title = GRAPH.center() + Vec2::new(100.0, 15.0);
+        let button = |pos: Pos2, pressed: bool| egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame_amid_panels(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(title)]);
+        frame_amid_panels(&context, &mut editor, &mut state, vec![button(title, true)]);
+        frame_amid_panels(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(title + Vec2::new(40.0, 0.0))]);
+        assert_eq!(state.view(), view);
+
+        // Held past the right edge, over the panel beside the graph: the
+        // view scrolls right frame after frame, the pointer still.
+        let past = Pos2::new(GRAPH.right() + 60.0, title.y);
+        frame_amid_panels(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(past)]);
+        let mut location = state.view().location;
+        for _ in 0..30 {
+            frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+            let scrolled = state.view().location;
+            assert!(scrolled.x > location.x);
+            assert_eq!(scrolled.y, location.y);
+            location = scrolled;
+        }
+
+        // Let go there, the node stays at the edge, in sight, and the
+        // view stops.
+        frame_amid_panels(&context, &mut editor, &mut state, vec![button(past, false)]);
+        let layout = layout_node(editor.document.node(node).unwrap(), editor.user.options.default_node_size());
+        let screen = state.view().rect_to_screen(GRAPH.min, layout.rect);
+        assert!(screen.intersects(GRAPH), "{screen:?} is out of sight");
+        assert!(layout.rect.left() > corner.x + 500.0);
+        let stopped = state.view();
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+        assert_eq!(state.view(), stopped);
     }
 
     #[test]

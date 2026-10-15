@@ -14,7 +14,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{GraphState, GraphView};
+use crate::ui::graph_canvas::{drag_pointer, GraphState, GraphView};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
 use crate::ui::widgets::{menu_caption, menu_item, menu_separator, menu_style};
@@ -35,6 +35,13 @@ pub struct NoteDrag {
     resizing: bool,
     pointer_start: Pos2,
     start: [f32; 2],
+}
+
+impl NoteDrag {
+    /// Whether the note moves (rather than takes a new size).
+    pub(crate) fn moves(&self) -> bool {
+        !self.resizing
+    }
 }
 
 struct NoteLayout {
@@ -186,7 +193,8 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
     };
     let held = ui.input(|input| input.pointer.primary_down());
     let mut corner = drag.start;
-    if let Some(point) = ui.input(|input| input.pointer.interact_pos()) {
+    let pointer = if drag.moves() { drag_pointer(ui, state.rect) } else { ui.input(|input| input.pointer.interact_pos()) };
+    if let Some(point) = pointer {
         let delta = view.to_canvas(origin, point) - drag.pointer_start;
         if drag.resizing {
             let size = [(drag.start[0] + delta.x).max(MIN_TEXT_WIDTH), (drag.start[1] + delta.y).max(MIN_HEIGHT)];
