@@ -21,6 +21,7 @@ use crate::editor::Editor;
 use crate::theme;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::tool_window;
+use crate::ui::widgets::Tooltips;
 
 /// `noProfile`.
 const NO_PROFILE: &str = "Current Settings (No Profile)";
@@ -302,10 +303,10 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut BatchWindow, 
         });
         tool_window::part(ui, "batch-adds", adds, Layout::right_to_left(Align::Center)).scope(|ui| {
             let can_clear = session.contents != script_header();
-            if ui.add_enabled(can_clear, egui::Button::new("Clear Batch Build")).on_hover_text("Clears the below Batch Build list.").clicked() {
+            if ui.add_enabled(can_clear, egui::Button::new("Clear Batch Build")).tooltip("Clears the below Batch Build list.").clicked() {
                 window.clear(session);
             }
-            if ui.button("Add All Profiles").on_hover_text("Adds all profiles to batch build.").clicked() {
+            if ui.button("Add All Profiles").tooltip("Adds all profiles to batch build.").clicked() {
                 // `BtnAddAllProfiles_OnClick`: a fresh script, mutations
                 // from the start, the current settings then every profile.
                 window.clear(session);
@@ -315,11 +316,11 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut BatchWindow, 
                     window.add(session, editor, Some(name));
                 }
             }
-            if ui.button("Add Profile").on_hover_text("Adds the selected profile to batch build.").clicked() {
+            if ui.button("Add Profile").tooltip("Adds the selected profile to batch build.").clicked() {
                 let profile = window.chosen_profile(&names);
                 window.add(session, editor, profile.as_deref());
             }
-            if ui.button("Add Mutation").on_hover_text("Adds a mutation to the batch.").clicked() {
+            if ui.button("Add Mutation").tooltip("Adds a mutation to the batch.").clicked() {
                 session.seed += 1;
                 let profile = window.chosen_profile(&names);
                 window.add(session, editor, profile.as_deref());

@@ -22,7 +22,7 @@ use crate::ui::graph_canvas::{node_color, node_icon};
 use crate::ui::modifier_list::modifier_list;
 use crate::ui::node_states::{self, StateAction};
 use crate::ui::tool_commands::ToolCommand;
-use crate::ui::widgets::{check_item, icon_menu, icon_menu_sized, link_button, menu_caption, menu_item, menu_item_enabled, menu_separator, submenu, toolbar_background};
+use crate::ui::widgets::{check_item, dialog, icon_menu, icon_menu_sized, link_button, menu_caption, menu_item, menu_item_enabled, menu_separator, submenu, toolbar_background, Tooltips};
 use nerthus_engine::automation::VarType;
 
 /// The modifier toolbar's `WrapPanel` margin.
@@ -228,14 +228,14 @@ fn command_row(ui: &mut Ui, area: Rect, top: f32, editor: &mut Editor, node_id: 
         let color_value = COMMAND_COLORS[(index + 1) % 4];
         let color = Color32::from_rgb((color_value >> 16) as u8, (color_value >> 8) as u8, color_value as u8);
         let response = icon_text_button(&mut bar, icon, &label, color, None);
-        let response = response.on_hover_text(&label);
+        let response = response.tooltip(&label);
         if response.clicked() {
             open_command_window(ui, editor, node_id, &parameter.name, commands);
         }
     }
     if has_gizmo {
         let response = icon_text_button(&mut bar, "gizmo", "Toggle Gizmo", theme::ACCENT_MUTED_PURPLE, Some(editor.gizmo_active));
-        if response.on_hover_text("Toggle Gizmo").clicked() {
+        if response.tooltip("Toggle Gizmo").clicked() {
             editor.gizmo_active = !editor.gizmo_active;
         }
     }
@@ -474,7 +474,7 @@ fn header_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, commands: &mut Vec<C
         let description = spec.and_then(|spec| spec.description.clone()).unwrap_or_default();
         let name_area = Rect::from_min_max(icon_rect.min, Pos2::new(arrow_rect.right(), inner.bottom()));
         let response = ui.interact(name_area, ui.id().with("family-menu"), Sense::click());
-        let response = response.on_hover_text(format!("{family}\n\n{description}"));
+        let response = response.tooltip(format!("{family}\n\n{description}"));
         crate::ui::graph_popups::family_menu(&response, editor, node, commands);
     }
 
@@ -659,7 +659,7 @@ fn parameters(ui: &mut Ui, editor: &mut Editor, node_id: i32, area_width: f32, c
                 if is_label {
                     let row = ui.add_enabled_ui(enabled, |ui| editors::parameter(ui, id, parameter, &value, &context));
                     if let Some(help) = &parameter.description {
-                        row.response.on_hover_text(help);
+                        row.response.tooltip(help);
                     }
                     edits.push((parameter.name.clone(), row.inner));
                     continue;
@@ -667,7 +667,7 @@ fn parameters(ui: &mut Ui, editor: &mut Editor, node_id: i32, area_width: f32, c
                 let custom_row = ui.scope(|ui| custom_editor(ui, id, parameter, &value, node, &asset.terrain.nodes));
                 if let Some(custom) = custom_row.inner {
                     if let Some(help) = &parameter.description {
-                        custom_row.response.on_hover_text(help);
+                        custom_row.response.tooltip(help);
                     }
                     edits.extend(custom);
                     continue;
@@ -909,7 +909,7 @@ fn editor_row(ui: &mut Ui, enabled: bool, help: Option<&str>, bind_type: BindTyp
         menu_edit.unwrap_or(control_edit)
     });
     if let Some(help) = help {
-        row.response.on_hover_text(help);
+        row.response.tooltip(help);
     }
     row.inner
 }
@@ -1083,7 +1083,7 @@ fn dialogs_id() -> egui::Id {
 fn parameter_dialogs(ui: &mut Ui, editor: &mut Editor) {
     let mut dialogs: ParameterDialogs = ui.data(|data| data.get_temp(dialogs_id())).unwrap_or_default();
     if let Some((node, property)) = dialogs.unbind.clone() {
-        let modal = egui::Modal::new(egui::Id::new("unbind-variable"));
+        let modal = dialog(ui.ctx(), egui::Id::new("unbind-variable"));
         let response = modal.show(ui.ctx(), |ui| {
             ui.set_width(360.0);
             ui.label(RichText::new(format!("Unbind {property} and delete variable?")).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
@@ -1245,7 +1245,7 @@ fn modifier_toggle_button(ui: &mut Ui, toggle: &ModifierToggle, on: bool) -> egu
     let icon_color = if (hovered || on) && !pressed { theme::LABEL_EMPHASIS } else { theme::ICON_DEFAULT };
     let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(14.0));
     icons::paint(ui, icon_rect, toggle.icon, icon_color);
-    response.on_hover_text(toggle.tooltip)
+    response.tooltip(toggle.tooltip)
 }
 
 /// The modifier stack (`ModifierStack`): the add menu and toggles for the

@@ -26,7 +26,7 @@ use crate::ui::graph_commands::{GraphCommand, NodeSource};
 use crate::ui::graph_groups::{self, GroupDrag, GroupState};
 use crate::ui::graph_popups::GraphPopup;
 use crate::ui::graph_search::{SearchMode, SearchPopup};
-use crate::ui::widgets::{checked_icon_item, menu_item, menu_item_enabled, menu_separator, menu_style, submenu};
+use crate::ui::widgets::{checked_icon_item, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, Tooltips};
 
 /// `NodeElement` template sizes (Standard, Compact, Small).
 const STANDARD_WIDTH: f32 = 230.0;
@@ -1777,7 +1777,7 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
         // Beside the pointer, not under the node's corner, which at a
         // high zoom is far off or past the graph's edge.
         let tooltip = node_tooltip(editor, id);
-        let response = response.clone().on_hover_text_at_pointer(tooltip);
+        let response = response.clone().tooltip_at_pointer(tooltip);
         if response.clicked() {
             if modifiers.command || modifiers.shift {
                 editor.toggle_selected(id);

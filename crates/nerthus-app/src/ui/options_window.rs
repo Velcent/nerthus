@@ -22,6 +22,7 @@ use crate::theme;
 use crate::ui::file_dialogs::FileDialogs;
 use crate::ui::options_pages::{self, OptionsCopy, PageRequest};
 use crate::ui::tool_window;
+use crate::ui::widgets::{self, Tooltips};
 use crate::user;
 
 /// `OptionsWindow`'s pages (Network Builds stays collapsed).
@@ -369,7 +370,7 @@ fn backend_box(ui: &mut Ui, device: &DeviceInfo, label: &str, checked: bool, ena
     }
     let text_position = egui::Pos2::new(box_rect.right() + 8.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(text_position, galley, color);
-    let response = response.on_hover_text(&device.id);
+    let response = response.tooltip(&device.id);
     if response.clicked() {
         return Some(!checked);
     }
@@ -536,7 +537,7 @@ fn compute_buttons(ui: &mut Ui, editor: &Editor, page: &mut ComputePage, notice:
         page.start_enforcing();
     }
     if !cfg!(windows) {
-        enforce.on_disabled_hover_text("NVIDIA settings profiles are made on Windows.");
+        enforce.disabled_tooltip("NVIDIA settings profiles are made on Windows.");
     }
     if !editor.compute.cpu_only && button(ui, "Use CPU-only Mode", false, true).clicked() {
         let written = user::data_folder().map(|folder| std::fs::create_dir_all(&folder).and_then(|_| std::fs::write(folder.join(nerthus_compute::CPU_ONLY_FILE), "!")));
@@ -568,7 +569,7 @@ fn show_notice(ctx: &egui::Context, notice: &mut Option<Notice>) {
         return;
     };
     let mut dismissed = false;
-    let modal = egui::Modal::new(Id::new("options-notice"));
+    let modal = widgets::dialog(ctx, Id::new("options-notice"));
     modal.show(ctx, |ui| {
         ui.set_width(360.0);
         ui.label(RichText::new(shown.title).font(theme::semibold(14.0)).color(theme::ACCENT_MUTED_BLUE));
@@ -592,7 +593,7 @@ fn reset_question(ctx: &egui::Context, options: &mut OptionsState) {
         return;
     }
     let mut answer = None;
-    let modal = egui::Modal::new(Id::new("options-reset"));
+    let modal = widgets::dialog(ctx, Id::new("options-reset"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(380.0);
         ui.label(RichText::new("Reset Preferences").font(theme::semibold(14.0)).color(theme::ACCENT_MUTED_BLUE));

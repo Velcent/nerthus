@@ -22,7 +22,7 @@ use crate::icons;
 use crate::theme;
 use crate::ui::editors::{self, SliderSpec};
 use crate::ui::tool_window;
-use crate::ui::widgets::{check_item, icon_menu, menu_separator};
+use crate::ui::widgets::{check_item, icon_menu, menu_separator, Tooltips};
 
 /// The right column's narrowest and the left's (`MinWidth`s).
 const LIST_MIN_WIDTH: f32 = 300.0;
@@ -501,7 +501,7 @@ fn toolbar(ui: &mut Ui, window: &mut ConstructorWindow) {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             // `tglColorize`, `btnRefresh`.
-            if icon_text_button(ui, "group-palette", "Colorize Previews", Some(window.colorize)).on_hover_text("Colorize Terrains").clicked() {
+            if icon_text_button(ui, "group-palette", "Colorize Previews", Some(window.colorize)).tooltip("Colorize Terrains").clicked() {
                 window.colorize = !window.colorize;
             }
             ui.separator();

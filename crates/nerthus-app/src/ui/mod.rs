@@ -67,7 +67,7 @@ mod turntable_window;
 mod variable_dialog;
 pub mod viewport_2d;
 mod viewport_area;
-mod widgets;
+pub(crate) mod widgets;
 
 pub(crate) use data_view::stats::byte_size;
 

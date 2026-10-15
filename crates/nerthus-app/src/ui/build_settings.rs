@@ -21,7 +21,7 @@ use crate::ui::input_box::{InputAnswer, InputBox};
 use crate::ui::regions::{self, RegionsState};
 use crate::ui::tool_commands::ToolCommand;
 use crate::ui::tool_window;
-use crate::ui::widgets::{icon_menu, link_button, menu_item, menu_separator};
+use crate::ui::widgets::{dialog, icon_menu, link_button, menu_item, menu_separator, Tooltips};
 
 /// `BuildSettingsWindow`'s tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,7 +348,7 @@ fn profile_dialogs(ctx: &egui::Context, editor: &mut Editor, settings: &mut Buil
         ProfileQuestion::Delete(name) => (format!("Delete {name}"), "Are you sure you want to delete this profile?"),
     };
     let mut answer = None;
-    let modal = egui::Modal::new(Id::new("profile-question"));
+    let modal = dialog(ctx, Id::new("profile-question"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(420.0);
         ui.label(RichText::new(caption_text).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
@@ -924,7 +924,7 @@ fn savable(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState, 
             combo.show_ui(ui, |ui| {
                 for format in FileFormat::ALL {
                     let item = ui.selectable_label(format == export.format, format.name());
-                    if item.on_hover_text(format.description()).clicked() {
+                    if item.tooltip(format.description()).clicked() {
                         chosen = Some(format);
                     }
                 }

@@ -13,6 +13,7 @@ use egui::{Align, Color32, Id, Layout, RichText, Stroke, Vec2};
 
 use crate::editor::Editor;
 use crate::theme;
+use crate::ui::widgets::{self, Tooltips};
 
 /// `ArtifactControl`: a folder and what it holds once counted.
 struct Artifact {
@@ -315,7 +316,7 @@ fn artifact_row(ui: &mut egui::Ui, artifact: &Artifact, widths: [f32; 4], index:
             if link.clicked() && exists {
                 crate::export_build::open_folder(&artifact.path);
             }
-            link.on_hover_text(artifact.path.display().to_string());
+            link.tooltip(artifact.path.display().to_string());
         });
         let (size_text, size_colour, files_text) = match (exists, artifact.counted) {
             (false, _) => (String::new(), theme::LABEL_DEFAULT, String::new()),
@@ -352,7 +353,7 @@ fn cleanup_dialog(ctx: &egui::Context, editor: &mut Editor, explorer: &mut Artif
     let index = cleanup.index;
     let path = explorer.artifacts[index].path.clone();
     let mut chosen: Option<Option<u64>> = None;
-    let modal = egui::Modal::new(Id::new("artifact-cleanup"));
+    let modal = widgets::dialog(ctx, Id::new("artifact-cleanup"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(420.0);
         ui.label(RichText::new("Delete Files").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));

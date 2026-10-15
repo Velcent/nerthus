@@ -11,7 +11,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::tool_commands::ToolCommand;
-use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu};
+use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, Tooltips};
 use crate::ui::graph_canvas::{node_color, node_icon};
 use crate::ui::UiState;
 
@@ -509,7 +509,7 @@ fn recent_files(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
         let response = menu_item(ui, Some(&icon), None, &name, "");
         let modified = file.metadata().and_then(|metadata| metadata.modified()).ok();
         let modified_text = modified.map(|time| chrono::DateTime::<chrono::Local>::from(time).format("%-m/%-d/%Y %-I:%M:%S %p").to_string()).unwrap_or_default();
-        let response = response.on_hover_text(format!("{}\nModified: {modified_text}", file.display()));
+        let response = response.tooltip(format!("{}\nModified: {modified_text}", file.display()));
         if response.clicked() {
             commands.push(Command::OpenRecent(file.clone()));
         }
@@ -562,7 +562,7 @@ pub fn tools_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
             None => "Lets AI assistants (MCP clients such as Claude Code) edit and build the open project".to_string(),
         };
         let mcp_item = check_item(ui, editor.mcp.address.is_some(), "MCP Server", "");
-        if mcp_item.on_hover_text(mcp_hint).clicked() {
+        if mcp_item.tooltip(mcp_hint).clicked() {
             commands.push(Command::Tools(ToolCommand::ToggleMcpServer));
         }
     }

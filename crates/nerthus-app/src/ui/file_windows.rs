@@ -15,6 +15,7 @@ use crate::ui::graph_canvas::elided_galley;
 use crate::ui::options_window::OptionsState;
 use crate::ui::tool_commands::{self, ToolCommand};
 use crate::ui::tool_window;
+use crate::ui::widgets::Tooltips;
 use crate::ui::UiState;
 
 /// The Start dialog's size (`Width="770" Height="660"`) and its column of
@@ -165,7 +166,7 @@ fn start_dialog(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState
         let settings_rect = egui::Rect::from_min_size(egui::Pos2::new(area.left() + 24.0, area.bottom() - 24.0 - 26.0), Vec2::splat(26.0));
         let settings = ui.put(settings_rect, egui::Button::new("").frame(false));
         icons::paint(ui, settings_rect.shrink(5.0), "settings-cog", theme::LABEL_DEFAULT);
-        if settings.on_hover_text("Options").clicked() {
+        if settings.tooltip("Options").clicked() {
             editor.files.start_dialog_open = false;
             ui_state.options = Some(OptionsState::new(ui_state.last_options_tab));
         }
@@ -247,7 +248,7 @@ fn start_column(ui: &mut Ui, ctx: &egui::Context, editor: &mut Editor, memory: &
             let response = ui.add(row);
             let with_thumbnail = index < THUMBNAIL_LIMIT;
             let picture = if with_thumbnail { project_thumbnail(editor, path).and_then(|file| thumbnail(ctx, memory, &file)) } else { None };
-            let response = response.on_hover_ui(|ui| {
+            let response = response.tooltip_ui(|ui| {
                 let name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
                 ui.label(RichText::new(name).strong());
                 if let Some(picture) = &picture {
@@ -426,7 +427,7 @@ fn example_button(ui: &mut Ui, ctx: &egui::Context, memory: &mut WindowMemory, p
     ui.painter().galley(egui::Pos2::new(inner.left(), inner.bottom() - galley.size().y), galley, theme::LABEL_EMPHASIS);
     let file_name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
     let folder = path.parent().map(|folder| folder.display().to_string()).unwrap_or_default();
-    let response = response.on_hover_text(format!("{file_name}\n\n{folder}"));
+    let response = response.tooltip(format!("{file_name}\n\n{folder}"));
     if response.clicked() {
         commands.push(Command::File(FileCommand::OpenExample { path: path.to_path_buf(), mode: OpenMode::Normal }));
     }

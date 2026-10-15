@@ -16,6 +16,7 @@ use crate::editor::Editor;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::prompt::Prompt;
+use crate::ui::widgets;
 
 /// Baking's progress window while it shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -195,7 +196,7 @@ pub fn show_optimize_memory(ctx: &egui::Context, state: &mut Option<OptimizeMemo
     let figures = state.as_ref()?;
     let mut chosen = None;
     let mut cancelled = false;
-    let modal = egui::Modal::new(Id::new("optimize-memory"));
+    let modal = widgets::dialog(ctx, Id::new("optimize-memory"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(460.0);
         ui.label(RichText::new("Optimize Memory").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));

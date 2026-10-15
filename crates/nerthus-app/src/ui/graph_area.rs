@@ -12,7 +12,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
-use crate::ui::widgets::{icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator, vertical_toolbar};
+use crate::ui::widgets::{dialog, dialog_button, icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator, vertical_toolbar, Tooltips};
 use crate::ui::{data_view, graph_canvas, menus, toolbox, viewport_area, UiState};
 use crate::user::ToolboxStyle;
 
@@ -342,7 +342,7 @@ fn bookmark_buttons(ui: &mut Ui, area: Rect, right_margin: f32, editor: &Editor,
         let color = graph_canvas::node_color(node);
         ui.painter().rect_filled(bar, 2.0, color);
         ui.painter().rect_stroke(bar, 2.0, Stroke::new(1.0, theme::BUTTON_BORDER_ALT), egui::StrokeKind::Inside);
-        let response = response.on_hover_text(node.name.clone());
+        let response = response.tooltip(node.name.clone());
         if response.clicked() {
             commands.push(Command::GoToBookmark(node.id));
         }
@@ -355,19 +355,20 @@ fn confirm_tab_delete(ui: &mut Ui, tabs: &[crate::document::GraphTabInfo], ui_st
         return;
     };
     let name = tabs.iter().find(|tab| tab.index == index).map(|tab| tab.name.clone()).unwrap_or_default();
-    let modal = egui::Modal::new(egui::Id::new("confirm-delete-tab"));
+    let modal = dialog(ui.ctx(), egui::Id::new("confirm-delete-tab"));
     let response = modal.show(ui.ctx(), |ui| {
         ui.set_width(320.0);
         ui.label(egui::RichText::new(format!("Delete Graph Tab \"{name}\"?")).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
         ui.add_space(6.0);
         ui.label(format!("Are you sure you want to delete this Graph \"{name}\"?"));
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if ui.button("Yes").clicked() {
-                commands.push(Command::DeleteGraphTab(index));
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if dialog_button(ui, "No", false).clicked() {
                 ui_state.graph.confirm_delete_tab = None;
             }
-            if ui.button("No").clicked() {
+            if dialog_button(ui, "Yes", false).clicked() {
+                commands.push(Command::DeleteGraphTab(index));
                 ui_state.graph.confirm_delete_tab = None;
             }
         });
@@ -490,7 +491,7 @@ fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, data_shown: bool, editor: &Edi
         if ui_state.data_view.expanded && !data_shown {
             column.add_enabled_ui(false, |ui| {
                 let tip = "Data View: no room beside the graph (widen the window or the graph area)";
-                icon_button(ui, "chevron-left", "Data View", None).on_disabled_hover_text(tip);
+                icon_button(ui, "chevron-left", "Data View", None).disabled_tooltip(tip);
             });
         } else {
             let chevron = if data_shown { "chevron-right" } else { "chevron-left" };
@@ -561,7 +562,7 @@ fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, data_shown: bool, editor: &Edi
         });
         toolbar_separator(column, 8.0, 8.0);
         let engine_tip = if editor.engine_active { "Suspend Engine (Currently running)" } else { "Resume Engine (Currently suspended)" };
-        if engine_toggle(column, !editor.engine_active).on_hover_text(engine_tip).clicked() {
+        if engine_toggle(column, !editor.engine_active).tooltip(engine_tip).clicked() {
             commands.push(Command::ToggleEngine);
         }
         toolbar_separator(column, 8.0, 8.0);

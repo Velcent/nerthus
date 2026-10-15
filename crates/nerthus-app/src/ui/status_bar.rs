@@ -14,6 +14,7 @@ use crate::ui::commands::Command;
 use crate::ui::help_windows;
 use crate::ui::options_window::OptionsTab;
 use crate::ui::tool_commands::ToolCommand;
+use crate::ui::widgets::Tooltips;
 
 pub const HEIGHT: f32 = 20.0;
 
@@ -61,13 +62,13 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, process_gib: Option<f64>, 
             None => format!("{cached:.1} GB"),
         };
         let memory_button = icon_text(ui, "binary", &memory, 11.0, memory_colour());
-        if memory_button.on_hover_text(memory_tooltip(cached, process_gib)).clicked() {
+        if memory_button.tooltip(memory_tooltip(cached, process_gib)).clicked() {
             commands.push(Command::CleanMemory);
         }
         let device = if editor.compute.cpu_only { Some("CPU Only") } else { editor.compute.fastest_disabled.as_deref() };
         if let Some(device) = device {
             let device_button = icon_text(ui, "cpu-2", device, 10.0, theme::LABEL_DEFAULT);
-            if device_button.on_hover_text(device_tooltip(editor.compute.cpu_only)).clicked() {
+            if device_button.tooltip(device_tooltip(editor.compute.cpu_only)).clicked() {
                 commands.push(Command::ShowOptions(Some(OptionsTab::Compute)));
             }
         }

@@ -21,7 +21,7 @@ use crate::ui::graph_canvas::elided_galley;
 use crate::ui::{menu_keys, menus};
 use crate::ui::tool_commands::ToolCommand;
 use crate::files::{FileCommand, AUTOSAVE_CHOICES};
-use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_button};
+use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_button, Tooltips};
 use crate::ui::UiState;
 
 pub const HEIGHT: f32 = 36.0;
@@ -338,7 +338,7 @@ fn menu_items(ui: &mut Ui, shown: usize, editor: &Editor, ui_state: &UiState, co
                 }
             });
             popups.push(egui::Popup::default_response_id(&response));
-            response.on_hover_text("Menu");
+            response.tooltip("Menu");
         }
         menu_keys::bar(ui.ctx(), &popups);
     });
@@ -392,7 +392,7 @@ fn file_box(ui: &mut Ui, editor: &Editor, name_width: f32, commands: &mut Vec<Co
             let (name_rect, response) = ui.allocate_exact_size(size, Sense::hover());
             ui.painter().galley(Pos2::new(name_rect.left() + NAME_MARGIN.x, name_rect.center().y - galley.size().y / 2.0), galley, name_color);
             if elided {
-                response.on_hover_text(name);
+                response.tooltip(name);
             }
             // `Button-IconOnly` (14 + padding 6), margin 0, 0, 2, 0.
             let button_size = Vec2::splat(SAVE_BUTTON);

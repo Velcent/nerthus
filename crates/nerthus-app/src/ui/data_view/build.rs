@@ -17,7 +17,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::data_view::{section_title, subtle_button, toolbar, toolbar_divider, toolbar_row};
 use crate::ui::editors::dropdown_box;
-use crate::ui::widgets::{check_item, icon_button, icon_menu, icon_menu_sized, menu_caption, menu_item, menu_item_enabled, menu_separator};
+use crate::ui::widgets::{check_item, dialog, dialog_button, icon_button, icon_menu, icon_menu_sized, menu_caption, menu_item, menu_item_enabled, menu_separator, Tooltips};
 
 /// `cboResolution`'s items: the size and its text.
 const RESOLUTIONS: [(usize, &str); 18] = [
@@ -65,7 +65,7 @@ pub struct BuildState {
 pub fn show(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut BuildState, commands: &mut Vec<Command>) {
     let (inner, page_top) = toolbar(ui, area);
     let mut row = toolbar_row(ui, inner, false);
-    if build_button(&mut row).on_hover_text("Execute Build").clicked() {
+    if build_button(&mut row).tooltip("Execute Build").clicked() {
         commands.push(Command::BuildAndExport);
     }
     row.add_space(2.0);
@@ -111,20 +111,21 @@ fn confirm_format(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState) {
     let Some(format) = state.pending_format else {
         return;
     };
-    let modal = egui::Modal::new(egui::Id::new("confirm-export-formats"));
+    let modal = dialog(ui.ctx(), egui::Id::new("confirm-export-formats"));
     let response = modal.show(ui.ctx(), |ui| {
         ui.set_width(320.0);
         let title = egui::RichText::new("Update file format").font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS);
         ui.label(title);
         ui.add_space(6.0);
         ui.label("Do you want to change the file format for all nodes?");
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if ui.button("Yes").clicked() {
-                editor.document.set_all_export_formats(format);
+        ui.add_space(12.0);
+        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if dialog_button(ui, "No", false).clicked() {
                 state.pending_format = None;
             }
-            if ui.button("No").clicked() {
+            if dialog_button(ui, "Yes", false).clicked() {
+                editor.document.set_all_export_formats(format);
                 state.pending_format = None;
             }
         });
@@ -209,7 +210,7 @@ fn build_settings(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, comm
     let galley = ui.painter().layout_job(job);
     let (preview_rect, preview_response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), galley.size().y + 4.0), Sense::hover());
     ui.painter().galley(Pos2::new(preview_rect.left() + 16.0, preview_rect.top() + 4.0), galley, theme::LABEL_DEFAULT);
-    preview_response.on_hover_text(preview);
+    preview_response.tooltip(preview);
 
     ui.add_space(8.0);
     let open = ui.with_layout(Layout::right_to_left(Align::Min), |ui| subtle_button(ui, "Open Folder")).inner;
@@ -254,7 +255,7 @@ fn destination_field(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, s
     ui.painter().rect_stroke(button_rect, 2.0, Stroke::new(1.0, theme::BUTTON_BORDER), StrokeKind::Inside);
     let dots = ui.painter().layout_no_wrap("...".to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
     ui.painter().galley(button_rect.center() - dots.size() / 2.0, dots, theme::LABEL_DEFAULT);
-    let browse = browse.on_hover_text("Browse to manually select a build path");
+    let browse = browse.tooltip("Browse to manually select a build path");
     if browse.clicked() {
         editor.dialog = Some(DialogRequest::BuildDestination { current: text.clone() });
     }

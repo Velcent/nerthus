@@ -15,6 +15,7 @@ use crate::editor::Editor;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::editors::dropdown_box;
+use crate::ui::widgets;
 
 /// The window (480) less its margin (12 each side).
 const CONTENT_WIDTH: f32 = 480.0 - 24.0;
@@ -157,11 +158,8 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, open_dialog: &mut Option<E
     let mut accept = false;
     let mut close = false;
     // `Window-Background`, `DockPanel Margin="12"`.
-    let mut frame = egui::Frame::popup(&ctx.global_style());
-    frame.fill = theme::WINDOW_BACKGROUND;
-    frame.inner_margin = egui::Margin::same(12);
-    let mut modal = egui::Modal::new(window_id().with("modal"));
-    modal = modal.frame(frame);
+    let frame = widgets::dialog_frame(ctx).fill(theme::WINDOW_BACKGROUND);
+    let modal = egui::Modal::new(window_id().with("modal")).frame(frame);
     let response = modal.show(ctx, |ui| {
         ui.set_width(CONTENT_WIDTH);
         ui.spacing_mut().item_spacing = Vec2::ZERO;

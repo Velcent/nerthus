@@ -24,7 +24,7 @@ use crate::ui::gizmos::{gizmo_layer, GizmoKind, GizmoState};
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::tool_window;
-use crate::ui::widgets::{check_item, icon_menu, menu_caption, menu_item, menu_separator};
+use crate::ui::widgets::{check_item, dialog, dialog_button, icon_menu, menu_caption, menu_item, menu_separator};
 use crate::viewport_render::{MaskEnhancement, RenderJob, RenderQuality, ViewportRenderer};
 
 /// `ZoomSpeed`.
@@ -975,23 +975,25 @@ fn picked_dialog(ctx: &egui::Context, state: &mut Viewport2DState, commands: &mu
         ctx.data_mut(|data| data.insert_temp(Id::new("picked-reported"), true));
     }
     let mut close = false;
-    let modal = egui::Modal::new(Id::new("pixel-sampled"));
+    let modal = dialog(ctx, Id::new("pixel-sampled"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(380.0);
         ui.label(egui::RichText::new("Pixel sampled").font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
         ui.add_space(8.0);
         ui.label(egui::RichText::new(content.as_str()).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            for (index, label) in buttons.iter().enumerate() {
-                if ui.button(*label).clicked() {
+        // Right to left: Close, then the copy buttons before it.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if dialog_button(ui, "Close", false).clicked() {
+                close = true;
+            }
+            for (index, label) in buttons.iter().enumerate().rev() {
+                if dialog_button(ui, label, false).clicked() {
                     let text = copied_text(&picked, colour, index);
                     ui.ctx().copy_text(text);
                     close = true;
                 }
-            }
-            if ui.button("Close").clicked() {
-                close = true;
             }
         });
     });

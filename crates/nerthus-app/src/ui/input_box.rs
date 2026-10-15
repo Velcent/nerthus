@@ -5,6 +5,7 @@
 use egui::{Align, Id, Key, Layout, RichText, Stroke, Vec2};
 
 use crate::theme;
+use crate::ui::widgets;
 
 /// An input box while it is open.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,7 +50,7 @@ impl InputBox {
     /// Draws the box; returns the answer once given.
     pub fn show(&mut self, ctx: &egui::Context, id: &str) -> Option<InputAnswer> {
         let mut answer = None;
-        let modal = egui::Modal::new(Id::new(("input-box", id)));
+        let modal = widgets::dialog(ctx, Id::new(("input-box", id)));
         let response = modal.show(ctx, |ui| {
             ui.set_width(400.0);
             let description = RichText::new(self.description.as_str()).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
