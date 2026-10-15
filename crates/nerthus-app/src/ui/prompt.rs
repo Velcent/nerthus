@@ -118,7 +118,20 @@ pub fn show(ctx: &egui::Context, ui_state: &mut UiState, commands: &mut Vec<Comm
     let border = frame.stroke.width as u8;
     let lower_radius = frame.corner_radius.sw.saturating_sub(border);
 
-    let modal = egui::Modal::new(egui::Id::new("message-box")).frame(frame);
+    // The window keeps the size the last box left it, and is centred by
+    // it: a box other than the last one shown is measured before it is
+    // drawn.
+    let id = modal_id();
+    let measure = ctx.data_mut(|data| {
+        let shown = data.get_temp_mut_or_default::<Option<Prompt>>(id.with("shown"));
+        let new = shown.as_ref() != Some(prompt);
+        if new {
+            *shown = Some(prompt.clone());
+        }
+        new
+    });
+    let area = egui::Modal::default_area(id).sizing_pass(measure);
+    let modal = egui::Modal::new(id).area(area).frame(frame);
     let response = modal.show(ctx, |ui| {
         ui.set_width(WIDTH);
         ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -139,6 +152,11 @@ pub fn show(ctx: &egui::Context, ui_state: &mut UiState, commands: &mut Vec<Comm
     if answer.is_some() || closing {
         ui_state.prompt = None;
     }
+}
+
+/// The message box's window: the one for every prompt.
+fn modal_id() -> egui::Id {
+    egui::Id::new("message-box")
 }
 
 /// The icon, when there is one, beside the main instruction over the text.
@@ -245,19 +263,93 @@ enum Answer {
 
 #[cfg(test)]
 mod tests {
-    use egui::{Event, Key, Modifiers, Pos2, RawInput, Rect};
+    use egui::{Event, Key, Modifiers, Pos2, RawInput, Rect, Shape};
 
     use super::*;
     use crate::files::FileCommand;
 
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0));
+
+    /// One frame of the prompt with `events`; the commands it queued, and
+    /// whether the box was painted.
+    fn painted_frame(context: &egui::Context, ui_state: &mut UiState, events: Vec<Event>) -> (Vec<Command>, bool) {
+        let input = RawInput { screen_rect: Some(SCREEN), events, ..Default::default() };
+        let mut commands = Vec::new();
+        let mut output = context.run_ui(input, |ui| show(ui.ctx(), ui_state, &mut commands));
+        // A pass that only measures the box adds no-ops in its place.
+        let painted = std::mem::take(&mut output.shapes).iter().any(|clipped| !matches!(clipped.shape, Shape::Noop));
+        output.drop_without_applying_deltas();
+        (commands, painted)
+    }
+
     /// One frame of the prompt with `events`; the commands it queued.
     fn prompt_frame(context: &egui::Context, ui_state: &mut UiState, events: Vec<Event>) -> Vec<Command> {
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
-        let input = RawInput { screen_rect: Some(screen), events, ..Default::default() };
-        let mut commands = Vec::new();
-        let output = context.run_ui(input, |ui| show(ui.ctx(), ui_state, &mut commands));
-        output.drop_without_applying_deltas();
-        commands
+        painted_frame(context, ui_state, events).0
+    }
+
+    fn escape() -> Event {
+        Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    /// The box where the last frame left it.
+    fn box_rect(context: &egui::Context) -> Rect {
+        context.memory(|memory| memory.area_rect(modal_id())).expect("the box was shown")
+    }
+
+    /// "Save cached build?", with its footnote.
+    fn save_cached_build() -> Prompt {
+        let text = "All nodes marked for export seem to be built. Would you like to try to save the current build directly?";
+        let mut question = Prompt::new("Save cached build?", text, Command::RunBuild { close: false });
+        question.no = Some(Command::RunBuild { close: false });
+        question.footnote = Some("Please note, some advanced features such as Prime Folders may not work.".to_string());
+        question
+    }
+
+    #[test]
+    fn a_box_with_a_footnote_keeps_its_size() {
+        let context = egui::Context::default();
+        let mut ui_state = UiState { prompt: Some(save_cached_build()), ..Default::default() };
+
+        let mut painted = Vec::new();
+        for _ in 0..60 {
+            if painted_frame(&context, &mut ui_state, Vec::new()).1 {
+                painted.push(box_rect(&context));
+            }
+        }
+        let first = painted[0];
+        assert!(painted.iter().all(|rect| *rect == first), "{painted:?}");
+        // The caption, the text, the buttons and the footnote, no more.
+        assert!(first.height() < 250.0, "{first:?}");
+        assert!(SCREEN.contains_rect(first), "{first:?}");
+
+        prompt_frame(&context, &mut ui_state, vec![escape()]);
+        assert!(ui_state.prompt.is_none());
+    }
+
+    #[test]
+    fn a_new_box_is_measured_afresh() {
+        let context = egui::Context::default();
+        let long_message = Prompt::message("Long", &"A long message. ".repeat(60));
+        let mut ui_state = UiState { prompt: Some(long_message), ..Default::default() };
+        for _ in 0..3 {
+            prompt_frame(&context, &mut ui_state, Vec::new());
+        }
+        let long = box_rect(&context);
+
+        // Put in its place, a shorter box is not drawn at the last one's
+        // size: from its first painted frame it is where it stays.
+        ui_state.prompt = Some(save_cached_build());
+        let mut painted = Vec::new();
+        for _ in 0..3 {
+            if painted_frame(&context, &mut ui_state, Vec::new()).1 {
+                painted.push(box_rect(&context));
+            }
+        }
+        let settled = box_rect(&context);
+        assert!(settled.height() < long.height(), "{settled:?} {long:?}");
+        assert!(!painted.is_empty());
+        assert!(painted.iter().all(|rect| *rect == settled), "{painted:?} {settled:?}");
+        assert!((settled.center().y - SCREEN.center().y).abs() < 1.0, "{settled:?}");
     }
 
     #[test]
@@ -271,8 +363,7 @@ mod tests {
         // The box is the top one from its second frame on.
         let first_frame = prompt_frame(&context, &mut ui_state, Vec::new());
         assert!(first_frame.is_empty());
-        let escape = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
-        let second_frame = prompt_frame(&context, &mut ui_state, vec![escape]);
+        let second_frame = prompt_frame(&context, &mut ui_state, vec![escape()]);
 
         assert_eq!(second_frame, vec![Command::File(FileCommand::DiscardChanges)]);
         assert!(ui_state.prompt.is_none());
