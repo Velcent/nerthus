@@ -348,7 +348,7 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
         // Editor.
         Command::Rename => {
             if let Some(node) = editor.active_node() {
-                ui_state.graph.renaming = Some(node);
+                ui_state.graph.start_renaming(editor, node);
             } else if let Some(group) = ui_state.graph.selected_groups.first().copied() {
                 crate::ui::graph_commands::run(GraphCommand::RenameGroup(group), editor, ui_state);
             } else if let Some(note) = ui_state.graph.selected_note {

@@ -210,7 +210,9 @@ pub struct GraphState {
     pub snap_to_grid: bool,
     /// `GridUnit` (`Options.GridSize`): what nodes snap to.
     pub grid_unit: f32,
-    pub renaming: Option<i32>,
+    /// The node the inline name editor (F2) is open on and its name so
+    /// far; [`GraphState::start_renaming`] opens it.
+    renaming: Option<i32>,
     rename_text: String,
     pub zoom_request: Option<ZoomRequest>,
     /// Canvas point of the last right-click, where added nodes go.
@@ -343,6 +345,17 @@ impl GraphState {
         self.group_drag = None;
         self.group_states.clear();
         self.snap_lines.clear();
+    }
+
+    /// Opens the inline name editor (F2) on `node`, holding the node's
+    /// own name: never text an earlier rename left, on this node or
+    /// another.
+    pub fn start_renaming(&mut self, editor: &Editor, node: i32) {
+        let Some(data) = editor.document.node(node) else {
+            return;
+        };
+        self.renaming = Some(node);
+        self.rename_text = data.name.clone();
     }
 
     /// Closes the inline name editor (F2), dropping its text so the next
@@ -900,7 +913,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     handle_background(ui, editor, state, &layouts, &frame.groups, &background, &connections, hovered_connection, origin, commands);
     handle_drops(ui, editor, state, &layouts, commands);
     draw_drag_overlay(ui, &painter, state, &layouts, origin, pointer);
-    rename_overlay(ui, editor, state, &layouts, origin, commands);
+    rename_overlay(ui, state, &layouts, origin, commands);
     graph_groups::rename_overlay(ui, editor, state, &frame.groups, origin);
     crate::ui::graph_popups::show(ui, editor, state, commands);
     ui.set_clip_rect(outer_clip);
@@ -2383,7 +2396,7 @@ fn draw_drag_overlay(ui: &Ui, painter: &egui::Painter, state: &GraphState, layou
 /// The inline name editor (F2): an `EditablePopup`, closing as
 /// [`crate::ui::widgets::popup_outcome`] says; a blank name is no name.
 /// The name taken goes to [`GraphCommand::RenameNode`].
-fn rename_overlay(ui: &mut Ui, editor: &Editor, state: &mut GraphState, layouts: &[NodeLayout], origin: Pos2, commands: &mut Vec<Command>) {
+fn rename_overlay(ui: &mut Ui, state: &mut GraphState, layouts: &[NodeLayout], origin: Pos2, commands: &mut Vec<Command>) {
     let Some(id) = state.renaming else {
         return;
     };
@@ -2391,11 +2404,6 @@ fn rename_overlay(ui: &mut Ui, editor: &Editor, state: &mut GraphState, layouts:
         state.stop_renaming();
         return;
     };
-    if state.rename_text.is_empty()
-        && let Some(node) = editor.document.node(id)
-    {
-        state.rename_text = node.name.clone();
-    }
     let view = state.view();
     let top_left = view.to_screen(origin, layout.rect.min + Vec2::new(46.0, 10.0));
     let size = Vec2::new(150.0 * view.zoom.max(0.6), 22.0);
@@ -3076,7 +3084,7 @@ mod tests {
         let typed = |text: &str| egui::Event::Text(text.to_string());
 
         // F2 opens the box on the name; Enter takes what was typed.
-        state.renaming = Some(mountain);
+        state.start_renaming(&editor, mountain);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         assert_eq!(state.rename_text, mountain_name);
         graph_frame(&context, &mut editor, &mut state, vec![typed("Q")], none);
@@ -3087,7 +3095,7 @@ mod tests {
         assert_eq!(state.renaming, None);
 
         // Escape closes it and keeps the name.
-        state.renaming = Some(blur);
+        state.start_renaming(&editor, blur);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         graph_frame(&context, &mut editor, &mut state, vec![typed("y")], none);
         assert_eq!(state.rename_text, format!("{blur_name}y"));
@@ -3096,7 +3104,7 @@ mod tests {
         assert_eq!(state.renaming, None);
 
         // Closed by a click on the graph, it leaves no text for the next.
-        state.renaming = Some(mountain);
+        state.start_renaming(&editor, mountain);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         graph_frame(&context, &mut editor, &mut state, vec![typed("Zed")], none);
         let background = Pos2::new(600.0, 600.0);
@@ -3106,14 +3114,64 @@ mod tests {
         graph_frame(&context, &mut editor, &mut state, vec![button(false)], none);
         assert_eq!(state.renaming, None);
         assert!(state.rename_text.is_empty());
-        state.renaming = Some(blur);
+        state.start_renaming(&editor, blur);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         assert_eq!(state.rename_text, blur_name);
+
+        // Renaming another node while the box is still open starts on that
+        // node's name, not on what was typed for this one.
+        graph_frame(&context, &mut editor, &mut state, vec![typed("Q")], none);
+        assert_eq!(state.rename_text, format!("{blur_name}Q"));
+        state.start_renaming(&editor, mountain);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        assert_eq!(state.renaming, Some(mountain));
+        assert_eq!(state.rename_text, mountain_name);
+
+        // A name rubbed out stays rubbed out, ready for a new one.
+        let erase = vec![key(Key::Backspace); mountain_name.chars().count()];
+        graph_frame(&context, &mut editor, &mut state, erase, none);
+        assert!(state.rename_text.is_empty());
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        assert!(state.rename_text.is_empty());
+        graph_frame(&context, &mut editor, &mut state, vec![typed("Peak")], none);
+        assert_eq!(state.rename_text, "Peak");
 
         // Nor does a reset.
         state.reset();
         assert_eq!(state.renaming, None);
         assert!(state.rename_text.is_empty());
+    }
+
+    #[test]
+    fn f2_opens_the_name_editor_on_the_selected_node_s_name() {
+        let mut editor = Editor::new(Document::new());
+        let mut ui_state = crate::ui::UiState::default();
+        let mut window = bevy::prelude::Window::default();
+        let context = themed_context();
+        let none = egui::Modifiers::NONE;
+        graph_frame(&context, &mut editor, &mut ui_state.graph, Vec::new(), none);
+        let view = ui_state.graph.view();
+        let canvas_at = |x: f32, y: f32| {
+            let point = view.to_canvas(ui_state.graph.rect.min, Pos2::new(x, y));
+            [point.x, point.y]
+        };
+        let erosion = editor.document.add_node("Erosion", canvas_at(300.0, 200.0)).unwrap();
+        let snow = editor.document.add_node("Snow", canvas_at(700.0, 200.0)).unwrap();
+        let erosion_name = editor.document.node(erosion).unwrap().name.clone();
+        let snow_name = editor.document.node(snow).unwrap().name.clone();
+
+        editor.select(Some(erosion));
+        crate::ui::commands::run(vec![Command::Rename], &mut editor, &mut ui_state, &mut window);
+        graph_frame(&context, &mut editor, &mut ui_state.graph, Vec::new(), none);
+        graph_frame(&context, &mut editor, &mut ui_state.graph, vec![egui::Event::Text("Q".into())], none);
+        assert_eq!(ui_state.graph.rename_text, format!("{erosion_name}Q"));
+
+        // F2 on another node takes that node's name, whatever was typed.
+        editor.select(Some(snow));
+        crate::ui::commands::run(vec![Command::Rename], &mut editor, &mut ui_state, &mut window);
+        graph_frame(&context, &mut editor, &mut ui_state.graph, Vec::new(), none);
+        assert_eq!(ui_state.graph.renaming, Some(snow));
+        assert_eq!(ui_state.graph.rename_text, snow_name);
     }
 
     /// The canvas the graph shows.
