@@ -22,6 +22,7 @@ use crate::document::PINNED_ORDER;
 use crate::icons;
 use crate::theme;
 use crate::ui::editors::{self, palette_color, Edit, EditorContext};
+use crate::ui::widgets::Tooltips;
 
 /// GongSolutions' `MinimumVerticalDragDistance` as the list sets it (the
 /// horizontal one is infinite).
@@ -161,19 +162,23 @@ fn modifier_editors(ui: &mut Ui, node_id: i32, index: usize, modifier: &Modifier
         // Each editor has a 2px margin.
         let mut margin = egui::Frame::new();
         margin.inner_margin = egui::Margin::same(2);
-        let edit = margin
-            .show(ui, |ui| {
-                let number = matches!(parameter.value_type, nerthus_engine::ValueType::Float | nerthus_engine::ValueType::Double | nerthus_engine::ValueType::Int);
-                if number && !parameter.is_seed() {
-                    modifier_slider(ui, id, parameter, &value, &context, position == 0)
-                } else if matches!(parameter.value_type, nerthus_engine::ValueType::Float2 | nerthus_engine::ValueType::Int2) {
-                    modifier_range(ui, id, parameter, &value, &context)
-                } else {
-                    editors::parameter(ui, id, parameter, &value, &context)
-                }
-            })
-            .inner;
-        edits.push((index, parameter.name.clone(), edit));
+        // A name cut before this editor is not its own.
+        editors::take_cut_name(ui.ctx());
+        let editor = margin.show(ui, |ui| {
+            let number = matches!(parameter.value_type, nerthus_engine::ValueType::Float | nerthus_engine::ValueType::Double | nerthus_engine::ValueType::Int);
+            if number && !parameter.is_seed() {
+                modifier_slider(ui, id, parameter, &value, &context, position == 0)
+            } else if matches!(parameter.value_type, nerthus_engine::ValueType::Float2 | nerthus_engine::ValueType::Int2) {
+                modifier_range(ui, id, parameter, &value, &context)
+            } else {
+                editors::parameter(ui, id, parameter, &value, &context)
+            }
+        });
+        // A name cut short shows whole as the editor's tooltip.
+        if let Some(name) = editors::take_cut_name(ui.ctx()) {
+            editor.response.tooltip(name);
+        }
+        edits.push((index, parameter.name.clone(), editor.inner));
     };
     for (position, parameter) in parameters.iter().enumerate() {
         if paired && position == 1 {

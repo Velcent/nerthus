@@ -934,8 +934,11 @@ fn convert_to_int32(value: f32) -> Option<i32> {
 }
 
 /// An editor row (`DockPanel`, margin 4): the editor, then its parameter
-/// menu docked right and centred down the row.
+/// menu docked right and centred down the row. The tooltip is `help`, led
+/// by the editor's name when it is cut short.
 fn editor_row(ui: &mut Ui, enabled: bool, help: Option<&str>, bind_type: BindType, automated: &Automated, control: impl FnOnce(&mut Ui) -> Edit) -> Edit {
+    // A name cut before this row is not its own.
+    editors::take_cut_name(ui.ctx());
     let mut frame = egui::Frame::new();
     frame.inner_margin = egui::Margin::same(ROW_MARGIN);
     let row = frame.show(ui, |ui| {
@@ -954,10 +957,21 @@ fn editor_row(ui: &mut Ui, enabled: bool, help: Option<&str>, bind_type: BindTyp
         ui.allocate_rect(Rect::from_min_size(top_left, Vec2::new(control_width + MENU_BUTTON_WIDTH, height)), Sense::hover());
         menu_edit.unwrap_or(control_edit)
     });
-    if let Some(help) = help {
-        row.response.tooltip(help);
+    let cut_name = editors::take_cut_name(ui.ctx());
+    if let Some(tooltip) = row_tooltip(cut_name, help) {
+        row.response.tooltip(tooltip);
     }
     row.inner
+}
+
+/// A row's tooltip: the whole name when its editor cut it short, then the
+/// help.
+fn row_tooltip(cut_name: Option<String>, help: Option<&str>) -> Option<String> {
+    match (cut_name, help) {
+        (Some(name), Some(help)) => Some(format!("{name}\n\n{help}")),
+        (Some(name), None) => Some(name),
+        (None, help) => help.map(str::to_string),
+    }
 }
 
 /// Parameters with a `[CustomEditor]`: the SatelliteMap library list, the curve
@@ -1387,6 +1401,15 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_cut_name_leads_the_row_tooltip() {
+        let help = "Forces linear gamma correction.";
+        assert_eq!(row_tooltip(Some("Enforce Linear Gamma".to_string()), Some(help)).as_deref(), Some("Enforce Linear Gamma\n\nForces linear gamma correction."));
+        assert_eq!(row_tooltip(Some("Enforce Linear Gamma".to_string()), None).as_deref(), Some("Enforce Linear Gamma"));
+        assert_eq!(row_tooltip(None, Some(help)).as_deref(), Some(help));
+        assert_eq!(row_tooltip(None, None), None);
+    }
+
+    #[test]
     fn a_modifier_close_button_asks_unless_shift_is_held() {
         let mut document = Document::new();
         let perlin = document.add_node("Perlin", [26000.0, 26000.0]).unwrap();
@@ -1613,6 +1636,40 @@ mod tests {
             _ => None,
         };
         shapes.iter().filter_map(text).collect()
+    }
+
+    #[test]
+    fn a_cut_name_shows_whole_in_its_row_tooltip() {
+        let mut document = Document::new();
+        let mesher = document.add_node("Mesher", [26000.0, 26000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.select(Some(mesher));
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        // At its least width the area shows the enum as a dropdown, its
+        // name cut to the 100 column.
+        let rect = Rect::from_min_size(Pos2::new(10.0, 50.0), Vec2::new(crate::ui::MIN_PROPERTIES - 4.0, 900.0));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0));
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut commands = Vec::new();
+            let mut output = context.run_ui(input, |ui| show(ui, rect, &mut editor, &mut commands));
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            texts(&shapes)
+        };
+        let name = "Artifact Reduction";
+        let help = Catalogue::get().node("Mesher").and_then(|spec| spec.parameter("ArtifactReduction")).and_then(|parameter| parameter.description.clone()).unwrap();
+        let mut shown = Vec::new();
+        for _ in 0..3 {
+            shown = frame(Vec::new());
+        }
+        let (_, label) = shown.iter().find(|(text, _)| text == name).expect("the name is drawn");
+        frame(vec![egui::Event::PointerMoved(label.center())]);
+        let tooltip = format!("{name}\n\n{help}");
+        let shows = (0..120).any(|_| frame(Vec::new()).iter().any(|(text, _)| *text == tooltip));
+        assert!(shows, "no tooltip says {tooltip:?}");
     }
 
     #[test]
