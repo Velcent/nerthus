@@ -21,7 +21,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::GraphState;
 use crate::ui::graph_commands::GraphCommand;
-use crate::ui::widgets::{check_item, checked_icon_item, header_submenu, menu_caption, menu_item, menu_row_width, menu_separator, menu_style, submenu, Tooltips};
+use crate::ui::widgets::{check_item, checked_icon_item, header_submenu, menu_caption, menu_item, menu_row_width, menu_rows_beside, menu_separator, menu_style, submenu, Tooltips};
 use crate::user::{ToolboxMode, ToolboxStyle, UserOptions};
 
 /// The toolbox categories, in toolbox order (`NodeCategory`).
@@ -395,14 +395,16 @@ fn category_button(ui: &mut Ui, rect: Rect, category: &str, mode: ToolboxMode, l
     let response = response.tooltip(category);
     response.context_menu(|ui| settings_menu(ui, look.editor, settings));
 
-    // The menu (`_SubMenuPopup`, placed right, margin 6).
+    // The menu (`_SubMenuPopup`, placed right, margin 6). A flat list runs
+    // long: its rows scroll in the room beside the button (egui's anchor).
     let info = UiStackInfo::new(UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, MenuConfig::default());
+    let anchor = egui::PopupAnchor::from(&response).rect(popup_id, ui.ctx()).unwrap_or(response.interact_rect);
     let mut popup = egui::Popup::menu(&response);
     popup = popup.align(egui::RectAlign::RIGHT_START);
     popup = popup.gap(6.0);
     popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     popup = popup.info(info);
-    popup.show(|ui| category_menu(ui, category, look, Origin::Toolbox, state, commands));
+    popup.show(|ui| menu_rows_beside(ui, anchor, |ui| category_menu(ui, category, look, Origin::Toolbox, state, commands)));
 }
 
 /// The panel style (`GeneratePanelStyleToolbox`, on `Panel-Background`,
@@ -657,6 +659,199 @@ fn apply_settings(options: &mut UserOptions, state: &mut GraphState, settings: V
             SettingsChange::LeftAlign(on) => options.set_toolbox_left_align(on),
             SettingsChange::Pin(on) => options.set_toolbox_pin_high_use(on),
             SettingsChange::Highlight(on) => options.set_toolbox_highlight_high_use(on),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::ui::title_bar;
+
+    /// Windows 1280 x 800 and 1280 x 500 pixels at the default 120%, where
+    /// the flat Modify and Primitive lists are taller than the window.
+    const WINDOWS: [Vec2; 2] = [Vec2::new(1066.7, 666.7), Vec2::new(1066.7, 416.7)];
+
+    fn input(screen: Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() }
+    }
+
+    /// A context with the editor's fonts, which take effect a frame after
+    /// they are set.
+    fn themed_context(screen: Vec2) -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.run_ui(input(screen, Vec::new()), |_| {}).drop_without_applying_deltas();
+        context
+    }
+
+    /// The graph, under the title bar and its tabs.
+    fn graph_area(screen: Vec2) -> Rect {
+        Rect::from_min_max(Pos2::new(0.0, title_bar::HEIGHT + 30.0), screen.to_pos2())
+    }
+
+    /// What the test window draws over the graph.
+    #[derive(Clone, Copy)]
+    enum Drawn {
+        Toolbox,
+        /// The graph's context menu, with every category's nodes.
+        ContextMenu,
+    }
+
+    /// A window `screen` big, its toolbox showing Organization = Show All
+    /// (flat lists).
+    struct Window {
+        context: egui::Context,
+        screen: Vec2,
+        editor: Editor,
+        state: GraphState,
+        drawn: Drawn,
+    }
+
+    impl Window {
+        fn new(screen: Vec2, drawn: Drawn) -> Self {
+            let mut editor = Editor::new(Document::new());
+            editor.user.options.set_toolbox_nested(false);
+            Window { context: themed_context(screen), screen, editor, state: GraphState::default(), drawn }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> Vec<Command> {
+            let mut commands = Vec::new();
+            let area = graph_area(self.screen);
+            let output = self.context.run_ui(input(self.screen, events), |ui| match self.drawn {
+                Drawn::Toolbox => show(ui, area, &mut self.editor, &mut self.state, &mut commands),
+                Drawn::ContextMenu => {
+                    let graph = ui.interact(area, ui.id().with("graph"), Sense::click());
+                    graph.context_menu(|ui| {
+                        menu_style(ui);
+                        add_node_menus(ui, &self.editor, &mut self.state, &mut commands);
+                    });
+                }
+            });
+            output.drop_without_applying_deltas();
+            commands
+        }
+
+        /// A frame with `events`, then the frames after as the app draws
+        /// them, for the menus to settle.
+        fn settle(&mut self, events: Vec<egui::Event>) -> Vec<Command> {
+            let mut commands = self.frame(events);
+            for _ in 0..3 {
+                commands.extend(self.frame(Vec::new()));
+            }
+            commands
+        }
+
+        /// A click of `button` at `at`: the pointer moves there, presses
+        /// and lets go.
+        fn click(&mut self, at: Pos2, button: egui::PointerButton) -> Vec<Command> {
+            let press = |pressed: bool| egui::Event::PointerButton { pos: at, button, pressed, modifiers: egui::Modifiers::NONE };
+            let mut commands = self.frame(vec![egui::Event::PointerMoved(at)]);
+            commands.extend(self.frame(vec![press(true)]));
+            commands.extend(self.settle(vec![press(false)]));
+            commands
+        }
+
+        /// The menus open, as their areas were laid out: a menu before its
+        /// submenu.
+        fn open_menus(&self) -> Vec<Rect> {
+            self.context.memory(|memory| {
+                let visible = memory.areas().visible_layer_ids();
+                let open = memory.layer_ids().filter(|layer| layer.order == egui::Order::Foreground && visible.contains(layer));
+                open.filter_map(|layer| memory.area_rect(layer.id)).collect()
+            })
+        }
+
+        /// `category`'s button in the toolbox.
+        fn button(&self, category: &str) -> Rect {
+            let index = CATEGORIES.iter().position(|name| *name == category).unwrap();
+            let mode = self.editor.user.options.toolbox_mode();
+            let mut rect = Rect::NOTHING;
+            let context = themed_context(self.screen);
+            let output = context.run_ui(input(self.screen, Vec::new()), |ui| {
+                let (column, button, per_row) = menus_layout(ui, graph_area(self.screen), mode);
+                let corner = column.min + Vec2::new((index % per_row) as f32 * button.x, (index / per_row) as f32 * button.y);
+                rect = Rect::from_min_size(corner, button);
+            });
+            output.drop_without_applying_deltas();
+            rect
+        }
+
+        /// The wheel turned all the way down over `menu`, and the frames
+        /// after for it to scroll there.
+        fn scroll_down(&mut self, menu: Rect) {
+            let over = Pos2::new(menu.left() + 40.0, menu.center().y);
+            let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+            self.frame(vec![egui::Event::PointerMoved(over)]);
+            self.frame(vec![wheel]);
+            for _ in 0..60 {
+                self.frame(Vec::new());
+            }
+        }
+
+        /// A click on `menu`'s last row.
+        fn click_last_row(&mut self, menu: Rect) -> Vec<Command> {
+            self.click(Pos2::new(menu.left() + 40.0, menu.bottom() - 6.0), egui::PointerButton::Primary)
+        }
+
+        /// The last node of `category`'s flat list.
+        fn last_node(&self, category: &str) -> &'static str {
+            let usage = |name: &str| self.editor.user.usage.usage(name);
+            let families = category_families(category, &self.editor.user.options, &usage);
+            let last = families.values().last().and_then(|nodes| nodes.last()).expect("the category has nodes");
+            assert!(registry().implements(last.key()), "{} can't be added", last.key());
+            last.key()
+        }
+    }
+
+    /// `menu` on a window of `screen`: under the title bar and in the
+    /// window.
+    fn assert_in_the_window(menu: Rect, screen: Vec2, what: &str) {
+        assert!(menu.top() >= title_bar::HEIGHT - 0.5, "{what} at {menu:?} covers the title bar at {screen:?}");
+        assert!(menu.bottom() <= screen.y + 0.5, "{what} at {menu:?} runs past the window's bottom at {screen:?}");
+    }
+
+    #[test]
+    fn a_flat_category_menu_opens_beside_its_button_and_scrolls() {
+        for screen in WINDOWS {
+            let mut window = Window::new(screen, Drawn::Toolbox);
+            window.frame(Vec::new());
+            let button = window.button("Modify");
+            let commands = window.click(button.center(), egui::PointerButton::Primary);
+            assert!(commands.is_empty(), "opening Modify gave {commands:?} at {screen:?}");
+            let [menu] = window.open_menus()[..] else { panic!("Modify's menu does not open at {screen:?}: {:?}", window.open_menus()) };
+            assert_in_the_window(menu, screen, "Modify's menu");
+            assert!(menu.left() >= button.right(), "Modify's menu at {menu:?} covers its button at {button:?}");
+            let beside = (menu.top() - button.top()).abs() < 1.0 || (menu.bottom() - button.bottom()).abs() < 1.0;
+            assert!(beside, "Modify's menu at {menu:?} is not beside its button at {button:?} at {screen:?}");
+
+            window.scroll_down(menu);
+            let last = window.last_node("Modify");
+            let commands = window.click_last_row(menu);
+            assert_eq!(commands, [Command::Graph(GraphCommand::ToolboxCreate(last.to_string()))], "at {screen:?}");
+        }
+    }
+
+    #[test]
+    fn a_flat_category_submenu_of_the_graph_menu_fits_and_scrolls() {
+        for screen in WINDOWS {
+            let mut window = Window::new(screen, Drawn::ContextMenu);
+            window.frame(Vec::new());
+            let commands = window.click(Pos2::new(300.0, graph_area(screen).top() + 20.0), egui::PointerButton::Secondary);
+            assert!(commands.is_empty(), "opening the graph's menu gave {commands:?} at {screen:?}");
+            let [menu] = window.open_menus()[..] else { panic!("the graph's menu does not open at {screen:?}") };
+            // Primitive, its first row.
+            window.settle(vec![egui::Event::PointerMoved(Pos2::new(menu.center().x, menu.top() + 12.0))]);
+            let [_, primitive] = window.open_menus()[..] else { panic!("hovering Primitive does not open its submenu at {screen:?}") };
+            assert_in_the_window(primitive, screen, "Primitive's submenu");
+            let beside = primitive.left() >= menu.right() - 0.5 || primitive.right() <= menu.left() + 0.5;
+            assert!(beside, "Primitive's submenu at {primitive:?} covers the graph's menu at {menu:?} at {screen:?}");
+
+            window.scroll_down(primitive);
+            let last = window.last_node("Primitive");
+            let commands = window.click_last_row(primitive);
+            assert_eq!(commands, [Command::AddNode { type_name: last.to_string(), position: None }], "at {screen:?}");
         }
     }
 }

@@ -5,14 +5,15 @@
 
 use egui::{CornerRadius, CursorIcon, Pos2, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2};
 
-use crate::document::CombineKind;
+use crate::document::{CombineKind, GraphTabInfo};
 use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
+use crate::ui::graph_canvas::elided_galley;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
-use crate::ui::widgets::{dialog, dialog_button, icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator, vertical_toolbar, Tooltips};
+use crate::ui::widgets::{checked_icon_item, dialog, dialog_button, icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_rows, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator, vertical_toolbar, Tooltips};
 use crate::ui::{data_view, graph_canvas, menus, toolbox, viewport_area, UiState};
 use crate::user::ToolboxStyle;
 
@@ -24,6 +25,23 @@ const TAB_HEIGHT: f32 = 25.0;
 const TAB_BORDER: f32 = 1.5;
 /// `GraphBorder`'s top margin below the tabs.
 const GRAPH_TOP: f32 = 25.0;
+/// A graph tab's width while the strip has room for every tab: its name
+/// with 24 either side, at least 135.
+const TAB_PADDING: f32 = 48.0;
+const TAB_WIDTH: f32 = 135.0;
+/// How narrow tabs get while the strip is short of room: the colour bar
+/// and the start of the name, cut with "…". Past that the tabs scroll.
+const TAB_MIN_WIDTH: f32 = 90.0;
+/// A tab's name starts 24 in and stays 12 clear of its right edge.
+const TAB_NAME_LEFT: f32 = 24.0;
+const TAB_NAME_RIGHT: f32 = 12.0;
+/// The tab list button after the tabs while they overflow the strip.
+const TAB_LIST_BUTTON: f32 = 24.0;
+/// `BookmarkButton`: padding 2 round a 6 by 12 bar, margin 2 either side.
+const BOOKMARK_BUTTON: Vec2 = Vec2::new(6.0 + 4.0, 12.0 + 4.0);
+const BOOKMARK_MARGIN: f32 = 2.0;
+/// What the tabs leave clear before the bookmark bars.
+const BOOKMARKS_GAP: f32 = 4.0;
 /// `GraphToolbarBorder` (`Toolbar`): a `Toolbar.ButtonSize` button,
 /// `Toolbar.Padding` and a border of 1.5 each side.
 fn toolbar_width(sizes: &theme::Sizes) -> f32 {
@@ -104,13 +122,11 @@ pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut U
     ui_state.graph.toolbox_rect = toolbox::place(ui, toolbox_area, &editor.user.options);
     graph_canvas::show(ui, graph_rect, editor, &mut ui_state.graph, commands);
     toolbox::show(ui, toolbox_area, editor, &mut ui_state.graph, commands);
-    if !tabs_hidden {
-        tabs(ui, grid, editor, ui_state, selected_color, commands);
-    }
     // `stackBookmarks` stays (margin 0, 0, 2, 0; 8 on the right without
-    // tabs).
+    // tabs), in the room the tabs leave it.
     let bookmarks_margin = if tabs_hidden { 8.0 } else { 2.0 };
-    bookmark_buttons(ui, grid, bookmarks_margin, editor, commands);
+    let bookmarks_left = if tabs_hidden { grid.left() } else { tabs(ui, grid, bookmarks_margin, editor, ui_state, selected_color, commands) };
+    bookmark_buttons(ui, grid, bookmarks_margin, bookmarks_left, editor, commands);
     footer(ui, grid, editor);
     if !editor.engine_active {
         // `EngineRect`: margin 4, 28, 4, 4; 4 all round without tabs.
@@ -212,12 +228,127 @@ fn tab_outline(rect: Rect) -> Vec<Pos2> {
     points
 }
 
+/// The graph tab strip between frames: how far its tabs are scrolled, and
+/// what the shown tab was last brought into sight for (the tab, the
+/// tabs' room and their length). It is again once one of those changes;
+/// in between the wheel may scroll it away.
+#[derive(Clone, Debug, Default)]
+pub struct TabStrip {
+    scroll: f32,
+    revealed: Option<(usize, f32, f32)>,
+}
+
+/// How the tabs sit in the strip.
+#[derive(Clone, Debug, PartialEq)]
+struct TabLayout {
+    widths: Vec<f32>,
+    /// The tabs' room: the strip, less the tab list button while it shows.
+    room: f32,
+    /// The tabs do not fit even at `TAB_MIN_WIDTH`: they scroll, and the
+    /// tab list button follows them.
+    overflow: bool,
+}
+
+/// The tabs, each wanting its `natural` width, in a strip `space` wide:
+/// as they are while they fit; else the widest narrowed alike until they
+/// do, down to `TAB_MIN_WIDTH`; and short of that, each at that width in
+/// a room that scrolls, the tab list button after it. A lone tab narrows
+/// to the strip instead.
+fn tab_layout(natural: &[f32], space: f32) -> TabLayout {
+    let space = space.max(0.0);
+    // Tabs overlap by 1 (`Margin 0,0,-1,0`).
+    let budget = space + natural.len().saturating_sub(1) as f32;
+    if natural.iter().sum::<f32>() <= budget {
+        return TabLayout { widths: natural.to_vec(), room: space, overflow: false };
+    }
+    let cap = narrowed_width(natural, budget);
+    if cap >= TAB_MIN_WIDTH || natural.len() < 2 {
+        let widths = natural.iter().map(|width| width.min(cap.max(1.0))).collect();
+        return TabLayout { widths, room: space, overflow: false };
+    }
+    let widths = natural.iter().map(|width| width.min(TAB_MIN_WIDTH)).collect();
+    TabLayout { widths, room: (space - TAB_LIST_BUTTON).max(0.0), overflow: true }
+}
+
+/// The widest a tab may be for `natural` tabs, each at most that wide, to
+/// take no more than `budget` together (whole points).
+fn narrowed_width(natural: &[f32], budget: f32) -> f32 {
+    let mut sorted = natural.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let mut narrower = 0.0;
+    for (position, width) in sorted.iter().enumerate() {
+        let cap = (budget - narrower) / (sorted.len() - position) as f32;
+        if cap <= *width {
+            return cap.floor();
+        }
+        narrower += width;
+    }
+    f32::INFINITY
+}
+
+/// Where each tab starts along the strip (they overlap by 1), and where
+/// the last ends.
+fn tab_spans(widths: &[f32]) -> (Vec<f32>, f32) {
+    let mut starts = Vec::with_capacity(widths.len());
+    let mut x = 0.0;
+    for width in widths {
+        starts.push(x);
+        x += width - 1.0;
+    }
+    let end = if widths.is_empty() { 0.0 } else { x + 1.0 };
+    (starts, end)
+}
+
+/// The scroll nearest `scroll` that shows `span` (along the strip) in a
+/// room `room` wide; its start when it is wider than the room.
+fn scroll_to_show(scroll: f32, span: (f32, f32), room: f32) -> f32 {
+    let mut scroll = scroll;
+    if span.1 > scroll + room {
+        scroll = span.1 - room;
+    }
+    if span.0 < scroll {
+        scroll = span.0;
+    }
+    scroll
+}
+
+/// How far the tabs are scrolled this frame: the shown tab brought into
+/// `room` when it, the room or the tabs' length changed, then the wheel
+/// over the tabs, kept to how far they reach.
+fn scroll_tabs(ui: &Ui, room: Rect, tabs: &[GraphTabInfo], layout: &TabLayout, ui_state: &mut UiState) -> f32 {
+    let (starts, length) = tab_spans(&layout.widths);
+    let shown = ui_state.graph.tab;
+    let strip = &mut ui_state.graph.tab_strip;
+    if let Some(position) = tabs.iter().position(|tab| tab.index == shown) {
+        let key = (shown, room.width(), length);
+        if strip.revealed != Some(key) {
+            let span = (starts[position], starts[position] + layout.widths[position]);
+            strip.scroll = scroll_to_show(strip.scroll, span, room.width());
+            strip.revealed = Some(key);
+        }
+    }
+    let reach = (length - room.width()).max(0.0);
+    if reach > 0.0 && ui.rect_contains_pointer(room) {
+        let delta = ui.input(|input| input.smooth_scroll_delta);
+        strip.scroll -= delta.x + delta.y;
+    }
+    strip.scroll = strip.scroll.clamp(0.0, reach);
+    strip.scroll
+}
+
 /// The graph tabs (`GraphTabList`, 1 down): each at least 135 wide, its
 /// colour bar 12 in and its name (monospace 11) 24 in. The chosen tab is
 /// outlined in its colour and tinted with it; the others, and the rest of
 /// the strip, stand on a line of the chosen tab's colour. Each tab's menu
 /// offers Color, Rename and Delete; the strip's offers New Tab.
-fn tabs(ui: &mut Ui, area: Rect, editor: &Editor, ui_state: &mut UiState, selected_color: egui::Color32, commands: &mut Vec<Command>) {
+///
+/// The tabs keep clear of the bookmark bars at the strip's end
+/// (`bookmarks_margin` in) and are drawn only in the room left them.
+/// Short of room they narrow, their names cut with "…" (whole under the
+/// pointer); shorter still they scroll, with the wheel or the tab list
+/// after them, and the shown tab is brought into sight. Returns where the
+/// bookmark bars may start.
+fn tabs(ui: &mut Ui, area: Rect, bookmarks_margin: f32, editor: &Editor, ui_state: &mut UiState, selected_color: egui::Color32, commands: &mut Vec<Command>) -> f32 {
     let strip = Rect::from_min_size(area.min, Vec2::new(area.width(), TABS_HEIGHT));
     let strip_response = ui.interact(strip, ui.id().with("graph-tab-strip"), Sense::click());
     strip_response.context_menu(|ui| {
@@ -229,16 +360,30 @@ fn tabs(ui: &mut Ui, area: Rect, editor: &Editor, ui_state: &mut UiState, select
 
     let tabs = editor.document.graph_tabs();
     let only_tab = tabs.len() <= 1;
+    // Room for a tab and the tab list, however many bookmarks there are.
+    let least = (TAB_MIN_WIDTH + TAB_LIST_BUTTON).min(strip.width());
+    let space = (strip.width() - bookmarks_width(editor, bookmarks_margin)).max(least);
+    let natural: Vec<f32> = tabs.iter().map(|tab| (ui.painter().layout_no_wrap(tab.name.clone(), theme::monospace(11.0), theme::LABEL_EMPHASIS).size().x + TAB_PADDING).max(TAB_WIDTH)).collect();
+    let layout = tab_layout(&natural, space);
+    let room = Rect::from_min_size(strip.min, Vec2::new(layout.room, TABS_HEIGHT));
+    let scroll = scroll_tabs(ui, room, &tabs, &layout, ui_state);
+
     let line_stroke = Stroke::new(TAB_BORDER, selected_color);
     let line_y = strip.top() + 1.0 + TAB_HEIGHT - TAB_BORDER / 2.0;
-    let mut x = strip.left();
-    for tab in &tabs {
+    // Tabs cut off at the end of their room are cut there, and take no
+    // clicks past it.
+    let outer_clip = ui.clip_rect();
+    let tabs_clip = Rect::from_x_y_ranges(room.x_range(), area.top()..=strip.bottom() + TAB_BORDER);
+    ui.set_clip_rect(tabs_clip.intersect(outer_clip));
+    let mut x = room.left() - scroll;
+    for (tab, &width) in tabs.iter().zip(&layout.widths) {
         let swatch = theme::swatch_color(&tab.color);
         let selected = ui_state.graph.tab == tab.index;
-        let galley = ui.painter().layout_no_wrap(tab.name.clone(), theme::monospace(11.0), theme::LABEL_EMPHASIS);
-        let width = (galley.size().x + 48.0).max(135.0);
+        let name_width = (width - TAB_NAME_LEFT - TAB_NAME_RIGHT).max(1.0);
+        let galley = elided_galley(ui.painter(), &tab.name, theme::monospace(11.0), theme::LABEL_EMPHASIS, name_width);
         let tab_rect = Rect::from_min_size(Pos2::new(x, strip.top() + 1.0), Vec2::new(width, TAB_HEIGHT));
         let response = ui.interact(tab_rect, ui.id().with(("graph-tab", tab.index)), Sense::click());
+        let response = if galley.elided { response.tooltip(tab.name.clone()) } else { response };
         if response.clicked() {
             ui_state.graph.tab = tab.index;
         }
@@ -304,36 +449,92 @@ fn tabs(ui: &mut Ui, area: Rect, editor: &Editor, ui_state: &mut UiState, select
                 }
             }
             None => {
-                let text_position = Pos2::new(tab_rect.left() + 24.0, tab_rect.center().y - galley.size().y / 2.0);
+                let text_position = Pos2::new(tab_rect.left() + TAB_NAME_LEFT, tab_rect.center().y - galley.size().y / 2.0);
                 ui.painter().galley(text_position, galley, theme::LABEL_EMPHASIS);
             }
         }
         // Tabs overlap by 1 (`Margin 0,0,-1,0`).
         x += width - 1.0;
     }
-    // `ExtraBorder`: the line on to the end of the strip.
-    ui.painter().line_segment([Pos2::new(x, line_y), Pos2::new(strip.right(), line_y)], line_stroke);
+    ui.set_clip_rect(outer_clip);
+    // `ExtraBorder`: the line on to the end of the strip, from the last
+    // tab or, past their room, from its end.
+    ui.painter().line_segment([Pos2::new(x.min(room.right()), line_y), Pos2::new(strip.right(), line_y)], line_stroke);
+    if layout.overflow {
+        let button = Rect::from_min_size(Pos2::new(room.right(), strip.top() + 1.0), Vec2::new(TAB_LIST_BUTTON, TAB_HEIGHT - TAB_BORDER));
+        if let Some(index) = tab_list(ui, button, &tabs, ui_state.graph.tab) {
+            ui_state.graph.tab = index;
+        }
+    }
 
     confirm_tab_delete(ui, &tabs, ui_state, commands);
+    strip.left() + space + BOOKMARKS_GAP
+}
+
+/// The tab list button (`chevron-down`) after tabs that overflow the
+/// strip: a menu of every tab, the shown one checked. Returns the tab
+/// chosen.
+fn tab_list(ui: &mut Ui, rect: Rect, tabs: &[GraphTabInfo], shown: usize) -> Option<usize> {
+    let response = ui.interact(rect, ui.id().with("graph-tab-list"), Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    if response.is_pointer_button_down_on() {
+        ui.painter().rect_filled(rect, 4.0, theme::BUTTON_PRESSED);
+    } else if response.hovered() || open {
+        ui.painter().rect_filled(rect, 4.0, theme::BUTTON_HOVER);
+    }
+    let color = if response.hovered() || open { theme::LABEL_EMPHASIS } else { theme::ICON_DEFAULT };
+    icons::paint(ui, Rect::from_center_size(rect.center(), Vec2::splat(icons::DEFAULT_SIZE)), "chevron-down", color);
+    let response = response.tooltip("Graph Tabs");
+    let mut chosen = None;
+    let mut popup = egui::Popup::menu(&response);
+    popup = popup.align(egui::RectAlign::BOTTOM_END);
+    popup.show(|ui| {
+        menu_rows(ui, |ui| {
+            for tab in tabs {
+                let swatch = theme::swatch_color(&tab.color);
+                if checked_icon_item(ui, tab.index == shown, Some("square-rounded"), Some(swatch), &tab.name, "") {
+                    chosen = Some(tab.index);
+                }
+            }
+        });
+    });
+    chosen
+}
+
+/// The bookmarked nodes `stackBookmarks` shows, in the order they were
+/// added; none while `HideBookmarkShortcuts` hides them.
+fn bookmarked_nodes(editor: &Editor) -> Vec<&nerthus_engine::NodeData> {
+    if editor.user.options.hide_bookmark_shortcuts() {
+        return Vec::new();
+    }
+    editor.document.bookmarks().iter().filter_map(|id| editor.document.node(*id)).collect()
+}
+
+/// How much of the tab strip's end the bookmark bars take, `right_margin`
+/// in, with the gap the tabs leave before them; nothing without any.
+fn bookmarks_width(editor: &Editor, right_margin: f32) -> f32 {
+    let count = bookmarked_nodes(editor).len();
+    if count == 0 {
+        return 0.0;
+    }
+    right_margin + count as f32 * (BOOKMARK_BUTTON.x + 2.0 * BOOKMARK_MARGIN) - BOOKMARK_MARGIN + BOOKMARKS_GAP
 }
 
 /// `stackBookmarks` (`UpdateBookmarkMenu`): a small bar for each bookmark
 /// at the right of the tab strip, `right_margin` in, in its node's toolbox
-/// colour, its name as the tooltip; a click goes to the node.
+/// colour, its name as the tooltip; a click goes to the node. They keep
+/// right of `left`, where the tabs end: those with no room there stay off
+/// the strip (the Bookmarks menu lists them all).
 /// `HideBookmarkShortcuts` hides them.
-fn bookmark_buttons(ui: &mut Ui, area: Rect, right_margin: f32, editor: &Editor, commands: &mut Vec<Command>) {
-    if editor.user.options.hide_bookmark_shortcuts() {
-        return;
-    }
-    let bookmarks = editor.document.bookmarks();
-    let nodes: Vec<&nerthus_engine::NodeData> = bookmarks.iter().filter_map(|id| editor.document.node(*id)).collect();
-    // `BookmarkButton`: padding 2 around a 6 by 12 bar, margin 2, 0.
-    let button_size = Vec2::new(6.0 + 4.0, 12.0 + 4.0);
+fn bookmark_buttons(ui: &mut Ui, area: Rect, right_margin: f32, left: f32, editor: &Editor, commands: &mut Vec<Command>) {
     let mut right = area.right() - right_margin;
     let center_y = area.top() + TABS_HEIGHT / 2.0;
-    for node in nodes.iter().rev() {
-        let rect = Rect::from_min_max(Pos2::new(right - 2.0 - button_size.x, center_y - button_size.y / 2.0), Pos2::new(right - 2.0, center_y + button_size.y / 2.0));
-        right = rect.left() - 2.0;
+    for node in bookmarked_nodes(editor).iter().rev() {
+        let rect = Rect::from_min_max(Pos2::new(right - BOOKMARK_MARGIN - BOOKMARK_BUTTON.x, center_y - BOOKMARK_BUTTON.y / 2.0), Pos2::new(right - BOOKMARK_MARGIN, center_y + BOOKMARK_BUTTON.y / 2.0));
+        if rect.left() < left - 0.5 {
+            break;
+        }
+        right = rect.left() - BOOKMARK_MARGIN;
         let response = ui.interact(rect, ui.id().with(("bookmark-button", node.id)), Sense::click());
         if response.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -350,7 +551,7 @@ fn bookmark_buttons(ui: &mut Ui, area: Rect, right_margin: f32, editor: &Editor,
 }
 
 /// `MiDeleteGraphTab_Click`: asks before a tab and its nodes go.
-fn confirm_tab_delete(ui: &mut Ui, tabs: &[crate::document::GraphTabInfo], ui_state: &mut UiState, commands: &mut Vec<Command>) {
+fn confirm_tab_delete(ui: &mut Ui, tabs: &[GraphTabInfo], ui_state: &mut UiState, commands: &mut Vec<Command>) {
     let Some(index) = ui_state.graph.confirm_delete_tab else {
         return;
     };
@@ -999,6 +1200,250 @@ mod tests {
         assert!(ui_state.graph.areas.data_view.is_some());
         click(&context, wide, &mut editor, &mut ui_state, chevron_at(&context, wide));
         assert!(!ui_state.data_view.expanded);
+    }
+
+    #[test]
+    fn tabs_narrow_before_they_scroll() {
+        // Room for every tab: each as it is.
+        assert_eq!(tab_layout(&[TAB_WIDTH, 200.0], 400.0), TabLayout { widths: vec![TAB_WIDTH, 200.0], room: 400.0, overflow: false });
+        // A long name gives way first, down to the others' width.
+        let layout = tab_layout(&[TAB_WIDTH, 460.0, TAB_WIDTH], 500.0);
+        assert_eq!(layout.widths, [TAB_WIDTH, 232.0, TAB_WIDTH]);
+        assert!(!layout.overflow);
+        // Then every tab alike.
+        assert_eq!(tab_layout(&[TAB_WIDTH; 6], 600.0).widths, [100.0; 6]);
+        // Short of their least, they scroll with the tab list after them.
+        let layout = tab_layout(&[TAB_WIDTH; 6], 400.0);
+        assert_eq!(layout, TabLayout { widths: vec![TAB_MIN_WIDTH; 6], room: 400.0 - TAB_LIST_BUTTON, overflow: true });
+        // A lone tab narrows to the strip.
+        assert_eq!(tab_layout(&[460.0], 200.0), TabLayout { widths: vec![200.0], room: 200.0, overflow: false });
+
+        for count in 1..12 {
+            let natural: Vec<f32> = (0..count).map(|tab| TAB_WIDTH + 37.0 * (tab % 4) as f32).collect();
+            for space in (7..1800).step_by(7).map(|space| space as f32) {
+                let layout = tab_layout(&natural, space);
+                let (_, length) = tab_spans(&layout.widths);
+                let case = format!("{count} tabs in {space}");
+                assert_eq!(layout.widths.len(), count, "{case}");
+                for (width, wanted) in layout.widths.iter().zip(&natural) {
+                    assert!(width <= wanted, "{case}: a tab {width} wide wants {wanted}");
+                    if count > 1 {
+                        assert!(*width >= TAB_MIN_WIDTH, "{case}: a tab {width} wide");
+                    }
+                }
+                if layout.overflow {
+                    assert!(count > 1 && length > layout.room, "{case}: overflows with {length} in {}", layout.room);
+                    assert_eq!(layout.room, (space - TAB_LIST_BUTTON).max(0.0), "{case}");
+                } else {
+                    assert!(length <= space, "{case}: {length} long");
+                    assert_eq!(layout.room, space, "{case}");
+                }
+                if tab_spans(&natural).1 <= space {
+                    assert_eq!(layout.widths, natural, "{case}: narrowed with room to spare");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_tab_is_scrolled_into_sight_as_little_as_it_takes() {
+        assert_eq!(scroll_to_show(0.0, (0.0, 100.0), 300.0), 0.0);
+        assert_eq!(scroll_to_show(0.0, (400.0, 500.0), 300.0), 200.0);
+        assert_eq!(scroll_to_show(250.0, (100.0, 200.0), 300.0), 100.0);
+        assert_eq!(scroll_to_show(150.0, (200.0, 400.0), 300.0), 150.0);
+        // Wider than the room: its start.
+        assert_eq!(scroll_to_show(0.0, (100.0, 500.0), 300.0), 100.0);
+    }
+
+    /// The tab strip of the graph grid in `grid` with the Data View shut:
+    /// the top of the graph area, less the grid's 1 on the right.
+    fn tab_strip(context: &egui::Context, grid: Rect) -> Rect {
+        let right = grid.right() - shut_toolbar_column(context) - AREA_MARGIN - 1.0;
+        Rect::from_min_max(grid.min + Vec2::splat(AREA_MARGIN), Pos2::new(right, grid.top() + AREA_MARGIN + TABS_HEIGHT))
+    }
+
+    /// The tab names painted in `strip`: each name (whole), where it is
+    /// drawn, its clip and whether it was cut short.
+    fn tab_names(shapes: &[egui::epaint::ClippedShape], strip: Rect) -> Vec<(String, Rect, Rect, bool)> {
+        let names = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            Shape::Text(text) if strip.contains(clipped.shape.visual_bounding_rect().center()) => {
+                Some((text.galley.text().to_string(), clipped.shape.visual_bounding_rect(), clipped.clip_rect, text.galley.elided))
+            }
+            _ => None,
+        });
+        names.collect()
+    }
+
+    /// The tab named `name` as painted, when it is.
+    fn tab_name<'a>(names: &'a [(String, Rect, Rect, bool)], name: &str) -> Option<&'a (String, Rect, Rect, bool)> {
+        names.iter().find(|(shown, ..)| shown == name)
+    }
+
+    /// Whether the painted name is in full sight.
+    fn in_full_sight(name: &(String, Rect, Rect, bool)) -> bool {
+        name.2.contains_rect(name.1)
+    }
+
+    /// The bookmark bars painted (6 by 12, outlined).
+    fn bookmark_bars(shapes: &[egui::epaint::ClippedShape]) -> Vec<Rect> {
+        let bars = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            Shape::Rect(rect) if rect.stroke.color == theme::BUTTON_BORDER_ALT && (rect.rect.size() - Vec2::new(6.0, 12.0)).length() < 0.01 => Some(rect.rect.intersect(clipped.clip_rect)),
+            _ => None,
+        });
+        bars.filter(|bar| bar.is_positive()).collect()
+    }
+
+    /// Six tabs, Graph 1 to Graph 6.
+    fn six_tabs(editor: &mut Editor) -> Vec<GraphTabInfo> {
+        for _ in 0..5 {
+            editor.document.add_graph_tab();
+        }
+        editor.document.graph_tabs()
+    }
+
+    #[test]
+    fn the_shown_tab_stays_in_sight_and_the_tabs_in_their_room() {
+        // About the graph of a 640 by 480 window, and wider.
+        for width in [300.0, 480.0, 640.0, 900.0] {
+            let (context, mut editor, mut ui_state) = graph_grid_context();
+            let tabs = six_tabs(&mut editor);
+            let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(width, 300.0));
+            let strip = tab_strip(&context, grid);
+            grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+            for tab in tabs.iter().chain(tabs.iter().rev()) {
+                ui_state.graph.tab = tab.index;
+                grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                let case = format!("{} shown at {width}", tab.name);
+                let names = tab_names(&shapes, strip);
+                let shown = tab_name(&names, &tab.name).unwrap_or_else(|| panic!("{case}: its name is not painted"));
+                assert!(in_full_sight(shown), "{case}: its name at {:?} is cut by {:?}", shown.1, shown.2);
+                // Nothing of the tabs past their room: before the tab list
+                // while it shows.
+                let overflow = tab_layout(&[TAB_WIDTH; 6], strip.width()).overflow;
+                let room_right = if overflow { strip.right() - TAB_LIST_BUTTON } else { strip.right() };
+                let band = Rect::from_min_max(strip.min, Pos2::new(strip.right(), strip.top() + 14.0));
+                let list_button = Rect::from_min_max(Pos2::new(room_right, strip.top()), strip.max);
+                for clipped in &shapes {
+                    let visible = clipped.shape.visual_bounding_rect().intersect(clipped.clip_rect);
+                    // Not the graph's background, nor the tab list's icon.
+                    let icon = overflow && list_button.contains_rect(visible);
+                    if !visible.intersects(band) || visible.contains_rect(band) || icon {
+                        continue;
+                    }
+                    assert!(visible.left() >= strip.left() - 0.5 && visible.right() <= room_right + 0.5, "{case}: {:?} painted at {visible:?} past the tabs' room to {room_right}", clipped.shape);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bookmark_bars_keep_their_own_room() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        let tabs = six_tabs(&mut editor);
+        let mountain = editor.document.add_node("Mountain", [25100.0, 25100.0]).expect("a Mountain");
+        let erosion = editor.document.add_node("ErosionPro", [25400.0, 25100.0]).expect("an Erosion");
+        editor.document.add_bookmark(mountain);
+        editor.document.add_bookmark(erosion);
+        let first = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(400.0, 300.0));
+        grid_frame(&context, first, &mut editor, &mut ui_state, Vec::new());
+        // From six tabs with room to spare, through ones that just fit, to
+        // ones that scroll.
+        for width in (400..=1300).step_by(25) {
+            let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(width as f32, 300.0));
+            let strip = tab_strip(&context, grid);
+            for tab in [&tabs[0], &tabs[5]] {
+                ui_state.graph.tab = tab.index;
+                grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                let case = format!("{} shown at {width}", tab.name);
+                let bars = bookmark_bars(&shapes);
+                assert_eq!(bars.len(), 2, "{case}: the bookmark bars");
+                let bars_left = bars.iter().map(|bar| bar.left()).fold(f32::INFINITY, f32::min);
+                for (name, bounds, clip, _) in tab_names(&shapes, strip) {
+                    let visible = bounds.intersect(clip);
+                    if visible.is_positive() {
+                        assert!(visible.right() < bars_left - BOOKMARK_MARGIN, "{case}: {name} at {visible:?} under the bookmarks from {bars_left}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_tab_list_reaches_every_tab() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        let tabs = six_tabs(&mut editor);
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(480.0, 400.0));
+        let strip = tab_strip(&context, grid);
+        // The first frame opens the project on its first tab.
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        ui_state.graph.tab = tabs[5].index;
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let names = tab_names(&shapes, strip);
+        assert!(!tab_name(&names, "Graph 1").is_some_and(in_full_sight), "Graph 1 shows beside Graph 6");
+
+        let button = Pos2::new(strip.right() - TAB_LIST_BUTTON / 2.0, strip.top() + 1.0 + TAB_HEIGHT / 2.0);
+        click(&context, grid, &mut editor, &mut ui_state, button);
+        assert!(egui::Popup::is_any_open(&context), "the tab list did not open");
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let below = Rect::from_min_max(Pos2::new(grid.left(), strip.bottom()), grid.max);
+        let listed = tab_names(&shapes, below);
+        for tab in &tabs {
+            assert!(tab_name(&listed, &tab.name).is_some(), "{} is not in the tab list", tab.name);
+        }
+        let first = tab_name(&listed, "Graph 1").expect("Graph 1 in the list").1.center();
+        click(&context, grid, &mut editor, &mut ui_state, first);
+        assert_eq!(ui_state.graph.tab, tabs[0].index);
+        assert!(!egui::Popup::is_any_open(&context));
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let names = tab_names(&shapes, strip);
+        assert!(tab_name(&names, "Graph 1").is_some_and(in_full_sight), "Graph 1 is not brought into sight");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_tabs() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        six_tabs(&mut editor);
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(480.0, 400.0));
+        let strip = tab_strip(&context, grid);
+        let zoom = ui_state.graph.view().zoom;
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        grid_frame(&context, grid, &mut editor, &mut ui_state, vec![egui::Event::PointerMoved(strip.center())]);
+        grid_frame(&context, grid, &mut editor, &mut ui_state, vec![wheel]);
+        for _ in 0..60 {
+            grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        }
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        assert_eq!(ui_state.graph.view().zoom, zoom, "the wheel over the tabs zoomed the graph");
+        let names = tab_names(&shapes, strip);
+        assert!(tab_name(&names, "Graph 6").is_some_and(in_full_sight), "the tabs did not scroll to Graph 6");
+        assert!(!tab_name(&names, "Graph 1").is_some_and(in_full_sight));
+        // The shown tab stays where the wheel left it.
+        assert!(ui_state.graph.tab_strip.scroll > 0.0);
+    }
+
+    #[test]
+    fn a_long_tab_name_is_cut_short_rather_than_pushing_the_others_out() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        let tabs = six_tabs(&mut editor);
+        let long = "Erosion and Hydrology Experiments Tab With Long Name";
+        editor.document.rename_graph_tab(tabs[1].index, long);
+        // The graph of a 1280 wide window with the Data View shut.
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(1000.0, 400.0));
+        let strip = tab_strip(&context, grid);
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let names = tab_names(&shapes, strip);
+        let shown = tab_name(&names, long).expect("the long name");
+        assert!(shown.3, "the long name is not cut short");
+        assert!(in_full_sight(shown));
+        for tab in tabs.iter().filter(|tab| tab.index != tabs[1].index) {
+            let name = tab_name(&names, &tab.name).unwrap_or_else(|| panic!("{} is not painted", tab.name));
+            assert!(in_full_sight(name) && !name.3, "{} is not in full sight", tab.name);
+        }
     }
 
     #[test]
