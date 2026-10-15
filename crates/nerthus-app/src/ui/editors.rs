@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::icons;
 use crate::theme;
+use crate::ui::colour_picker::{colour_button, linear_to_srgb, picked_linear};
 use crate::ui::slider_popups::{self, BoxWidth, Nudge, NudgeLook, RangeEnd, TypingLook};
 use crate::ui::widgets::Tooltips;
 
@@ -1626,10 +1627,11 @@ fn command_button(ui: &mut Ui, label: &str) -> Edit {
     if clicked { Edit::Command } else { Edit::None }
 }
 
-/// `ColorPickerEditor` (margin 20, 4, 4, 4): the name and the colour.
+/// `ColorPickerEditor` (margin 20, 4, 4, 4): the name and the colour, a
+/// swatch opening the `ColorEditor`, which leaves the alpha as it is.
 fn color_editor(ui: &mut Ui, label: &str, value: &Value) -> Edit {
     let current = color_of(value);
-    let mut rgba = egui::Rgba::from_rgba_unmultiplied(current[0], current[1], current[2], current[3]);
+    let linear = [current[0], current[1], current[2]];
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
     let header = Rect::from_min_size(rect.min, Vec2::new(90.0 + 20.0, rect.height()));
@@ -1638,14 +1640,12 @@ fn color_editor(ui: &mut Ui, label: &str, value: &Value) -> Edit {
     let swatch_right = (rect.right() - 4.0).max(header.right());
     let swatch = Rect::from_min_max(Pos2::new(header.right(), rect.top() + 4.0), Pos2::new(swatch_right, rect.bottom() - 4.0));
     let mut swatch_ui = ui.new_child(egui::UiBuilder::new().max_rect(swatch));
-    swatch_ui.spacing_mut().interact_size = swatch.size();
-    let changed = egui::color_picker::color_edit_button_rgba(&mut swatch_ui, &mut rgba, egui::color_picker::Alpha::Opaque).changed();
-    if !changed {
+    let Some(colour) = colour_button(&mut swatch_ui, swatch.size(), linear.map(linear_to_srgb)) else {
         return Edit::None;
-    }
-    let [red, green, blue, alpha] = rgba.to_rgba_unmultiplied();
+    };
+    let [red, green, blue] = picked_linear(linear, colour);
     let mut updated = value.clone();
-    set_color(&mut updated, [red, green, blue, alpha]);
+    set_color(&mut updated, [red, green, blue, current[3]]);
     Edit::Set(updated)
 }
 
@@ -2096,6 +2096,42 @@ mod tests {
             output.drop_without_applying_deltas();
             assert!(matches!(edit, Edit::None));
         }
+    }
+
+    #[test]
+    fn colour_properties_pick_in_the_colour_editor_and_keep_their_alpha() {
+        let context = themed_context();
+        // Constant "White" in Alpine Valley, half transparent.
+        let value = json!({"R": 0.8879231, "G": 0.9046612, "B": 0.9301109, "A": 0.5});
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 30.0));
+        let frame = |events: Vec<egui::Event>| {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0));
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut edit = Edit::None;
+            let output = context.run_ui(input, |ui| {
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(row));
+                edit = color_editor(&mut row, "Color", &value);
+            });
+            output.drop_without_applying_deltas();
+            edit
+        };
+        let click = |position: Pos2| {
+            let button = |pressed: bool| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            [vec![egui::Event::PointerMoved(position)], vec![button(true)], vec![button(false)]].into_iter().map(&frame).collect::<Vec<_>>()
+        };
+        // The swatch, right of the 110 header.
+        assert!(click(Pos2::new(250.0, 15.0)).iter().all(|edit| matches!(edit, Edit::None)));
+        frame(Vec::new());
+        let popup = context.memory(|memory| memory.areas().top_layer_id(egui::Order::Foreground).and_then(|layer| memory.area_rect(layer.id)));
+        let popup = popup.expect("the swatch opens the colour editor");
+        // Well inside the spectrum, which starts at the popup's margin.
+        let edits = click(popup.min + Vec2::splat(60.0));
+        let Some(Edit::Set(updated)) = edits.into_iter().find(|edit| matches!(edit, Edit::Set(_))) else {
+            panic!("a click on the spectrum sets the colour");
+        };
+        assert_eq!(updated["A"].as_f64(), Some(0.5));
+        let picked = color_of(&updated);
+        assert!(picked[..3].iter().zip(color_of(&value)).all(|(new, old)| (new - old).abs() > 0.01), "{updated}");
     }
 
     #[test]
