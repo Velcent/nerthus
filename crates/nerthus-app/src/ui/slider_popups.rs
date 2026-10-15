@@ -51,10 +51,13 @@ pub const NUDGES: [(Nudge, &str, &str); 9] = [
 
 /// `NudgeButton`: 28 by 24, a 16px icon.
 const NUDGE_BUTTON: Vec2 = Vec2::new(28.0, 24.0);
+/// The narrowest a button gets in a narrow bar: its icon's width.
+const NUDGE_BUTTON_MIN_WIDTH: f32 = 16.0;
 /// The margin between the buttons and the bar's box.
 const NUDGE_GAP: f32 = 6.0;
-/// `NudgePopup.MinWidth`.
-const NUDGE_MIN_WIDTH: f32 = 96.0;
+/// The room the buttons leave the box, narrowing if they must: enough
+/// for a value at four decimals.
+const NUDGE_BOX_MIN_WIDTH: f32 = 56.0;
 /// The `TextBox` style: a 1px border round 4 of padding, corners of 3.
 const TEXT_BOX_BORDER: f32 = 1.0;
 const TEXT_BOX_PADDING: f32 = 4.0;
@@ -278,8 +281,8 @@ pub struct NudgeOutcome {
 #[derive(Clone, Copy, Debug)]
 pub struct NudgeLook {
     pub top_left: Pos2,
-    /// In the editor's points: the slider's whole width (`ActualWidth *
-    /// UiScale` in the popup's own units).
+    /// In the editor's points: the slider's width (`ActualWidth * UiScale`
+    /// in the popup's own units). The bar keeps to it.
     pub width: f32,
     /// The buttons' colour (the slider's).
     pub color: Color32,
@@ -301,7 +304,9 @@ pub fn nudge_bar(ui: &Ui, id: Id, look: &NudgeLook) -> NudgeOutcome {
     }
     bar.shown = ui.ctx().cumulative_pass_nr();
     let scale = popup_scale(ui.ctx());
-    let button_size = NUDGE_BUTTON * scale;
+    let width = look.width.max(0.0);
+    let (button_width, box_width) = nudge_widths(width, scale);
+    let button_size = Vec2::new(button_width, NUDGE_BUTTON.y * scale);
     let gap = NUDGE_GAP * scale;
     let border = TEXT_BOX_BORDER * scale;
     let padding = TEXT_BOX_PADDING * scale;
@@ -309,9 +314,7 @@ pub fn nudge_bar(ui: &Ui, id: Id, look: &NudgeLook) -> NudgeOutcome {
     let line = ui.fonts_mut(|fonts| fonts.row_height(&font));
     let height = (line + 2.0 * (border + padding)).max(button_size.y);
     let buttons_width = button_size.x * NUDGES.len() as f32;
-    // As wide as asked (96 at least), and never narrower than its buttons.
-    let width = look.width.max(NUDGE_MIN_WIDTH * scale).max(buttons_width);
-    let box_width = (width - buttons_width - gap).max(0.0);
+    let icon_size = (icons::DEFAULT_SIZE * scale).min(button_size.x);
     let box_left = bar.end == Some(RangeEnd::Low);
     let (buttons_x, box_x) = if box_left { (box_width + gap, 0.0) } else { (0.0, buttons_width + gap) };
     let text_id = id.with("text");
@@ -326,7 +329,7 @@ pub fn nudge_bar(ui: &Ui, id: Id, look: &NudgeLook) -> NudgeOutcome {
             let cell = Rect::from_min_size(Pos2::new(left, buttons.center().y - button_size.y / 2.0), button_size);
             let button = ui.interact(cell, id.with(("nudge", index)), Sense::click());
             let tint = if button.hovered() || button.is_pointer_button_down_on() { theme::LABEL_EMPHASIS } else { look.color };
-            let icon_rect = Rect::from_center_size(cell.center(), Vec2::splat(icons::DEFAULT_SIZE * scale));
+            let icon_rect = Rect::from_center_size(cell.center(), Vec2::splat(icon_size));
             icons::paint(ui, icon_rect, icon, tint);
             let usable = nudge != Nudge::Default || look.has_default;
             if button.tooltip(tooltip).clicked() && usable {
@@ -390,6 +393,18 @@ pub fn nudge_bar(ui: &Ui, id: Id, look: &NudgeLook) -> NudgeOutcome {
     }
     ui.data_mut(|data| data.insert_temp(id, bar));
     outcome
+}
+
+/// How a nudge bar `width` wide (in the editor's points) shares it out:
+/// each button's width and the box's. The buttons keep their 28 while the
+/// box has room for a value; in a narrower bar they give way first, down
+/// to their icons' width, and then the box does.
+pub fn nudge_widths(width: f32, scale: f32) -> (f32, f32) {
+    let count = NUDGES.len() as f32;
+    let gap = NUDGE_GAP * scale;
+    let room = width - gap - NUDGE_BOX_MIN_WIDTH * scale;
+    let button = (room / count).clamp(NUDGE_BUTTON_MIN_WIDTH * scale, NUDGE_BUTTON.x * scale).min(width / count);
+    (button, (width - count * button - gap).max(0.0))
 }
 
 /// `Keyboard.Focus`, then `SelectAll`.
@@ -501,6 +516,23 @@ mod tests {
         assert_eq!(kept_in(Pos2::new(-8.0, -8.0), size, screen), Pos2::ZERO);
         // Bigger than the window: against its top left.
         assert_eq!(kept_in(Pos2::new(250.0, 20.0), Vec2::new(500.0, 30.0), screen), Pos2::new(0.0, 20.0));
+    }
+
+    #[test]
+    fn a_narrow_nudge_bar_narrows_its_buttons_before_its_box() {
+        // Room for both: the buttons keep their 28, the box takes the rest.
+        assert_eq!(nudge_widths(400.0, 1.0), (28.0, 400.0 - 9.0 * 28.0 - 6.0));
+        // Less: the buttons narrow and the box keeps room for a value.
+        let (button, field) = nudge_widths(250.0, 1.0);
+        assert!(button < 28.0 && button > 16.0, "{button}");
+        assert!((field - 56.0).abs() < 1e-3, "{field}");
+        // Down to their icons: then the box narrows, and goes.
+        assert_eq!(nudge_widths(9.0 * 16.0 + 6.0 + 30.0, 1.0), (16.0, 30.0));
+        assert_eq!(nudge_widths(9.0 * 16.0, 1.0), (16.0, 0.0));
+        // Narrower than that, the buttons share what there is.
+        assert_eq!(nudge_widths(90.0, 1.0), (10.0, 0.0));
+        // In the popup's own units.
+        assert_eq!(nudge_widths(800.0, 0.5), (14.0, 800.0 - 9.0 * 14.0 - 3.0));
     }
 
     #[test]
