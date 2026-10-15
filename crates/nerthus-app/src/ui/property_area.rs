@@ -1673,6 +1673,43 @@ mod tests {
     }
 
     #[test]
+    fn seeds_show_whole_at_the_least_width() {
+        let mut document = Document::new();
+        let reseed = document.add_node("Reseed", [26000.0, 26000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.select(Some(reseed));
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let rect = Rect::from_min_size(Pos2::new(10.0, 50.0), Vec2::new(crate::ui::MIN_PROPERTIES - 4.0, 900.0));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0));
+        // One the dice draws, one typed, and the longest an `Int32` takes.
+        for seed in [58077, 1999999, i64::from(i32::MIN)] {
+            editor.document.set_value(reseed, "Seed", Value::from(seed));
+            let mut shapes = Vec::new();
+            for _ in 0..3 {
+                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+                let mut commands = Vec::new();
+                let mut output = context.run_ui(input, |ui| show(ui, rect, &mut editor, &mut commands));
+                shapes = std::mem::take(&mut output.shapes);
+                output.drop_without_applying_deltas();
+            }
+            let shown = seed.to_string();
+            let drawn = shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == shown => Some((text, clipped.clip_rect)),
+                _ => None,
+            });
+            let (text, clip) = drawn.expect("the seed is drawn");
+            assert!(!text.galley.elided, "{shown} is trimmed");
+            assert!(clip.contains_rect(text.visual_bounding_rect()), "{shown} is clipped: {:?} leaves {clip:?}", text.visual_bounding_rect());
+            // The name keeps clear of the button.
+            let name = texts(&shapes).into_iter().find(|(text, _)| text == "Seed").expect("the name is drawn").1;
+            assert!(name.right() < clip.left(), "the name {name:?} runs into the button {clip:?}");
+        }
+    }
+
+    #[test]
     fn the_parameters_keep_above_the_modifier_toolbar_at_the_least_height() {
         let width = crate::ui::MIN_PROPERTIES - 4.0;
         let least = least_height(width);
