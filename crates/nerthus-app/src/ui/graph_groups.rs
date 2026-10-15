@@ -10,7 +10,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{elided_galley, GraphState, SIMPLIFIED_ZOOM};
+use crate::ui::graph_canvas::{drag_pointer, elided_galley, GraphState, SIMPLIFIED_ZOOM};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::{icon_grid, swatch_grid};
 use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, menu_style};
@@ -54,6 +54,13 @@ pub struct GroupDrag {
     position: [f32; 2],
     size: [f32; 2],
     children: Option<Rect>,
+}
+
+impl GroupDrag {
+    /// Whether the group moves (rather than takes a new size).
+    pub(crate) fn moves(&self) -> bool {
+        self.kind == GroupDragKind::Move
+    }
 }
 
 /// `GetGroupBounds`: the box the group's nodes and notes take.
@@ -186,7 +193,8 @@ fn continue_drag(ui: &Ui, editor: &mut Editor, state: &mut GraphState, origin: P
         return;
     };
     let view = state.view();
-    if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+    let pointer = if drag.moves() { drag_pointer(ui, state.rect) } else { ui.input(|input| input.pointer.interact_pos()) };
+    if let Some(pointer) = pointer {
         let current = view.to_canvas(origin, pointer);
         let delta = current - drag.pointer_start;
         let min_height = drag.children.map_or(0.0, |children| children.bottom() - drag.position[1] + ELEMENTS_PADDING);
