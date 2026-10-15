@@ -1169,9 +1169,12 @@ fn draw_node(ui: &Ui, painter: &egui::Painter, editor: &Editor, layout: &NodeLay
         }
         painter.galley(position, galley, title_color);
     } else {
+        // Under the box, where the Mask port sits too: the name starts
+        // past its dot, ending where it would without one.
+        let left = layout.mask.as_ref().map_or(4.0, |mask| mask.dot.right() - layout.rect.left() + 4.0);
         let font = theme::semibold(10.0 * zoom);
-        let galley = elided_galley(painter, &node.name, font, title_color, SMALL_SIZE * zoom);
-        let position = Pos2::new(screen.left() + 4.0 * zoom, screen.bottom() + 2.0 * zoom);
+        let galley = elided_galley(painter, &node.name, font, title_color, (SMALL_SIZE + 4.0 - left) * zoom);
+        let position = Pos2::new(screen.left() + left * zoom, screen.bottom() + 2.0 * zoom);
         painter.galley(position, galley, title_color);
     }
 
@@ -2734,5 +2737,51 @@ mod tests {
         frame(vec![egui::Event::PointerMoved(hidden_input)]);
         assert!(frame(vec![button(hidden_input, false)]).is_empty());
         assert!(state.drag.is_none() && state.popup.is_none());
+    }
+
+    #[test]
+    fn small_node_names_clear_the_mask_port() {
+        let mut editor = Editor::new(Document::new());
+        let mut state = GraphState::default();
+        let context = themed_context();
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+
+        // A small Combine, which has a Mask port, and a small Mountain,
+        // which has none, well inside the graph.
+        let view = state.view();
+        let canvas_at = |x: f32, y: f32| {
+            let point = view.to_canvas(GRAPH.min, Pos2::new(x, y));
+            [point.x, point.y]
+        };
+        let combine = editor.document.add_node("Combine", canvas_at(400.0, 400.0)).unwrap();
+        let mountain = editor.document.add_node("Mountain", canvas_at(700.0, 400.0)).unwrap();
+        for node in [combine, mountain] {
+            editor.document.set_member(node, "NodeSize", serde_json::json!("Small"), "Node size", false);
+        }
+        let (shapes, _, _) = frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+
+        // The node's box, its name and its Mask dot on the screen.
+        let view = state.view();
+        let shown = |node: i32| {
+            let data = editor.document.node(node).unwrap();
+            let layout = layout_node(data, editor.user.options.default_node_size());
+            let name = shapes.iter().find_map(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == data.name => Some(clipped.shape.visual_bounding_rect()),
+                _ => None,
+            });
+            let mask = layout.mask.as_ref().map(|mask| view.rect_to_screen(state.rect.min, mask.dot));
+            (view.rect_to_screen(state.rect.min, layout.rect), name.expect("the name shows"), mask)
+        };
+        let (combine_box, combine_name, mask_dot) = shown(combine);
+        let mask_dot = mask_dot.expect("Combine has a Mask port");
+        assert!(combine_name.top() >= combine_box.bottom(), "the name is under the box");
+        assert!(!combine_name.intersects(mask_dot), "{combine_name:?} is under the Mask dot {mask_dot:?}");
+        assert!(combine_name.left() >= mask_dot.right());
+        assert!(combine_name.right() <= combine_box.right() + 4.0 * view.zoom);
+
+        // Without a Mask port the name starts where it did.
+        let (mountain_box, mountain_name, no_mask) = shown(mountain);
+        assert!(no_mask.is_none());
+        assert!(mountain_name.left() < mask_dot.right() - combine_box.left() + mountain_box.left());
     }
 }
