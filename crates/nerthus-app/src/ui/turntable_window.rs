@@ -13,8 +13,9 @@ use nerthus_render::TurntableRequest;
 use crate::editor::Editor;
 use crate::theme;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
-use crate::ui::widgets::selectable_value;
+use crate::ui::widgets::{selectable_value, DialogFit};
 
+/// The content (640 less the margins), where there is room.
 const WIDTH: f32 = 640.0 - 48.0;
 /// `cboResolution`'s sizes; 1920 by 1080 to begin with.
 const RESOLUTIONS: [(u32, u32); 5] = [(1280, 720), (1280, 1280), (1920, 1080), (2560, 1440), (3840, 2160)];
@@ -80,6 +81,9 @@ impl TurntableWindow {
 }
 
 /// The window; an answer once Record Animation is pressed or it closes.
+/// The settings scroll when the window is too small for them, Record
+/// Animation staying below them, and the frame count's row wraps when it
+/// is too narrow.
 pub fn show(ctx: &egui::Context, window: &mut TurntableWindow, memory: &mut TurntableMemory, dialogs: &mut FileDialogs) -> Option<TurntableAnswer> {
     if let Some(Some(picked)) = dialogs.take(DIALOG_KEY) {
         window.path = picked.display().to_string();
@@ -88,80 +92,18 @@ pub fn show(ctx: &egui::Context, window: &mut TurntableWindow, memory: &mut Turn
     let mut frame = egui::Frame::popup(&ctx.global_style());
     frame.fill = theme::PANEL_BACKGROUND;
     frame.inner_margin = egui::Margin::same(24);
-    let mut modal = egui::Modal::new(Id::new("turntable-window"));
+    let id = Id::new("turntable-window");
+    let fit = DialogFit::new(ctx, id, &frame);
+    let mut modal = egui::Modal::new(id);
     modal = modal.frame(frame);
     let response = modal.show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        // The heading on `Panel-Border` (padding 12, 4).
-        let mut heading_frame = egui::Frame::new();
-        heading_frame.fill = theme::PANEL_BORDER;
-        heading_frame.inner_margin = egui::Margin::symmetric(12, 4);
-        heading_frame.show(ui, |ui| {
-            ui.set_width(WIDTH - 24.0);
-            let heading = RichText::new("Turntable Animation Settings").font(theme::semibold(12.0)).color(theme::LABEL_DEFAULT);
-            ui.label(heading);
-        });
-        ui.add_space(16.0);
-        // `fbcTarget`: "Output Folder", the path and its browse button.
-        ui.horizontal(|ui| {
-            let header = RichText::new("Output Folder").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
-            ui.label(header);
-            ui.add_space(8.0);
-            let mut field = egui::TextEdit::singleline(&mut window.path);
-            field = field.font(theme::semibold(12.0));
-            field = field.text_color(theme::TEXTBOX_FILE_FOREGROUND);
-            field = field.desired_width(ui.available_width() - 40.0);
-            ui.add(field);
-            if ui.add_enabled(!dialogs.pending(DIALOG_KEY), egui::Button::new("…")).clicked() {
-                let current = PathBuf::from(&window.path);
-                let file_name = current.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
-                let kind = DialogKind::SaveFile { filter: "PNG File (*.png)".to_string(), extensions: vec!["png".to_string()], file_name };
-                let request = DialogRequest { key: DIALOG_KEY.to_string(), title: "Output Folder".to_string(), kind, directory: current.parent().map(PathBuf::from) };
-                dialogs.ask(request);
-            }
-        });
-        // `UpdatePathPreview`: the first frame's name.
-        ui.horizontal(|ui| {
-            ui.add_space(28.0);
-            let preview = window.path.replace(".png", "_0000.png");
-            let preview = RichText::new(preview).font(theme::monospace(12.0)).color(theme::LABEL_DEFAULT);
-            // A 640 window: a long path is cut short.
-            ui.add(egui::Label::new(preview).truncate());
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let label = RichText::new("Total Frames").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
-            ui.label(label);
-            ui.add_space(8.0);
-            let mut frames = egui::TextEdit::singleline(&mut window.frames);
-            frames = frames.font(theme::monospace(12.0));
-            frames = frames.text_color(theme::ACCENT_MUTED_BLUE);
-            frames = frames.desired_width(72.0);
-            let frames_response = ui.add(frames);
-            if frames_response.changed() {
-                window.frames.retain(|character| character.is_ascii_digit());
-            }
-            if frames_response.lost_focus() {
-                window.frames = window.frame_count().to_string();
-            }
-            ui.add_space(8.0);
-            let (width, height) = RESOLUTIONS[window.resolution];
-            let mut combo = egui::ComboBox::from_id_salt("turntable-resolution");
-            combo = combo.selected_text(format!("{width} x {height}"));
-            combo = combo.width(118.0);
-            combo.show_ui(ui, |ui| {
-                for (index, (width, height)) in RESOLUTIONS.iter().enumerate() {
-                    selectable_value(ui, &mut window.resolution, index, format!("{width} x {height}"));
-                }
-            });
-            ui.add_space(8.0);
-            let hide = RichText::new("Hide Grid and Compass").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
-            ui.checkbox(&mut window.hide_helpers, hide);
-        });
+        let width = fit.width(WIDTH);
+        ui.set_width(width);
+        fit.body(ui, |ui| settings(ui, window, dialogs));
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(16.0);
-        ui.allocate_ui_with_layout(Vec2::new(WIDTH, 26.0), Layout::top_down(Align::Center), |ui| {
+        ui.allocate_ui_with_layout(Vec2::new(width, 26.0), Layout::top_down(Align::Center), |ui| {
             let label = RichText::new("Record Animation").font(theme::interface(12.0)).color(theme::LABEL_EMPHASIS);
             let mut button = egui::Button::new(label);
             button = button.fill(theme::BUTTON_BACKGROUND);
@@ -172,6 +114,7 @@ pub fn show(ctx: &egui::Context, window: &mut TurntableWindow, memory: &mut Turn
             }
         });
     });
+    fit.end(ctx, response.response.rect);
     record |= std::mem::take(&mut window.pressed);
     let closing = record || response.should_close();
     if !closing {
@@ -193,6 +136,76 @@ pub fn show(ctx: &egui::Context, window: &mut TurntableWindow, memory: &mut Turn
     Some(TurntableAnswer::Record(request))
 }
 
+/// The heading, where the frames go, how many and their size.
+fn settings(ui: &mut egui::Ui, window: &mut TurntableWindow, dialogs: &mut FileDialogs) {
+    // The heading on `Panel-Border` (padding 12, 4).
+    let mut heading_frame = egui::Frame::new();
+    heading_frame.fill = theme::PANEL_BORDER;
+    heading_frame.inner_margin = egui::Margin::symmetric(12, 4);
+    heading_frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let heading = RichText::new("Turntable Animation Settings").font(theme::semibold(12.0)).color(theme::LABEL_DEFAULT);
+        ui.label(heading);
+    });
+    ui.add_space(16.0);
+    // `fbcTarget`: "Output Folder", the path and its browse button.
+    ui.horizontal(|ui| {
+        let header = RichText::new("Output Folder").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
+        ui.label(header);
+        ui.add_space(8.0);
+        let mut field = egui::TextEdit::singleline(&mut window.path);
+        field = field.font(theme::semibold(12.0));
+        field = field.text_color(theme::TEXTBOX_FILE_FOREGROUND);
+        field = field.desired_width(ui.available_width() - 40.0);
+        ui.add(field);
+        if ui.add_enabled(!dialogs.pending(DIALOG_KEY), egui::Button::new("…")).clicked() {
+            let current = PathBuf::from(&window.path);
+            let file_name = current.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+            let kind = DialogKind::SaveFile { filter: "PNG File (*.png)".to_string(), extensions: vec!["png".to_string()], file_name };
+            let request = DialogRequest { key: DIALOG_KEY.to_string(), title: "Output Folder".to_string(), kind, directory: current.parent().map(PathBuf::from) };
+            dialogs.ask(request);
+        }
+    });
+    // `UpdatePathPreview`: the first frame's name.
+    ui.horizontal(|ui| {
+        ui.add_space(28.0);
+        let preview = window.path.replace(".png", "_0000.png");
+        let preview = RichText::new(preview).font(theme::monospace(12.0)).color(theme::LABEL_DEFAULT);
+        // A 640 window: a long path is cut short.
+        ui.add(egui::Label::new(preview).truncate());
+    });
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        let label = RichText::new("Total Frames").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
+        ui.label(label);
+        ui.add_space(8.0);
+        let mut frames = egui::TextEdit::singleline(&mut window.frames);
+        frames = frames.font(theme::monospace(12.0));
+        frames = frames.text_color(theme::ACCENT_MUTED_BLUE);
+        frames = frames.desired_width(72.0);
+        let frames_response = ui.add(frames);
+        if frames_response.changed() {
+            window.frames.retain(|character| character.is_ascii_digit());
+        }
+        if frames_response.lost_focus() {
+            window.frames = window.frame_count().to_string();
+        }
+        ui.add_space(8.0);
+        let (width, height) = RESOLUTIONS[window.resolution];
+        let mut combo = egui::ComboBox::from_id_salt("turntable-resolution");
+        combo = combo.selected_text(format!("{width} x {height}"));
+        combo = combo.width(118.0);
+        combo.show_ui(ui, |ui| {
+            for (index, (width, height)) in RESOLUTIONS.iter().enumerate() {
+                selectable_value(ui, &mut window.resolution, index, format!("{width} x {height}"));
+            }
+        });
+        ui.add_space(8.0);
+        let hide = RichText::new("Hide Grid and Compass").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
+        ui.checkbox(&mut window.hide_helpers, hide);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +218,23 @@ mod tests {
         assert_eq!(window.frame_count(), 360);
         window.frames = "120000".to_string();
         assert_eq!(window.frame_count(), 10000);
+    }
+
+    #[test]
+    fn the_settings_fit_small_windows() {
+        use crate::ui::widgets::fit_checks;
+        let context = fit_checks::context();
+        let path = "/home/someone/Pictures/Nerthus/Alpine Valley/Alpine Valley-1a2b-Turntable.png".to_string();
+        let mut window = TurntableWindow { path, frames: "360".to_string(), resolution: DEFAULT_RESOLUTION, hide_helpers: false, pressed: false };
+        let mut memory = TurntableMemory::default();
+        let mut dialogs = FileDialogs::default();
+        // 700 by 500 at 120% too.
+        for screen in [Vec2::new(583.0, 417.0)].into_iter().chain(fit_checks::SMALL_SCREENS) {
+            let words = fit_checks::settle(&context, screen, |ctx| {
+                assert!(show(ctx, &mut window, &mut memory, &mut dialogs).is_none());
+            });
+            let expected = ["Turntable Animation Settings", "Output Folder", "…", "Total Frames", "Hide Grid and Compass", "Record Animation"];
+            fit_checks::assert_fits(&context, screen, Id::new("turntable-window"), &words, &expected);
+        }
     }
 }
