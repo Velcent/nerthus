@@ -312,7 +312,7 @@ impl GraphState {
         self.drag = None;
         self.selected_connections.clear();
         self.selected_groups.clear();
-        self.renaming = None;
+        self.stop_renaming();
         self.selected_note = None;
         self.note_drag = None;
         self.editing_note = None;
@@ -322,6 +322,13 @@ impl GraphState {
         self.group_drag = None;
         self.group_states.clear();
         self.snap_lines.clear();
+    }
+
+    /// Closes the inline name editor (F2), dropping its text so the next
+    /// one opens on its own node's name.
+    fn stop_renaming(&mut self) {
+        self.renaming = None;
+        self.rename_text.clear();
     }
 
     /// The connections, groups and note the graph has chosen go (the
@@ -2063,7 +2070,7 @@ fn handle_background(
     let pushing = modifiers.command && modifiers.shift;
     let hovered = hovered_connection.map(|index| &connections[index]);
     if background.clicked() {
-        state.renaming = None;
+        state.stop_renaming();
         match hovered {
             Some(connection) => {
                 let key = (connection.to, connection.to_port.clone());
@@ -2280,7 +2287,7 @@ fn rename_overlay(ui: &mut Ui, editor: &Editor, state: &mut GraphState, layouts:
         return;
     };
     let Some(layout) = layouts.iter().find(|layout| layout.id == id) else {
-        state.renaming = None;
+        state.stop_renaming();
         return;
     };
     if state.rename_text.is_empty()
@@ -2292,9 +2299,13 @@ fn rename_overlay(ui: &mut Ui, editor: &Editor, state: &mut GraphState, layouts:
     let top_left = view.to_screen(origin, layout.rect.min + Vec2::new(46.0, 10.0));
     let size = Vec2::new(150.0 * view.zoom.max(0.6), 22.0);
     let rect = Rect::from_min_size(top_left, size);
-    let edit = egui::TextEdit::singleline(&mut state.rename_text).font(theme::semibold(13.0));
+    let edit = egui::TextEdit::singleline(&mut state.rename_text).font(theme::semibold(13.0)).id(egui::Id::new(("node-rename", id)));
     let response = ui.put(rect, edit);
-    response.request_focus();
+    // Enter and Escape let go of the keyboard; taking it back would keep
+    // the box open.
+    if !response.has_focus() && !response.lost_focus() {
+        response.request_focus();
+    }
     let Some(accepted) = crate::ui::widgets::popup_outcome(ui, &response) else {
         return;
     };
@@ -2303,8 +2314,7 @@ fn rename_overlay(ui: &mut Ui, editor: &Editor, state: &mut GraphState, layouts:
         let rename = GraphCommand::RenameNode { node: id, name };
         commands.push(Command::Graph(rename));
     }
-    state.renaming = None;
-    state.rename_text.clear();
+    state.stop_renaming();
 }
 
 #[cfg(test)]
@@ -2783,5 +2793,65 @@ mod tests {
         let (mountain_box, mountain_name, no_mask) = shown(mountain);
         assert!(no_mask.is_none());
         assert!(mountain_name.left() < mask_dot.right() - combine_box.left() + mountain_box.left());
+    }
+
+    #[test]
+    fn the_name_editor_takes_enter_and_escape() {
+        let mut editor = Editor::new(Document::new());
+        let mut state = GraphState::default();
+        let context = themed_context();
+        let none = egui::Modifiers::NONE;
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        let view = state.view();
+        let canvas_at = |x: f32, y: f32| {
+            let point = view.to_canvas(state.rect.min, Pos2::new(x, y));
+            [point.x, point.y]
+        };
+        let mountain = editor.document.add_node("Mountain", canvas_at(300.0, 200.0)).unwrap();
+        let blur = editor.document.add_node("Blur", canvas_at(700.0, 200.0)).unwrap();
+        let name = |editor: &Editor, node: i32| editor.document.node(node).unwrap().name.clone();
+        let (mountain_name, blur_name) = (name(&editor, mountain), name(&editor, blur));
+        let key = |key: Key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: none };
+        let typed = |text: &str| egui::Event::Text(text.to_string());
+
+        // F2 opens the box on the name; Enter takes what was typed.
+        state.renaming = Some(mountain);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        assert_eq!(state.rename_text, mountain_name);
+        graph_frame(&context, &mut editor, &mut state, vec![typed("Q")], none);
+        assert_eq!(state.rename_text, format!("{mountain_name}Q"));
+        let commands = graph_frame(&context, &mut editor, &mut state, vec![key(Key::Enter)], none);
+        let renamed = GraphCommand::RenameNode { node: mountain, name: format!("{mountain_name}Q") };
+        assert_eq!(commands, vec![Command::Graph(renamed)]);
+        assert_eq!(state.renaming, None);
+
+        // Escape closes it and keeps the name.
+        state.renaming = Some(blur);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        graph_frame(&context, &mut editor, &mut state, vec![typed("y")], none);
+        assert_eq!(state.rename_text, format!("{blur_name}y"));
+        let commands = graph_frame(&context, &mut editor, &mut state, vec![key(Key::Escape)], none);
+        assert!(commands.is_empty(), "{commands:?}");
+        assert_eq!(state.renaming, None);
+
+        // Closed by a click on the graph, it leaves no text for the next.
+        state.renaming = Some(mountain);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        graph_frame(&context, &mut editor, &mut state, vec![typed("Zed")], none);
+        let background = Pos2::new(600.0, 600.0);
+        let button = |pressed: bool| egui::Event::PointerButton { pos: background, button: PointerButton::Primary, pressed, modifiers: none };
+        graph_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(background)], none);
+        graph_frame(&context, &mut editor, &mut state, vec![button(true)], none);
+        graph_frame(&context, &mut editor, &mut state, vec![button(false)], none);
+        assert_eq!(state.renaming, None);
+        assert!(state.rename_text.is_empty());
+        state.renaming = Some(blur);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        assert_eq!(state.rename_text, blur_name);
+
+        // Nor does a reset.
+        state.reset();
+        assert_eq!(state.renaming, None);
+        assert!(state.rename_text.is_empty());
     }
 }
