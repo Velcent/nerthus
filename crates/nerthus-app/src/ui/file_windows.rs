@@ -434,6 +434,18 @@ fn example_button(ui: &mut Ui, ctx: &egui::Context, memory: &mut WindowMemory, p
     open_menu(&response, path, true, commands);
 }
 
+/// Export Macro's id.
+pub fn export_macro_id() -> Id {
+    Id::new("export-macro")
+}
+
+/// Closes Export Macro, keeping what its form says for next time.
+pub fn close_export_macro(editor: &mut Editor) {
+    if let Some(form) = editor.files.export_macro.take() {
+        form.remember(editor);
+    }
+}
+
 /// Export Macro (`ExportMacroDialog`): name, version, author, URL and
 /// description, the id they make, and whether to save a file and install
 /// the macro. Its button runs `BtnOK_OnClick`'s checks.
@@ -444,7 +456,7 @@ fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut 
     let mut open = true;
     let mut action = None;
     let mut window = egui::Window::new("Export Macro");
-    window = window.id(Id::new("export-macro"));
+    window = window.id(export_macro_id());
     window = window.collapsible(false);
     window = window.resizable(false);
     window = window.default_width(720.0);
@@ -519,8 +531,7 @@ fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut 
     });
     editor.files.export_macro = Some(form.clone());
     if !open || action == Some(false) {
-        form.remember(editor);
-        editor.files.export_macro = None;
+        close_export_macro(editor);
         return;
     }
     if action == Some(true) {

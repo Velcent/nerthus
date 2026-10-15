@@ -500,6 +500,8 @@ fn draw_editor(
     let floating = editor.user.options.viewport_floating();
     // An open menu takes its keys first.
     menu_keys::begin(ctx);
+    // Then Esc closes the tool window on top.
+    tool_commands::take_escape(ctx, editor, ui_state);
     // Modal dialogs keep the shell's keys from it while they show.
     if !tool_commands::modal_open(ctx, ui_state) {
         options_window::take_escape(ctx, &mut ui_state.options);
@@ -627,6 +629,8 @@ fn draw_editor(
         pending.push(Command::Tools(tool_commands::ToolCommand::ShowDocs(target.to_string())));
     }
     let settings_reset = tool_commands::show_windows(ctx, editor, ui_state, &mut pending);
+    // Everything is drawn: where the keyboard is, for next frame's Esc.
+    tool_window::note_keyboard(ctx);
     // Accepted options (or settings back to their defaults) reach the
     // interface and the view's mask gradient at once.
     if options_outcome.accepted || settings_reset {

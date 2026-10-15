@@ -230,6 +230,11 @@ fn free_name(folder: &Path, name: &str) -> PathBuf {
     }
 }
 
+/// The window's id.
+pub fn window_id() -> Id {
+    Id::new("artifact-explorer")
+}
+
 /// The window. Returns false once closed.
 pub fn show(ctx: &egui::Context, editor: &mut Editor, explorer: &mut ArtifactExplorer) -> bool {
     for artifact in &mut explorer.artifacts {
@@ -241,7 +246,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, explorer: &mut ArtifactExp
     let mut open = true;
     let mut close = false;
     let mut window = egui::Window::new("Artifact Explorer");
-    window = window.id(Id::new("artifact-explorer"));
+    window = window.id(window_id());
     window = window.collapsible(false);
     window = window.resizable(false);
     // As wide as its content, so that its margins match, or the screen less
@@ -417,7 +422,7 @@ mod tests {
             });
             output.drop_without_applying_deltas();
         }
-        let area = AreaState::load(context, Id::new("artifact-explorer")).filter(|area| area.size.is_some());
+        let area = AreaState::load(context, window_id()).filter(|area| area.size.is_some());
         area.map(|area| area.rect()).unwrap_or(Rect::NOTHING)
     }
 

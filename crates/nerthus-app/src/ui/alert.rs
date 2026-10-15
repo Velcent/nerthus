@@ -84,6 +84,11 @@ pub fn orphan_variables_alert(editor: &Editor) -> Option<Alert> {
     Some(Alert::new("Orphan Variables Detected", &message, AlertKind::Warning))
 }
 
+/// The alert's area: among the windows, without being one.
+pub fn area_id() -> Id {
+    Id::new("shell-alert")
+}
+
 /// Draws the alert over `row` (the graph row) and forgets it once gone.
 pub fn show(ctx: &egui::Context, row: Rect, alert: &mut Option<Alert>, animations: bool) {
     let Some(current) = alert.as_mut() else {
@@ -124,7 +129,7 @@ pub fn show(ctx: &egui::Context, row: Rect, alert: &mut Option<Alert>, animation
     let bar = Rect::from_min_size(Pos2::new(row.left() + MARGIN, row.bottom() - MARGIN - height), Vec2::new(width, height));
 
     let mut dismissed = false;
-    let area = egui::Area::new(Id::new("shell-alert")).fixed_pos(bar.min).order(egui::Order::Middle);
+    let area = egui::Area::new(area_id()).fixed_pos(bar.min).order(egui::Order::Middle);
     area.show(ctx, |ui| {
         ui.set_opacity(opacity);
         let painter = ui.painter();

@@ -75,6 +75,11 @@ pub enum DiagnosticsRequest {
     SettingsReset,
 }
 
+/// The window's id.
+pub fn window_id() -> Id {
+    Id::new("diagnostics")
+}
+
 /// The window. Returns whether it is still open, and a request.
 pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut DiagnosticsWindow) -> (bool, Option<DiagnosticsRequest>) {
     poll_benchmark(window);
@@ -85,7 +90,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut DiagnosticsWi
     let mut open = true;
     let mut close = false;
     let mut frame = egui::Window::new("Nerthus Diagnostics");
-    frame = frame.id(Id::new("diagnostics"));
+    frame = frame.id(window_id());
     frame = frame.collapsible(false);
     frame = frame.resizable(false);
     frame = frame.anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO);

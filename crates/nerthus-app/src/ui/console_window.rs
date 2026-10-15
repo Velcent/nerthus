@@ -196,13 +196,18 @@ impl ConsoleWindow {
 
 const CROCODILE: &str = "                     _.---._     .---.\n            __...---' .---. `---'-.   `.\n        .-''__.--' _.'( | )`.  `.  `._ :\n      .'__-'_ .--'' ._`---'_.-.  `.   `-`.\n             ~ -._ -._``---. -.    `-._   `.\n                  ~ -.._ _ _ _ ..-_ `.  `-._``--.._\n                               -~ -._  `-.  -. `-._``--.._.--''. \n                                    ~ ~-.__     -._  `-.__   `. `. \n                                          ~~ ~---...__ _    ._ .` `. \n                                                      ~  ~--.....--~ \n\n";
 
+/// The window's id.
+pub fn window_id() -> Id {
+    Id::new("debug-console")
+}
+
 /// The window (`Nerthus Debug Console`, 800 × 450). Returns false once closed.
 pub fn show(ctx: &egui::Context, console: &mut ConsoleWindow) -> bool {
     let mut open = true;
     let mut window = egui::Window::new("Nerthus Debug Console");
     window = window.collapsible(false);
     window = window.resizable(true);
-    window = tool_window::place(ctx, window, Id::new("debug-console"), Vec2::new(800.0, 450.0));
+    window = tool_window::place(ctx, window, window_id(), Vec2::new(800.0, 450.0));
     window = window.open(&mut open);
     window.show(ctx, |ui| {
         let font = theme::monospace(13.0);
