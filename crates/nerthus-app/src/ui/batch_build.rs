@@ -21,7 +21,7 @@ use crate::editor::Editor;
 use crate::theme;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::tool_window;
-use crate::ui::widgets::Tooltips;
+use crate::ui::widgets::{selectable_value, Tooltips};
 
 /// `noProfile`.
 const NO_PROFILE: &str = "Current Settings (No Profile)";
@@ -296,9 +296,9 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut BatchWindow, 
         combo = combo.selected_text(current);
         combo = combo.width(profiles.width());
         combo.show_ui(&mut profiles_ui, |ui| {
-            ui.selectable_value(&mut window.profile, 0, NO_PROFILE);
+            selectable_value(ui, &mut window.profile, 0, NO_PROFILE);
             for (index, name) in names.iter().enumerate() {
-                ui.selectable_value(&mut window.profile, index + 1, name.as_str());
+                selectable_value(ui, &mut window.profile, index + 1, name.as_str());
             }
         });
         tool_window::part(ui, "batch-adds", adds, Layout::right_to_left(Align::Center)).scope(|ui| {

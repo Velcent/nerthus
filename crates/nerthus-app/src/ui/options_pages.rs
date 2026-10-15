@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use crate::theme;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::options_window::OptionsTab;
-use crate::ui::widgets::Tooltips;
+use crate::ui::widgets::{selectable_label, Tooltips};
 use crate::user::{Preferences, UserOptions};
 
 /// A setting a page changes.
@@ -689,7 +689,7 @@ fn format_choice(ui: &mut Ui, copy: &mut OptionsCopy, member: &'static str, head
         combo.show_ui(ui, |ui| {
             for format in nerthus_export::FileFormat::ALL {
                 let name = format.name();
-                if ui.selectable_label(name == current, name).clicked() {
+                if selectable_label(ui, name == current, name).clicked() {
                     copy.set(setting, Value::String(name.to_string()));
                 }
             }

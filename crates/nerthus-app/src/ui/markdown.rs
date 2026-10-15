@@ -350,12 +350,13 @@ struct Marks {
 }
 
 /// The spans as one wrapped text, with the character ranges of their code
-/// and links.
+/// and links. Code has room for its plate's padding on both sides.
 fn layout_job(spans: &[Span], style: TextStyle, width: f32) -> (LayoutJob, Marks) {
     let mut job = LayoutJob::default();
     job.wrap.max_width = width;
     let mut marks = Marks::default();
     let mut characters = 0;
+    let mut after_code = false;
     for span in spans {
         let font: FontId = if span.code {
             theme::monospace(style.size - 1.0)
@@ -387,7 +388,21 @@ fn layout_job(spans: &[Span], style: TextStyle, width: f32) -> (LayoutJob, Marks
             marks.links.push((range, link.clone()));
         }
         characters += count;
-        job.append(&span.text, 0.0, format);
+        // The plate's padding before code, and after it before what follows.
+        let mut leading_space = 0.0;
+        if span.code {
+            leading_space += CODE_PADDING.x;
+        }
+        if after_code {
+            leading_space += CODE_PADDING.x;
+        }
+        job.append(&span.text, leading_space, format);
+        after_code = span.code;
+    }
+    // And after code that ends the text.
+    if after_code && let Some(last) = job.sections.last() {
+        let format = last.format.clone();
+        job.append("", CODE_PADDING.x, format);
     }
     (job, marks)
 }
@@ -462,12 +477,26 @@ fn paragraph(ui: &mut Ui, spans: &[Span], style: TextStyle, context: &mut DrawCo
     rect
 }
 
+/// The code's plates in the galley, padded. The layout leaves the padding
+/// clear but where a row wraps, which drops the space before its first
+/// glyph: there the plate stays within the text's column.
+fn padded_code_plates(galley: &Galley, marks: &Marks) -> Vec<Rect> {
+    let glyphs = glyph_rects(galley);
+    let right = galley.job.wrap.max_width.max(galley.size().x);
+    let mut plates = code_plates(&glyphs, &marks.code);
+    for plate in &mut plates {
+        *plate = plate.expand2(CODE_PADDING);
+        plate.min.x = plate.min.x.max(0.0);
+        plate.max.x = plate.max.x.min(right);
+    }
+    plates
+}
+
 /// The galley with its code's plates behind it.
 fn paint_text(ui: &Ui, origin: Pos2, galley: &Arc<Galley>, marks: &Marks, color: Color32) {
     if !marks.code.is_empty() {
-        let glyphs = glyph_rects(galley);
-        for plate in code_plates(&glyphs, &marks.code) {
-            let plate = plate.translate(origin.to_vec2()).expand2(CODE_PADDING);
+        for plate in padded_code_plates(galley, marks) {
+            let plate = plate.translate(origin.to_vec2());
             ui.painter().rect_filled(plate, 3.0, theme::TEXTBOX_BACKGROUND);
             ui.painter().rect_stroke(plate, 3.0, Stroke::new(1.0, theme::BUTTON_BORDER), egui::StrokeKind::Inside);
         }
@@ -548,18 +577,31 @@ fn code_block(ui: &mut Ui, code: &str) {
         ui.set_width(ui.available_width());
         let mut scroll = egui::ScrollArea::horizontal();
         scroll = scroll.id_salt(("code-block", code.len(), code.get(..code.len().min(32))));
-        scroll.show(ui, |ui| {
-            let mut text = code;
-            let mut field = egui::TextEdit::multiline(&mut text);
-            field = field.font(theme::monospace(TEXT_SIZE - 1.0));
-            field = field.text_color(theme::ACCENT_PRIMARY);
-            field = field.frame(egui::Frame::NONE);
-            field = field.desired_rows(1);
-            field = field.desired_width(f32::INFINITY);
-            ui.add(field);
-        });
+        scroll.show(ui, |ui| code_field(ui, code));
     });
     ui.add_space(PARAGRAPH_GAP);
+}
+
+/// The code selectable, its lines at their full length however narrow the
+/// room: a scroll area offers only its own width, and the field would wrap
+/// them to it.
+fn code_field(ui: &mut Ui, code: &str) -> egui::Response {
+    let font = theme::monospace(TEXT_SIZE - 1.0);
+    let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, _wrap_width: f32| {
+        let job = LayoutJob::simple(text.as_str().to_string(), font.clone(), theme::ACCENT_PRIMARY, f32::INFINITY);
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    };
+    let width = layouter(ui, &code, f32::INFINITY).size().x;
+    ui.set_width(width.max(ui.available_width()));
+    let mut text = code;
+    let mut field = egui::TextEdit::multiline(&mut text);
+    field = field.font(font.clone());
+    field = field.text_color(theme::ACCENT_PRIMARY);
+    field = field.frame(egui::Frame::NONE);
+    field = field.desired_rows(1);
+    field = field.desired_width(f32::INFINITY);
+    field = field.layouter(&mut layouter);
+    ui.add(field)
 }
 
 /// The columns' widths: each its text's width when all fit, else at least
@@ -728,5 +770,72 @@ mod tests {
             panic!("not a paragraph: {document:?}");
         };
         assert_eq!(plain(spans), "a\nb  c");
+    }
+
+    /// Runs `check` in a frame with the app's fonts.
+    fn with_ui(check: impl FnMut(&mut Ui)) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let output = context.run_ui(egui::RawInput::default(), check);
+        output.drop_without_applying_deltas();
+    }
+
+    /// The first paragraph of `markdown` laid out at `width`, with its marks.
+    fn laid_out(ui: &Ui, markdown: &str, width: f32) -> (Arc<Galley>, Marks) {
+        let document = parse(markdown);
+        let Block::Paragraph(spans) = &document.blocks[0] else {
+            panic!("not a paragraph: {document:?}");
+        };
+        let style = TextStyle { size: TEXT_SIZE, color: theme::LABEL_DEFAULT, bold: false };
+        let (job, marks) = layout_job(spans, style, width);
+        (ui.fonts_mut(|fonts| fonts.layout_job(job)), marks)
+    }
+
+    #[test]
+    fn code_plates_keep_clear_of_the_text_beside_them() {
+        // What's New's and the command-line page's code, with its brackets
+        // and the comma between two options.
+        let markdown = "`nerthus-build build <project> [options]` saves `.terrain` projects (`report.txt` and `report.json`): `-r`, `--region` or `-p`, `--profile`";
+        with_ui(|ui| {
+            // On one row, then wrapped onto more and more.
+            for width in [2000.0, 300.0, 120.0] {
+                let (galley, marks) = laid_out(ui, markdown, width);
+                let glyphs = glyph_rects(&galley);
+                let characters: Vec<char> = galley.job.text.chars().collect();
+                for plate in padded_code_plates(&galley, &marks) {
+                    assert!(0.0 <= plate.left() && plate.right() <= width, "{plate:?} leaves the column at {width}");
+                    for (character, glyph) in &glyphs {
+                        let is_code = marks.code.iter().any(|range| range.contains(character));
+                        let same_row = (glyph.center().y - plate.center().y).abs() < 1.0;
+                        // Within the rounding of the glyphs to pixels.
+                        let overlap = plate.right().min(glyph.right()) - plate.left().max(glyph.left());
+                        assert!(is_code || !same_row || overlap <= 1.0, "a plate covers {:?} by {overlap} at {width}", characters[*character]);
+                    }
+                }
+            }
+            // The paragraph's first code starts past its plate's padding, so
+            // the plate starts at the text's column.
+            let (galley, _) = laid_out(ui, markdown, 2000.0);
+            assert!(glyph_rects(&galley)[0].1.left() >= CODE_PADDING.x - 0.5);
+        });
+    }
+
+    #[test]
+    fn code_keeps_its_long_lines_whole() {
+        let words: Vec<String> = (0..30).map(|column| format!("column{column}")).collect();
+        let line = words.join(" ");
+        let code = format!("{line}\nshort");
+        with_ui(|ui| {
+            ui.set_max_width(300.0);
+            let font = theme::monospace(TEXT_SIZE - 1.0);
+            let line_width = ui.painter().layout_no_wrap(line.clone(), font.clone(), Color32::WHITE).size().x;
+            let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+            assert!(line_width > 600.0);
+            // As wide as the long line, for the scroll area to scroll, and
+            // two rows high.
+            let response = code_field(ui, &code);
+            assert!(response.rect.width() >= line_width, "{} for a line {line_width} wide", response.rect.width());
+            assert!(response.rect.height() < 2.5 * row_height, "{} for rows {row_height} high", response.rect.height());
+        });
     }
 }
