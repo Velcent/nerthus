@@ -18,7 +18,7 @@ use crate::theme;
 use crate::ui::bound_variable::{self, Bound};
 use crate::ui::commands::Command;
 use crate::ui::editors::{self, palette_color, Edit, EditorContext};
-use crate::ui::graph_canvas::{node_color, node_icon};
+use crate::ui::graph_canvas::{elided_galley, node_color, node_icon};
 use crate::ui::modifier_list::modifier_list;
 use crate::ui::node_states::{self, StateAction};
 use crate::ui::tool_commands::ToolCommand;
@@ -486,39 +486,52 @@ fn header_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, commands: &mut Vec<C
     let inner = rect.shrink(1.0).shrink2(Vec2::new(padding_across, padding_down));
     let node = editor.active_node().and_then(|id| editor.document.node(id));
 
-    // `mnuIcon` (margin 8, 0, 4, 0), `mnuText` (margin 4, 3, 4, 4) and the
-    // 8px `chevron-down-right` (margin 8, 1, 1, 1) at the bottom.
-    let (icon_name, icon_color, name) = match node {
-        // `mnuText`: the name, and the type when the name is not it.
-        Some(node) if node.name == node.type_name => (node_icon(&node.type_name), node_color(node), node.name.clone()),
-        Some(node) => (node_icon(&node.type_name), node_color(node), format!("{} ({})", node.name, node.type_name)),
-        None => ("square-rounded".to_string(), theme::ICON_DEFAULT, "(Select a node)".to_string()),
-    };
-    let icon_rect = Rect::from_min_size(Pos2::new(inner.left() + 8.0, inner.center().y - 8.0), Vec2::splat(icons::DEFAULT_SIZE));
-    icons::paint(ui, icon_rect, &icon_name, icon_color);
-    let name_galley = ui.painter().layout_no_wrap(name, theme::interface(11.0), theme::MENU_FOREGROUND);
-    let name_rect = Rect::from_min_size(Pos2::new(icon_rect.right() + 8.0, inner.center().y - name_galley.size().y / 2.0), name_galley.size());
-    ui.painter().galley(name_rect.min, name_galley, theme::MENU_FOREGROUND);
-    let arrow_rect = Rect::from_min_size(Pos2::new(name_rect.right() + 4.0 + 8.0, inner.bottom() - 1.0 - 8.0 - 4.0), Vec2::splat(8.0));
-    icons::paint(ui, arrow_rect, "chevron-down-right", theme::ICON_DEFAULT);
-    if let Some(node) = node {
-        let spec = Catalogue::get().node(&node.type_name);
-        let family = spec.and_then(|spec| spec.family.clone()).unwrap_or_default();
-        let description = spec.and_then(|spec| spec.description.clone()).unwrap_or_default();
-        let name_area = Rect::from_min_max(icon_rect.min, Pos2::new(arrow_rect.right(), inner.bottom()));
-        let response = ui.interact(name_area, ui.id().with("family-menu"), Sense::click());
-        let response = response.tooltip(format!("{family}\n\n{description}"));
-        crate::ui::graph_popups::family_menu(&response, editor, node, commands);
-    }
-
-    let has_node = node.is_some();
-    let intent = node.and_then(|node| node.base.get("RenderIntentOverride")).and_then(Value::as_str).unwrap_or("Default").to_string();
     // Two icon menus docked right, each `Toolbar.ButtonSize` wide with
     // `Toolbar.MenuMargin` either side.
     let button = sizes.toolbar_button;
     let menu_margin = sizes.toolbar_menu_margin;
     let menu_rect = Rect::from_center_size(Pos2::new(inner.right() - (button / 2.0 + menu_margin), inner.center().y), Vec2::splat(button));
     let presets_rect = menu_rect.translate(Vec2::new(-(button + 2.0 * menu_margin), 0.0));
+
+    // `mnuIcon` (margin 8, 0, 4, 0), `mnuText` (margin 4, 3, 4, 4) and the
+    // 8px `chevron-down-right` (margin 8, 1, 1, 1) at the bottom, in what
+    // the menus leave of the frame: the name is cut with "…"
+    // (`TextTrimming.CharacterEllipsis`) to keep the chevron clear of the
+    // presets menu, and nothing of them is drawn past it.
+    let (icon_name, icon_color, name) = match node {
+        // `mnuText`: the name, and the type when the name is not it.
+        Some(node) if node.name == node.type_name => (node_icon(&node.type_name), node_color(node), node.name.clone()),
+        Some(node) => (node_icon(&node.type_name), node_color(node), format!("{} ({})", node.name, node.type_name)),
+        None => ("square-rounded".to_string(), theme::ICON_DEFAULT, "(Select a node)".to_string()),
+    };
+    let frame = rect.shrink(1.0);
+    let family_rect = Rect::from_min_max(frame.min, Pos2::new((presets_rect.left() - menu_margin).max(frame.left()), frame.bottom()));
+    let mut family_ui = ui.new_child(UiBuilder::new().max_rect(family_rect));
+    family_ui.shrink_clip_rect(family_rect);
+    let icon_rect = Rect::from_min_size(Pos2::new(inner.left() + 8.0, inner.center().y - 8.0), Vec2::splat(icons::DEFAULT_SIZE));
+    icons::paint(&family_ui, icon_rect, &icon_name, icon_color);
+    let name_left = icon_rect.right() + 8.0;
+    let name_width = (family_rect.right() - (4.0 + 8.0 + 8.0 + 1.0) - name_left).max(0.0);
+    let name_galley = elided_galley(family_ui.painter(), &name, theme::interface(11.0), theme::MENU_FOREGROUND, name_width);
+    let elided = name_galley.elided;
+    let name_rect = Rect::from_min_size(Pos2::new(name_left, inner.center().y - name_galley.size().y / 2.0), name_galley.size());
+    family_ui.painter().galley(name_rect.min, name_galley, theme::MENU_FOREGROUND);
+    let arrow_rect = Rect::from_min_size(Pos2::new(name_rect.right() + 4.0 + 8.0, inner.bottom() - 1.0 - 8.0 - 4.0), Vec2::splat(8.0));
+    icons::paint(&family_ui, arrow_rect, "chevron-down-right", theme::ICON_DEFAULT);
+    if let Some(node) = node {
+        let spec = Catalogue::get().node(&node.type_name);
+        let family = spec.and_then(|spec| spec.family.clone()).unwrap_or_default();
+        let description = spec.and_then(|spec| spec.description.clone()).unwrap_or_default();
+        let name_area = Rect::from_min_max(icon_rect.min, Pos2::new(arrow_rect.right(), inner.bottom())).intersect(family_rect);
+        let response = ui.interact(name_area, ui.id().with("family-menu"), Sense::click());
+        // The whole name leads the tooltip when it is cut.
+        let tooltip = if elided { format!("{name}\n\n{family}\n\n{description}") } else { format!("{family}\n\n{description}") };
+        let response = response.tooltip(tooltip);
+        crate::ui::graph_popups::family_menu(&response, editor, node, commands);
+    }
+
+    let has_node = node.is_some();
+    let intent = node.and_then(|node| node.base.get("RenderIntentOverride")).and_then(Value::as_str).unwrap_or("Default").to_string();
     let saved_state = node_states::has_saved_state(ui);
     let mut menu_ui = ui.new_child(UiBuilder::new().max_rect(menu_rect));
     icon_menu(&mut menu_ui, "menu", "Node", None, |ui| {
