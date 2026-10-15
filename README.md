@@ -113,7 +113,7 @@ it.
 
 The editor also runs in a browser with WebGL 2. The Web workflow builds it
 for every pull request and publishes main's with GitHub Pages, at
-<https://danemadsen.github.io/nerthus/>.
+<https://nerthus.app>.
 
 To build it yourself, add the WebAssembly target and the `wasm-bindgen`
 command of the version in `Cargo.lock`, then run the build script, which
