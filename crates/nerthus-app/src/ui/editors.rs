@@ -1114,9 +1114,17 @@ fn header_label(ui: &Ui, column: Rect, text: &str, color: Color32) {
     ui.painter().galley(position, galley, color);
 }
 
+/// The seed box's header column (the name's 80 and its margin 8).
+const SEED_COLUMN: f32 = 88.0;
+
+/// From the seed button's left to its seed: padding 4, then the dice (18,
+/// margin 4) and the seed's margin 6.
+const SEED_TEXT_INSET: f32 = 4.0 + 4.0 + 18.0 + 6.0;
+
 /// `RandomBox`: the name (80 wide), a button showing the seed that draws a
 /// new one (`Button-Random`, tagged `dice`) or, right-clicked, lets the
-/// seed be typed, and the seed menu.
+/// seed be typed, and the seed menu. A seed too long for the button is
+/// trimmed, and shown whole in the button's tooltip.
 fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     let mut edit = Edit::None;
     let width = ui.available_width();
@@ -1124,12 +1132,16 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     // `dock` keeps 8 clear on the right.
     let dock = Rect::from_min_max(rect.min, Pos2::new(rect.right() - 8.0, rect.bottom()));
 
-    let header = Rect::from_min_size(dock.min, Vec2::new(88.0, dock.height()));
-    header_label(ui, header, label, theme::LABEL_DEFAULT);
-
     // `PART_MenuButton` (`Button-IconOnly`, 18 + 6 a side, margin 4).
     let menu_rect = Rect::from_min_size(Pos2::new(dock.right() - 4.0 - 30.0, dock.top()), Vec2::new(30.0, dock.height()));
-    let button_rect = Rect::from_min_max(Pos2::new(header.right() + 8.0, dock.top()), Pos2::new(menu_rect.left() - 4.0, dock.bottom()));
+    let button_right = menu_rect.left() - 4.0;
+
+    let shown = seed.to_string();
+    let column = seed_column(ui, label, &shown, button_right - dock.left());
+    let header = Rect::from_min_size(dock.min, Vec2::new(column, dock.height()));
+    header_label(ui, header, label, theme::LABEL_DEFAULT);
+
+    let button_rect = Rect::from_min_max(Pos2::new(header.right() + 8.0, dock.top()), Pos2::new(button_right, dock.bottom()));
     let button = ui.interact(button_rect, id.with("seed-button"), Sense::click());
     let hovered = button.hovered();
     let fill = if hovered { theme::BUTTON_HOVER } else { theme::ICON_DARK };
@@ -1139,8 +1151,10 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     let icon_rect = Rect::from_min_size(Pos2::new(button_rect.left() + 4.0 + 4.0, button_rect.center().y - 9.0), Vec2::splat(18.0));
     icons::paint(ui, icon_rect, "dice", theme::ACCENT_MUTED_GRAY);
     let text_color = if hovered { theme::ACCENT_MUTED_GREEN } else { theme::LABEL_DEFAULT };
-    let seed_galley = ui.painter().layout_no_wrap(seed.to_string(), theme::monospace(12.0), text_color);
-    let seed_position = Pos2::new(icon_rect.right() + 6.0, button_rect.center().y - seed_galley.size().y / 2.0 + 0.5);
+    let seed_left = button_rect.left() + SEED_TEXT_INSET;
+    let seed_galley = fitted_line(ui, &shown, theme::monospace(12.0), text_color, button_rect.right() - 4.0 - seed_left);
+    let trimmed = seed_galley.elided;
+    let seed_position = Pos2::new(seed_left, button_rect.center().y - seed_galley.size().y / 2.0 + 0.5);
     // The button clips what does not fit (WPF's layout clip).
     let inside_button = button_rect.shrink(1.5);
     ui.painter().with_clip_rect(inside_button).galley(seed_position, seed_galley, text_color);
@@ -1155,9 +1169,9 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     // button, 32 wider (64 at least), its text taken as a formula.
     let typing_id = id.with("seed-typing");
     if button.secondary_clicked() && enabled {
-        slider_popups::open_typing(ui.ctx(), typing_id, seed.to_string());
+        slider_popups::open_typing(ui.ctx(), typing_id, shown.clone());
     }
-    let button = button.tooltip("New seed");
+    let button = if trimmed { button.tooltip(format!("{shown}\n\nNew seed")) } else { button.tooltip("New seed") };
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
         top_left: Pos2::new(button.rect.left(), button.rect.top() - 4.0 * popup_scale),
@@ -1175,6 +1189,18 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
         }
     });
     edit
+}
+
+/// The seed box's header column, `span` being from its left to the seed
+/// button's right: 88, narrowed for a seed that would not fit the button,
+/// but never past what the name needs.
+fn seed_column(ui: &Ui, label: &str, seed: &str, span: f32) -> f32 {
+    let name_width = ui.painter().layout_no_wrap(label.to_string(), theme::interface(12.0), Color32::WHITE).size().x;
+    let seed_width = ui.painter().layout_no_wrap(seed.to_string(), theme::monospace(12.0), Color32::WHITE).size().x;
+    // The gap of 8 and the button: the seed and the padding 4 after it.
+    let button = 8.0 + SEED_TEXT_INSET + seed_width.ceil() + 4.0;
+    let least = (name_width.ceil() + 8.0).min(SEED_COLUMN);
+    SEED_COLUMN.min(span - button).max(least)
 }
 
 /// Notes a seed the dice drew in the box's `LocalMemory`.
@@ -2139,6 +2165,40 @@ mod tests {
         let (column, cut) = toggle_row("Enforce Linear Gamma", 120.0);
         assert_eq!(column, 120.0 - 26.0 - 3.0);
         assert_eq!(cut.as_deref(), Some("Enforce Linear Gamma"));
+    }
+
+    #[test]
+    fn a_seed_with_no_room_is_trimmed_and_whole_in_its_tooltip() {
+        let context = themed_context();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
+        let frame = |width: f32, events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut output = context.run_ui(input, |ui| {
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 30.0))));
+                seed_box(&mut row, Id::new("seed-test"), "Seed", 1999999);
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            let texts = shapes.into_iter().filter_map(|clipped| match clipped.shape {
+                egui::Shape::Text(text) => Some((text, clipped.clip_rect)),
+                _ => None,
+            });
+            texts.collect::<Vec<_>>()
+        };
+        let seed_in = |shown: &[(egui::epaint::TextShape, Rect)]| shown.iter().find(|(text, _)| text.galley.text() == "1999999").cloned().expect("the seed is drawn");
+        // With room the seed shows whole; the name gives up what it does
+        // not need for it.
+        let (whole, _) = seed_in(&frame(200.0, Vec::new()));
+        assert!(!whole.galley.elided);
+        // Without, it ends in an ellipsis inside the button.
+        let (trimmed, clip) = seed_in(&frame(150.0, Vec::new()));
+        assert_eq!(trimmed.galley.rows[0].glyphs.last().map(|glyph| glyph.chr), Some('…'));
+        assert!(clip.contains_rect(trimmed.visual_bounding_rect()), "{:?} leaves {clip:?}", trimmed.visual_bounding_rect());
+        // The tooltip says what it is.
+        frame(150.0, vec![egui::Event::PointerMoved(trimmed.visual_bounding_rect().center())]);
+        let tooltip = "1999999\n\nNew seed";
+        let shows = (0..120).any(|_| frame(150.0, Vec::new()).iter().any(|(text, _)| text.galley.text() == tooltip));
+        assert!(shows, "no tooltip says {tooltip:?}");
     }
 
     #[test]
