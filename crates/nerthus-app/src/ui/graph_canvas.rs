@@ -1723,8 +1723,10 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
     let modifiers = ui.input(|input| input.modifiers);
     for (index, response) in nodes {
         let id = layouts[*index].id;
+        // Beside the pointer, not under the node's corner, which at a
+        // high zoom is far off or past the graph's edge.
         let tooltip = node_tooltip(editor, id);
-        let response = response.clone().on_hover_text(tooltip);
+        let response = response.clone().on_hover_text_at_pointer(tooltip);
         if response.clicked() {
             if modifiers.command || modifiers.shift {
                 editor.toggle_selected(id);
@@ -2885,6 +2887,70 @@ mod tests {
         frame(vec![egui::Event::PointerMoved(hidden_input)]);
         assert!(frame(vec![button(hidden_input, false)]).is_empty());
         assert!(state.drag.is_none() && state.popup.is_none());
+    }
+
+    /// Rests the pointer at `point` until the tooltip saying `text` shows:
+    /// where it shows.
+    fn tooltip_at(context: &egui::Context, editor: &mut Editor, state: &mut GraphState, point: Pos2, text: &str) -> Rect {
+        frame_amid_panels(context, editor, state, vec![egui::Event::PointerMoved(point)]);
+        for _ in 0..120 {
+            let (shapes, _, _) = frame_amid_panels(context, editor, state, Vec::new());
+            let tooltips: Vec<Rect> = context.memory(|memory| {
+                let layers = memory.areas().visible_layer_ids().into_iter().filter(|layer| layer.order == egui::Order::Tooltip);
+                layers.filter_map(|layer| memory.area_rect(layer.id)).collect()
+            });
+            let texts = shapes.iter().filter_map(|clipped| match &clipped.shape {
+                Shape::Text(shape) if shape.galley.text() == text => Some(clipped.shape.visual_bounding_rect()),
+                _ => None,
+            });
+            let shown = texts.into_iter().find_map(|bounds| tooltips.iter().copied().find(|tooltip| tooltip.contains_rect(bounds)));
+            if let Some(tooltip) = shown {
+                return tooltip;
+            }
+        }
+        panic!("no tooltip says {text:?}");
+    }
+
+    #[test]
+    fn tooltips_show_beside_the_pointer() {
+        let mut editor = Editor::new(Document::new());
+        let mut state = GraphState::default();
+        let context = themed_context();
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+
+        // At the closest zoom an Erosion node, a group and an icon note are
+        // each hundreds of points across.
+        state.view_mut().zoom = MAX_ZOOM;
+        let view = state.view();
+        let canvas_at = |x: f32, y: f32| {
+            let point = view.to_canvas(GRAPH.min, Pos2::new(x, y));
+            [point.x, point.y]
+        };
+        let erosion = editor.document.add_node("ErosionPro", canvas_at(220.0, 310.0)).unwrap();
+        let group = editor.document.add_group(&[], canvas_at(720.0, 320.0), [170.0, 100.0], 0);
+        let note = editor.document.add_note(canvas_at(760.0, 560.0), 0);
+        editor.document.toggle_note_type(note);
+        editor.document.set_note_text(note, "Carve the valley first");
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+
+        // Rested on the node's middle, the group header's right end and the
+        // note's lower right, far from their lower left corners.
+        let view = state.view();
+        let node = editor.document.node(erosion).unwrap();
+        let node_box = view.rect_to_screen(GRAPH.min, layout_node(node, editor.user.options.default_node_size()).rect);
+        let group_data = editor.document.group(group).unwrap();
+        let header = view.rect_to_screen(GRAPH.min, group_data.bounds());
+        let note_box = view.rect_to_screen(GRAPH.min, crate::ui::graph_notes::note_rect(&editor, 0, note).unwrap());
+        let rests = [
+            ("the node", node_box.center(), node_tooltip(&editor, erosion)),
+            ("the group", Pos2::new(header.right() - 20.0, header.top() + 20.0), group_data.name.clone()),
+            ("the note", note_box.max - Vec2::splat(10.0), "Carve the valley first".to_string()),
+        ];
+        for (element, point, text) in rests {
+            assert!(GRAPH.contains(point), "{element} rests outside the graph");
+            let tooltip = tooltip_at(&context, &mut editor, &mut state, point, &text);
+            assert!(tooltip.distance_to_pos(point) <= 16.0, "{element}'s tooltip {tooltip:?} is far from the pointer {point:?}");
+        }
     }
 
     #[test]

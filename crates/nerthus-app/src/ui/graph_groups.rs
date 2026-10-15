@@ -100,7 +100,7 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         let header = Rect::from_min_size(screen.min, Vec2::new(screen.width(), header_height));
         let header_response = ui.interact(header, ui.id().with(("group-header", group.id)), Sense::click_and_drag());
         let tooltip_text = group.name.clone();
-        let header_response = header_response.on_hover_text(tooltip_text);
+        let header_response = header_response.on_hover_text_at_pointer(tooltip_text);
         if header_response.clicked() {
             select_group(editor, state, group.id, modifiers.command || modifiers.shift);
         }

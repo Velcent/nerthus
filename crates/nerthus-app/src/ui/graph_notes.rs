@@ -140,7 +140,7 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         }
         draw(ui, painter, note, screen, zoom, state.selected_note == Some(note.id));
         let response = ui.interact(screen, ui.id().with(("note", note.id)), Sense::click_and_drag());
-        let response = if note.icon_only && !note.markdown.is_empty() { response.on_hover_text(note.markdown.clone()) } else { response };
+        let response = if note.icon_only && !note.markdown.is_empty() { response.on_hover_text_at_pointer(note.markdown.clone()) } else { response };
         let thumb = if note.icon_only {
             None
         } else {
