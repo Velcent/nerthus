@@ -4,7 +4,9 @@
 //! theme's sizes (`Size.Default.xaml`, or `Size.Compact.xaml` with Compact
 //! Interface).
 
-use egui::{Align, Color32, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
+use std::sync::Arc;
+
+use egui::{Align, Color32, FontId, Galley, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use nerthus_engine::json::f32_value;
 use nerthus_engine::{Catalogue, ParameterSpec, StateOverride};
 use serde_json::Value;
@@ -55,6 +57,24 @@ const PANEL_BUTTON_MARGIN: Vec2 = Vec2::new(16.0, 8.0);
 /// and the box's height when the text fits in less.
 const NOTICE_PADDING: f32 = 6.0;
 const NOTICE_MIN_HEIGHT: f32 = 40.0;
+/// A note with links on its right (`InfoPortAdd`, `InfoHeightRef`): its
+/// content's inset (across, down), the gap between its message and its
+/// links, and the least the message wraps in beside them; with less it
+/// goes above them.
+const NOTE_PADDING: Vec2 = Vec2::new(6.0, 4.0);
+const NOTE_GAP: f32 = 8.0;
+const NOTE_MIN_MESSAGE: f32 = 80.0;
+/// The port note: its height when its content fits in less, its close
+/// button, and its "More Info" link (`Button-Link`, padding 2, 4 before
+/// the close button).
+const PORT_NOTE_HEIGHT: f32 = 30.0;
+const PORT_NOTE_CLOSE: f32 = 16.0;
+const PORT_NOTE_LINK_PADDING: Vec2 = Vec2::splat(2.0);
+const PORT_NOTE_LINK_GAP: f32 = 4.0;
+/// The Height note: its height when its content fits in less, and its
+/// link's padding.
+const HEIGHT_NOTE_HEIGHT: f32 = 26.0;
+const HEIGHT_NOTE_LINK_PADDING: Vec2 = Vec2::new(4.0, 2.0);
 
 /// The modifier toggles: icon, tooltip, modifier type, their gaps (left
 /// margins in `ModifierStack`) and accent (`Accent-Muted-Green`, else the
@@ -134,8 +154,8 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
     let port_note_id = ui.id().with("port-note-dismissed");
     let port_note_dismissed: bool = ui.data(|data| data.get_temp(port_note_id)).unwrap_or(false);
     if can_add_ports && !port_note_dismissed {
-        let note_rect = Rect::from_min_max(Pos2::new(body.left() + 16.0, body.bottom() - 4.0 - 30.0), Pos2::new(body.right() - 16.0, body.bottom() - 4.0));
-        match port_note(ui, note_rect) {
+        let (note_rect, click) = port_note(ui, Pos2::new(body.left() + 16.0, body.bottom() - 4.0), (body.width() - 32.0).max(0.0));
+        match click {
             Some(PortNoteClick::Dismiss) => {
                 ui.data_mut(|data| data.insert_temp(port_note_id, true));
             }
@@ -148,8 +168,8 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
     }
     let needs_height = editor.document.node(node_id).is_some_and(node_states::needs_height);
     if needs_height {
-        let note_rect = Rect::from_min_size(body.min + Vec2::new(16.0, 4.0), Vec2::new(body.width() - 32.0, 26.0));
-        if height_note(ui, note_rect) {
+        let (note_rect, clicked) = height_note(ui, body.min + Vec2::new(16.0, 4.0), (body.width() - 32.0).max(0.0));
+        if clicked {
             actions.push(StateAction::ConnectHeight);
         }
         body.min.y = note_rect.bottom() + 4.0;
@@ -318,54 +338,109 @@ enum PortNoteClick {
     MoreInfo,
 }
 
-/// `InfoPortAdd`: the node can add inputs; its close button dismisses
-/// it, "More Info" opens the documentation about adding ports.
-fn port_note(ui: &mut Ui, rect: Rect) -> Option<PortNoteClick> {
-    ui.painter().rect_filled(rect, 4.0, theme::ACCENT_TRANSPARENT_BLUE);
-    ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.5, theme::ACCENT_STRONG_BLUE), egui::StrokeKind::Inside);
-    let builder = UiBuilder::new().max_rect(rect.shrink2(Vec2::new(6.0, 2.0))).layout(Layout::left_to_right(Align::Center));
-    let mut row = ui.new_child(builder);
-    let text = RichText::new("This node can add additional input ports.").font(theme::interface(10.0)).color(theme::LABEL_EMPHASIS);
-    row.label(text);
-    let mut clicked = None;
-    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        let (close_rect, close) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
-        let color = if close.hovered() { theme::LABEL_EMPHASIS } else { theme::BUTTON_BACKGROUND };
-        icons::paint(ui, close_rect.shrink(2.0), "x", color);
-        if close.clicked() {
-            clicked = Some(PortNoteClick::Dismiss);
-        }
-        // `Button-Link`, padding 2, 4 before the close button.
-        ui.add_space(4.0);
-        if link_button(ui, "More Info", theme::interface(12.0), Vec2::splat(2.0)).clicked() {
-            clicked = Some(PortNoteClick::MoreInfo);
-        }
-    });
-    clicked
+/// Where a note's parts go (`InfoPortAdd`, `InfoHeightRef`), from its
+/// top left: the message wrapped beside the links on its right, or above
+/// them when that leaves it less than `NOTE_MIN_MESSAGE` across, and the
+/// note as high as both and `NOTE_PADDING` (at least its least height).
+struct NoteLayout {
+    size: Vec2,
+    galley: Arc<Galley>,
+    message: Rect,
+    links: Rect,
 }
 
-/// `InfoHeightRef`: a green note that a Height connection is needed, with
-/// its "Connect for me!" link (10 semibold, `Accent-Bright`) on the right.
-/// True when the link is clicked.
-fn height_note(ui: &mut Ui, rect: Rect) -> bool {
-    ui.painter().rect_filled(rect, 4.0, theme::ACCENT_TRANSPARENT_GREEN);
-    ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.5, theme::ACCENT_STRONG_GREEN), egui::StrokeKind::Inside);
-    let builder = UiBuilder::new().max_rect(rect.shrink2(Vec2::new(6.0, 2.0))).layout(Layout::left_to_right(Align::Center));
+/// `text` in `font` laid out in a note `width` wide whose links take
+/// `links` on the right.
+fn note_layout(ui: &Ui, text: &str, font: FontId, width: f32, links: Vec2, min_height: f32) -> NoteLayout {
+    let inner_width = (width - 2.0 * NOTE_PADDING.x).max(0.0);
+    let beside = inner_width - links.x - NOTE_GAP;
+    let stacked = beside < NOTE_MIN_MESSAGE;
+    // Whole points: egui rounds the wrap width to them, which could
+    // otherwise take the message half a point into the gap.
+    let wrap_width = if stacked { inner_width } else { beside }.floor();
+    let galley = ui.painter().layout(text.to_string(), font, theme::LABEL_EMPHASIS, wrap_width);
+    let message_size = galley.size();
+    let content = if stacked { message_size.y + NOTE_PADDING.y + links.y } else { message_size.y.max(links.y) };
+    let size = Vec2::new(width, (content + 2.0 * NOTE_PADDING.y).max(min_height));
+    let inner = Rect::from_min_size(Pos2::ZERO, size).shrink2(NOTE_PADDING);
+    let (message, links) = if stacked {
+        // The message at the top, the links under it on the right.
+        let message = Rect::from_min_size(inner.min, message_size);
+        (message, Rect::from_min_size(Pos2::new(inner.right() - links.x, inner.bottom() - links.y), links))
+    } else {
+        let message = Rect::from_min_size(Pos2::new(inner.left(), inner.center().y - message_size.y / 2.0), message_size);
+        (message, Rect::from_min_size(Pos2::new(inner.right() - links.x, inner.center().y - links.y / 2.0), links))
+    };
+    NoteLayout { size, galley, message, links }
+}
+
+/// Paints a note laid out as `layout` from `top_left`: the box (`fill`,
+/// a 1.5 `border`) and its message. Returns the box and where its links
+/// go.
+fn paint_note(ui: &Ui, top_left: Pos2, layout: NoteLayout, fill: Color32, border: Color32) -> (Rect, Rect) {
+    let offset = top_left.to_vec2();
+    let rect = Rect::from_min_size(top_left, layout.size);
+    ui.painter().rect_filled(rect, 4.0, fill);
+    ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.5, border), StrokeKind::Inside);
+    ui.painter().galley(layout.message.min + offset, layout.galley, theme::LABEL_EMPHASIS);
+    (rect, layout.links.translate(offset))
+}
+
+/// The port note `width` wide: its close button and "More Info" link on
+/// the right.
+fn port_note_layout(ui: &Ui, width: f32) -> NoteLayout {
+    let link = ui.painter().layout_no_wrap("More Info".to_string(), theme::interface(12.0), theme::ACCENT_BLUE).size() + 2.0 * PORT_NOTE_LINK_PADDING;
+    let links = Vec2::new(link.x + PORT_NOTE_LINK_GAP + PORT_NOTE_CLOSE, link.y.max(PORT_NOTE_CLOSE));
+    note_layout(ui, "This node can add additional input ports.", theme::interface(10.0), width, links, PORT_NOTE_HEIGHT)
+}
+
+/// `InfoPortAdd`: the node can add inputs, in a note `width` wide that
+/// ends at `bottom_left`; its close button dismisses it, "More Info" opens
+/// the documentation about adding ports. Returns the note and what was
+/// clicked.
+fn port_note(ui: &mut Ui, bottom_left: Pos2, width: f32) -> (Rect, Option<PortNoteClick>) {
+    let layout = port_note_layout(ui, width);
+    let top_left = bottom_left - Vec2::new(0.0, layout.size.y);
+    let (rect, links) = paint_note(ui, top_left, layout, theme::ACCENT_TRANSPARENT_BLUE, theme::ACCENT_STRONG_BLUE);
+    let builder = UiBuilder::new().max_rect(links).layout(Layout::right_to_left(Align::Center));
     let mut row = ui.new_child(builder);
-    let text = RichText::new("A Height connection is required.").font(theme::interface(9.0)).color(theme::LABEL_EMPHASIS);
-    row.label(text);
-    let mut clicked = false;
-    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        let link_galley = ui.painter().layout_no_wrap("Connect for me!".to_string(), theme::semibold(10.0), theme::ACCENT_BRIGHT);
-        let (link_rect, link) = ui.allocate_exact_size(link_galley.size() + Vec2::new(8.0, 4.0), Sense::click());
-        let color = if link.hovered() { theme::LABEL_EMPHASIS } else { theme::ACCENT_BRIGHT };
-        ui.painter().galley(link_rect.min + Vec2::new(4.0, 2.0), link_galley, color);
-        if link.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        clicked = link.clicked();
-    });
-    clicked
+    row.spacing_mut().item_spacing.x = 0.0;
+    let mut clicked = None;
+    let (close_rect, close) = row.allocate_exact_size(Vec2::splat(PORT_NOTE_CLOSE), Sense::click());
+    let color = if close.hovered() { theme::LABEL_EMPHASIS } else { theme::BUTTON_BACKGROUND };
+    icons::paint(&row, close_rect.shrink(2.0), "x", color);
+    if close.clicked() {
+        clicked = Some(PortNoteClick::Dismiss);
+    }
+    row.add_space(PORT_NOTE_LINK_GAP);
+    if link_button(&mut row, "More Info", theme::interface(12.0), PORT_NOTE_LINK_PADDING).clicked() {
+        clicked = Some(PortNoteClick::MoreInfo);
+    }
+    (rect, clicked)
+}
+
+/// The Height note `width` wide, and its "Connect for me!" link (10
+/// semibold, `Accent-Bright`) for the right.
+fn height_note_layout(ui: &Ui, width: f32) -> (NoteLayout, Arc<Galley>) {
+    let link = ui.painter().layout_no_wrap("Connect for me!".to_string(), theme::semibold(10.0), theme::ACCENT_BRIGHT);
+    let links = link.size() + 2.0 * HEIGHT_NOTE_LINK_PADDING;
+    let layout = note_layout(ui, "A Height connection is required.", theme::interface(9.0), width, links, HEIGHT_NOTE_HEIGHT);
+    (layout, link)
+}
+
+/// `InfoHeightRef`: a green note `width` wide from `top_left` that a
+/// Height connection is needed, with its "Connect for me!" link on the
+/// right. Returns the note, and whether the link was clicked.
+fn height_note(ui: &mut Ui, top_left: Pos2, width: f32) -> (Rect, bool) {
+    let (layout, link_galley) = height_note_layout(ui, width);
+    let (rect, links) = paint_note(ui, top_left, layout, theme::ACCENT_TRANSPARENT_GREEN, theme::ACCENT_STRONG_GREEN);
+    let link = ui.interact(links, ui.id().with("height-note-link"), Sense::click());
+    let color = if link.hovered() { theme::LABEL_EMPHASIS } else { theme::ACCENT_BRIGHT };
+    ui.painter().galley(links.min + HEIGHT_NOTE_LINK_PADDING, link_galley, color);
+    if link.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    (rect, link.clicked())
 }
 
 /// The header toolbar (`PropertyBorder`): the node's icon and name (the
@@ -1380,6 +1455,59 @@ mod tests {
         // Min/Max, which share the full width under the menu.
         assert_eq!(rows(248.0), [0, 0, 1, 1]);
         assert_eq!(rows(150.0), [0, 1, 2, 2]);
+    }
+
+    /// Runs `check` in a frame with the app's fonts.
+    fn with_ui(check: impl FnMut(&mut Ui)) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let output = context.run_ui(egui::RawInput::default(), check);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn notes_keep_their_message_clear_of_their_links() {
+        with_ui(|ui| {
+            // From a property area a small window squeezes under its least
+            // width to well past where the messages fit on one row.
+            for tenth in 1000..=8000 {
+                let width = tenth as f32 / 10.0;
+                for (name, layout) in [("port", port_note_layout(ui, width)), ("height", height_note_layout(ui, width).0)] {
+                    let inner = Rect::from_min_size(Pos2::ZERO, layout.size).shrink2(NOTE_PADDING).expand(1e-3);
+                    let (message, links) = (layout.message, layout.links);
+                    assert!(inner.contains_rect(message), "{name} note {width} wide: its message {message:?} leaves {inner:?}");
+                    assert!(inner.contains_rect(links), "{name} note {width} wide: its links {links:?} leave {inner:?}");
+                    let beside = message.right() + NOTE_GAP <= links.left() + 1e-3;
+                    let above = message.bottom() + NOTE_PADDING.y <= links.top() + 1e-3;
+                    assert!(beside || above, "{name} note {width} wide: its message {message:?} meets its links {links:?}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn notes_wrap_beside_their_links_at_the_least_property_width() {
+        with_ui(|ui| {
+            // The property area at its least, less the notes' 16 either
+            // side.
+            let width = crate::ui::MIN_PROPERTIES - 32.0;
+            for (name, layout) in [("port", port_note_layout(ui, width)), ("height", height_note_layout(ui, width).0)] {
+                assert!(layout.message.right() + NOTE_GAP <= layout.links.left(), "{name} note: its message goes above its links");
+                assert!(layout.galley.rows.len() <= 2, "{name} note: its message takes more than two rows");
+            }
+        });
+    }
+
+    #[test]
+    fn notes_keep_their_height_when_the_message_fits_on_a_row() {
+        with_ui(|ui| {
+            let port = port_note_layout(ui, 600.0);
+            assert_eq!(port.galley.rows.len(), 1);
+            assert_eq!(port.size.y, PORT_NOTE_HEIGHT);
+            let (height, _) = height_note_layout(ui, 600.0);
+            assert_eq!(height.galley.rows.len(), 1);
+            assert_eq!(height.size.y, HEIGHT_NOTE_HEIGHT);
+        });
     }
 
     #[test]
