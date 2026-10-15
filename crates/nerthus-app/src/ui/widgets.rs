@@ -450,6 +450,86 @@ pub fn dialog_button_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R
     ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), add_contents).inner
 }
 
+/// The room a dialog leaves between itself and the window's edges.
+pub const DIALOG_SCREEN_MARGIN: f32 = 20.0;
+
+/// The most room a dialog takes: the window less `DIALOG_SCREEN_MARGIN`
+/// each side.
+pub fn dialog_room(ctx: &egui::Context) -> Vec2 {
+    (ctx.content_rect().size() - Vec2::splat(2.0 * DIALOG_SCREEN_MARGIN)).max(Vec2::ZERO)
+}
+
+/// Keeps a centred dialog inside the window, however small the window or
+/// large the interface: its content no wider than the room less its
+/// frame, and its body (`body`) scrolling once the dialog would be taller
+/// than the room, so that its title and its footer's buttons stay in view.
+/// What the dialog takes besides its body (title bar, frame, footer) is
+/// measured as it shows (`end`) and kept for the next frame.
+#[derive(Clone, Copy, Debug)]
+pub struct DialogFit {
+    id: Id,
+    room: Vec2,
+    /// The frame's margins and stroke, across and down.
+    frame: Vec2,
+    /// The dialog's height besides its body when last shown.
+    rest: f32,
+}
+
+impl DialogFit {
+    /// The dialog `id`, in `frame`.
+    pub fn new(ctx: &egui::Context, id: Id, frame: &Frame) -> DialogFit {
+        let frame = frame.total_margin().sum();
+        let rest = ctx.data(|data| data.get_temp::<f32>(id.with("fit-rest"))).unwrap_or(frame.y);
+        DialogFit { id, room: dialog_room(ctx), frame, rest }
+    }
+
+    /// The content's width: `wanted`, or the room less the frame when that
+    /// is narrower.
+    pub fn width(&self, wanted: f32) -> f32 {
+        wanted.min(self.room.x - self.frame.x).max(0.0)
+    }
+
+    /// `window` held to the room, and as wide as `wanted` content allows:
+    /// egui otherwise keeps a window as wide as it once was.
+    pub fn window<'open>(&self, window: egui::Window<'open>, wanted: f32) -> egui::Window<'open> {
+        let width = self.width(wanted) + self.frame.x;
+        window.min_width(width).max_width(width).max_height(self.room.y)
+    }
+
+    /// The body, in a scroll area as tall as the room less the rest of the
+    /// dialog, at most; its bar, while it shows, beside the body rather
+    /// than over it.
+    pub fn body<R>(&self, ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+        let height = (self.room.y - self.rest).max(0.0);
+        let mut scroll = ScrollArea::vertical();
+        scroll = scroll.id_salt(self.id.with("fit-body"));
+        scroll = scroll.max_height(height);
+        scroll = scroll.min_scrolled_height(0.0);
+        scroll = scroll.auto_shrink([false, true]);
+        // Offered all of that height: egui holds a dialog's content to the
+        // size it had last frame, which would keep a body that once
+        // scrolled from growing back.
+        let shown = ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
+            scroll_bar_gutter(ui);
+            scroll.show(ui, add_contents).inner
+        });
+        let height = shown.response.rect.height();
+        ui.ctx().data_mut(|data| data.insert_temp(self.id.with("fit-body-height"), height));
+        shown.inner
+    }
+
+    /// Notes what the dialog, shown at `rect`, took besides its body; the
+    /// next frame comes at once when that changed.
+    pub fn end(&self, ctx: &egui::Context, rect: Rect) {
+        let body = ctx.data(|data| data.get_temp::<f32>(self.id.with("fit-body-height"))).unwrap_or(0.0);
+        let rest = (rect.height() - body).max(0.0);
+        if (rest - self.rest).abs() > 0.5 {
+            ctx.data_mut(|data| data.insert_temp(self.id.with("fit-rest"), rest));
+            ctx.request_repaint();
+        }
+    }
+}
+
 /// The tooltips, as egui's `on_hover_text` and its kin show them but
 /// with `TOOLTIP_MARGIN` round them.
 pub trait Tooltips {
@@ -650,6 +730,65 @@ pub fn popup_outcome(ui: &Ui, response: &Response) -> Option<bool> {
 pub fn scroll_bar_gutter(ui: &mut Ui) {
     let scroll = &mut ui.spacing_mut().scroll;
     scroll.floating_allocated_width = scroll.bar_width + scroll.bar_inner_margin;
+}
+
+/// What the dialogs' tests share: a dialog shown until it settles on a
+/// screen of a given size, and whether given words show whole in its room.
+#[cfg(test)]
+pub(crate) mod fit_checks {
+    use super::*;
+
+    /// 800 by 600 and 640 by 480 at 120%, and 1024 by 768 at 175%, in
+    /// points.
+    pub const SMALL_SCREENS: [Vec2; 3] = [Vec2::new(667.0, 500.0), Vec2::new(533.0, 400.0), Vec2::new(585.0, 439.0)];
+
+    /// A context with the theme's fonts and the image loaders.
+    pub fn context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        context
+    }
+
+    /// One frame of `show` on a `screen` of points, with these events: the
+    /// words drawn, each with its rect and clip.
+    pub fn frame(context: &egui::Context, screen: Vec2, events: Vec<egui::Event>, show: &mut impl FnMut(&egui::Context)) -> Vec<(String, Rect, Rect)> {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
+        let mut output = context.run_ui(input, |ui| show(ui.ctx()));
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        let words = shapes.into_iter().filter_map(|clipped| match clipped.shape {
+            egui::Shape::Text(text) => Some((text.galley.text().to_string(), text.visual_bounding_rect(), clipped.clip_rect)),
+            _ => None,
+        });
+        words.collect()
+    }
+
+    /// `show` on a `screen` of points until it settles: the last frame's
+    /// words.
+    pub fn settle(context: &egui::Context, screen: Vec2, mut show: impl FnMut(&egui::Context)) -> Vec<(String, Rect, Rect)> {
+        for _ in 0..5 {
+            frame(context, screen, Vec::new(), &mut show);
+        }
+        frame(context, screen, Vec::new(), &mut show)
+    }
+
+    /// Asserts that the dialog `id` is inside the dialogs' room on a
+    /// `screen` of points, and that each of `expected` (the start of a
+    /// text drawn, as often as it is listed) shows whole there.
+    pub fn assert_fits(context: &egui::Context, screen: Vec2, id: Id, words: &[(String, Rect, Rect)], expected: &[&str]) {
+        let room = Rect::from_min_size(Pos2::ZERO, screen).shrink(DIALOG_SCREEN_MARGIN).expand(0.5);
+        let dialog = context.memory(|memory| memory.area_rect(id)).expect("the dialog shows");
+        assert!(room.contains_rect(dialog), "on {screen:?}, the dialog {dialog:?} is outside {room:?}");
+        for word in expected {
+            let wanted = expected.iter().filter(|other| *other == word).count();
+            let whole = |(text, rect, clip): &&(String, Rect, Rect)| text.starts_with(word) && room.contains_rect(*rect) && clip.expand(0.5).contains_rect(*rect);
+            let shown = words.iter().filter(whole).count();
+            let drawn: Vec<_> = words.iter().filter(|(text, _, _)| text.starts_with(word)).collect();
+            assert!(shown >= wanted, "on {screen:?}, {word:?} shows whole {shown} times, not {wanted}: {drawn:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1265,6 +1404,87 @@ mod tests {
         // Not the menus' 1.
         let margin = DIALOG_MARGIN as f32;
         assert!(insets(contents, window).iter().all(|inset| *inset >= margin), "{contents:?} in {window:?}");
+    }
+
+    /// What a fitted test dialog showed: its rect, its footer's and the
+    /// body's content height.
+    struct Fitted {
+        dialog: Rect,
+        footer: Rect,
+        body: Rect,
+    }
+
+    /// Frames enough for a fitted test dialog, a titled window when
+    /// `titled` else a modal, with a body `body` tall, to settle on a
+    /// `screen` of points. Returns the last.
+    fn fitted_dialog(context: &egui::Context, screen: Vec2, titled: bool, body: f32) -> Fitted {
+        let mut shown = Fitted { dialog: Rect::NOTHING, footer: Rect::NOTHING, body: Rect::NOTHING };
+        for _ in 0..4 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                let id = Id::new("fitted-test");
+                let contents = |ui: &mut Ui, fit: &DialogFit, shown: &mut Fitted| {
+                    ui.set_width(fit.width(500.0));
+                    shown.body = fit.body(ui, |ui| ui.allocate_space(Vec2::new(ui.available_width(), body)).1);
+                    shown.footer = dialog_button_row(ui, |ui| dialog_button(ui, "Close", false)).rect;
+                };
+                if titled {
+                    let frame = Frame::window(&ctx.global_style());
+                    let fit = DialogFit::new(&ctx, id, &frame);
+                    let mut window = egui::Window::new("Fitted").id(id).collapsible(false).resizable(false);
+                    window = fit.window(window.anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO), 500.0);
+                    let response = window.show(&ctx, |ui| contents(ui, &fit, &mut shown));
+                    shown.dialog = response.map(|response| response.response.rect).unwrap_or(Rect::NOTHING);
+                    fit.end(&ctx, shown.dialog);
+                } else {
+                    let fit = DialogFit::new(&ctx, id, &dialog_frame(&ctx));
+                    let response = dialog(&ctx, id).show(&ctx, |ui| contents(ui, &fit, &mut shown));
+                    shown.dialog = response.response.rect;
+                    fit.end(&ctx, shown.dialog);
+                }
+            });
+            output.drop_without_applying_deltas();
+        }
+        shown
+    }
+
+    #[test]
+    fn a_fitted_dialog_stays_in_a_small_window_with_its_footer_in_view() {
+        for titled in [true, false] {
+            let context = themed_context();
+            // 640 by 480 at 120%.
+            let screen = Vec2::new(533.0, 400.0);
+            let shown = fitted_dialog(&context, screen, titled, 900.0);
+            let room = Rect::from_min_size(Pos2::ZERO, screen).shrink(DIALOG_SCREEN_MARGIN);
+            assert!(room.expand(0.5).contains_rect(shown.dialog), "titled {titled}: {:?} is outside {room:?}", shown.dialog);
+            assert!(shown.dialog.contains_rect(shown.footer), "titled {titled}: the footer {:?} is outside {:?}", shown.footer, shown.dialog);
+            // Room to spare goes to the body, not to empty space.
+            assert!(room.height() - shown.dialog.height() < 4.0, "titled {titled}: {:?} leaves room in {room:?}", shown.dialog);
+        }
+    }
+
+    #[test]
+    fn a_fitted_dialog_is_as_large_as_it_wants_where_there_is_room() {
+        for titled in [true, false] {
+            let context = themed_context();
+            let screen = Vec2::new(1333.0, 800.0);
+            let first = fitted_dialog(&context, screen, titled, 300.0);
+            assert_eq!(first.body.height(), 300.0, "titled {titled}");
+            assert!((first.body.width() - 500.0).abs() < 0.5, "titled {titled}: {:?}", first.body);
+            let frame = if titled { Frame::window(&context.global_style()) } else { dialog_frame(&context) };
+            let across = 500.0 + frame.total_margin().sum().x;
+            assert!((first.dialog.width() - across).abs() < 0.5, "titled {titled}: {:?} is not {across} across", first.dialog);
+            // The body, the footer and the rest, and no more.
+            assert!(first.dialog.height() < 300.0 + 120.0, "titled {titled}: {:?} is taller than it needs", first.dialog);
+            // Squeezed, then given the room back.
+            let squeezed = fitted_dialog(&context, Vec2::new(400.0, 300.0), titled, 300.0);
+            assert!(squeezed.dialog.height() < first.dialog.height() - 50.0, "titled {titled}: {:?} was not squeezed", squeezed.dialog);
+            let shown = fitted_dialog(&context, screen, titled, 300.0);
+            assert!((shown.body.width() - 500.0).abs() < 0.5, "titled {titled}: {:?}", shown.body);
+            let grown = (shown.dialog.size() - first.dialog.size()).abs().max_elem();
+            assert!(grown < 0.5, "titled {titled}: {:?} did not grow back to {:?}", shown.dialog, first.dialog);
+        }
     }
 
     #[test]

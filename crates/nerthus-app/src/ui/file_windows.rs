@@ -15,7 +15,7 @@ use crate::ui::graph_canvas::elided_galley;
 use crate::ui::options_window::OptionsState;
 use crate::ui::tool_commands::{self, ToolCommand};
 use crate::ui::tool_window;
-use crate::ui::widgets::Tooltips;
+use crate::ui::widgets::{DialogFit, Tooltips};
 use crate::ui::UiState;
 
 /// The Start dialog's size (`Width="770" Height="660"`) and its column of
@@ -33,6 +33,8 @@ const EXAMPLE_SPACING: f32 = 8.0;
 const THUMBNAIL_WIDTH: u32 = 400;
 /// `CreateMRUButton(…, attemptThumbnail: count < 20)`.
 const THUMBNAIL_LIMIT: usize = 19;
+/// Export Macro's content: a 720 window less its margins.
+const EXPORT_MACRO_WIDTH: f32 = 696.0;
 
 /// What the windows remember between frames.
 #[derive(Clone, Default)]
@@ -64,7 +66,10 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState, co
         examples_window(ctx, editor, commands);
     }
     if editor.files.export_macro.is_some() {
-        export_macro_window(ctx, editor, commands);
+        // Escape is Cancel's (`IsCancel`), but a window over the dialog's
+        // (a message about the export) while one shows.
+        let escaped = !tool_commands::modal_open(ctx, ui_state) && ctx.input(|input| input.key_pressed(Key::Escape));
+        export_macro_window(ctx, editor, escaped, commands);
     }
 }
 
@@ -436,79 +441,32 @@ fn example_button(ui: &mut Ui, ctx: &egui::Context, memory: &mut WindowMemory, p
 
 /// Export Macro (`ExportMacroDialog`): name, version, author, URL and
 /// description, the id they make, and whether to save a file and install
-/// the macro. Its button runs `BtnOK_OnClick`'s checks.
-fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut Vec<Command>) {
+/// the macro. Its button runs `BtnOK_OnClick`'s checks; Cancel, the close
+/// button and `escaped` close it. The form scrolls when the window is too
+/// small for it, the buttons staying below it.
+fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, escaped: bool, commands: &mut Vec<Command>) {
     let Some(mut form) = editor.files.export_macro.clone() else {
         return;
     };
     let mut open = true;
-    let mut action = None;
+    let mut action = escaped.then_some(false);
+    let id = Id::new("export-macro");
+    let fit = DialogFit::new(ctx, id, &egui::Frame::window(&ctx.global_style()));
     let mut window = egui::Window::new("Export Macro");
-    window = window.id(Id::new("export-macro"));
+    window = window.id(id);
     window = window.collapsible(false);
     window = window.resizable(false);
-    window = window.default_width(720.0);
+    window = fit.window(window, EXPORT_MACRO_WIDTH);
     window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
     window = window.open(&mut open);
-    window.show(ctx, |ui| {
-        ui.set_width(696.0);
-        // The text's runs, with its bold ones.
-        let runs = [
-            ("Export your macro to a .macro file. Each macro is identified by its ", false),
-            ("Macro ID", true),
-            (".\n\nTo install a macro, drag and drop the .macro file into the Nerthus window. Exporting a macro also installs it automatically into your ", false),
-            ("current macro collection", true),
-            (".\n\n", false),
-            ("Best practices:", true),
-            ("\n• ", false),
-            ("Keep the same Macro ID", true),
-            (" when updating an existing macro (so it upgrades in place).\n• ", false),
-            ("Use a new Macro ID", true),
-            (" when you want a new macro to exist alongside an older version (so both can be installed).", false),
-        ];
-        let regular = egui::TextFormat { font_id: theme::interface(12.0), color: theme::LABEL_DEFAULT, ..Default::default() };
-        let bold_font = egui::FontId::new(12.0, egui::FontFamily::Name(theme::FONT_BOLD.into()));
-        let bold = egui::TextFormat { font_id: bold_font, color: theme::LABEL_DEFAULT, ..Default::default() };
-        let mut intro = egui::text::LayoutJob::default();
-        intro.wrap.max_width = ui.available_width();
-        for (text, is_bold) in runs {
-            let format = if is_bold { bold.clone() } else { regular.clone() };
-            intro.append(text, 0.0, format);
-        }
-        ui.label(intro);
+    let shown = window.show(ctx, |ui| {
+        ui.set_width(fit.width(EXPORT_MACRO_WIDTH));
+        fit.body(ui, |ui| export_macro_form(ui, &mut form));
         ui.add_space(16.0);
-        ui.separator();
-        ui.add_space(8.0);
-        // Two equal columns (`UniformGrid Rows="2"`).
-        ui.columns(2, |columns| {
-            columns[0].label("Macro Name");
-            columns[0].add(egui::TextEdit::singleline(&mut form.name).desired_width(f32::INFINITY));
-            columns[1].label("Macro Version");
-            columns[1].add(egui::TextEdit::singleline(&mut form.version).desired_width(f32::INFINITY));
-        });
-        ui.add_space(4.0);
-        ui.columns(2, |columns| {
-            columns[0].label("Author Name");
-            columns[0].add(egui::TextEdit::singleline(&mut form.author).desired_width(f32::INFINITY));
-            columns[1].label("URL");
-            columns[1].add(egui::TextEdit::singleline(&mut form.url).desired_width(f32::INFINITY));
-        });
-        ui.add_space(8.0);
-        ui.label("Description");
-        ui.add(egui::TextEdit::singleline(&mut form.description).desired_width(f32::INFINITY));
-        ui.add_space(16.0);
-        let id_frame = egui::Frame::new().fill(theme::ACCENT_MUTED_GREEN.gamma_multiply(0.15)).stroke(Stroke::new(1.5, theme::ACCENT_MUTED_GREEN)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(6, 4));
-        id_frame.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let preview = format!("Macro ID preview: {}", form.macro_id());
-            ui.label(RichText::new(preview).font(theme::monospace(12.0)).color(theme::LABEL_EMPHASIS));
-        });
-        ui.add_space(12.0);
-        ui.checkbox(&mut form.save_file, "Save as file");
-        ui.add_space(8.0);
-        ui.checkbox(&mut form.install, "Install in Nerthus");
-        ui.add_space(16.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // As high as the buttons: a layout given the rest of the window
+        // would take it all.
+        let row = Vec2::new(ui.available_width(), 28.0);
+        ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if button(ui, "Cancel", false, Vec2::new(90.0, 28.0)).clicked() {
                 action = Some(false);
             }
@@ -517,6 +475,9 @@ fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut 
             }
         });
     });
+    if let Some(shown) = shown {
+        fit.end(ctx, shown.response.rect);
+    }
     editor.files.export_macro = Some(form.clone());
     if !open || action == Some(false) {
         form.remember(editor);
@@ -526,6 +487,65 @@ fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut 
     if action == Some(true) {
         export_macro_checks(editor, &form, commands);
     }
+}
+
+/// Export Macro's text and fields, above its buttons.
+fn export_macro_form(ui: &mut Ui, form: &mut files::ExportForm) {
+    // The text's runs, with its bold ones.
+    let runs = [
+        ("Export your macro to a .macro file. Each macro is identified by its ", false),
+        ("Macro ID", true),
+        (".\n\nTo install a macro, drag and drop the .macro file into the Nerthus window. Exporting a macro also installs it automatically into your ", false),
+        ("current macro collection", true),
+        (".\n\n", false),
+        ("Best practices:", true),
+        ("\n• ", false),
+        ("Keep the same Macro ID", true),
+        (" when updating an existing macro (so it upgrades in place).\n• ", false),
+        ("Use a new Macro ID", true),
+        (" when you want a new macro to exist alongside an older version (so both can be installed).", false),
+    ];
+    let regular = egui::TextFormat { font_id: theme::interface(12.0), color: theme::LABEL_DEFAULT, ..Default::default() };
+    let bold_font = egui::FontId::new(12.0, egui::FontFamily::Name(theme::FONT_BOLD.into()));
+    let bold = egui::TextFormat { font_id: bold_font, color: theme::LABEL_DEFAULT, ..Default::default() };
+    let mut intro = egui::text::LayoutJob::default();
+    intro.wrap.max_width = ui.available_width();
+    for (text, is_bold) in runs {
+        let format = if is_bold { bold.clone() } else { regular.clone() };
+        intro.append(text, 0.0, format);
+    }
+    ui.label(intro);
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+    // Two equal columns (`UniformGrid Rows="2"`).
+    ui.columns(2, |columns| {
+        columns[0].label("Macro Name");
+        columns[0].add(egui::TextEdit::singleline(&mut form.name).desired_width(f32::INFINITY));
+        columns[1].label("Macro Version");
+        columns[1].add(egui::TextEdit::singleline(&mut form.version).desired_width(f32::INFINITY));
+    });
+    ui.add_space(4.0);
+    ui.columns(2, |columns| {
+        columns[0].label("Author Name");
+        columns[0].add(egui::TextEdit::singleline(&mut form.author).desired_width(f32::INFINITY));
+        columns[1].label("URL");
+        columns[1].add(egui::TextEdit::singleline(&mut form.url).desired_width(f32::INFINITY));
+    });
+    ui.add_space(8.0);
+    ui.label("Description");
+    ui.add(egui::TextEdit::singleline(&mut form.description).desired_width(f32::INFINITY));
+    ui.add_space(16.0);
+    let id_frame = egui::Frame::new().fill(theme::ACCENT_MUTED_GREEN.gamma_multiply(0.15)).stroke(Stroke::new(1.5, theme::ACCENT_MUTED_GREEN)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(6, 4));
+    id_frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let preview = format!("Macro ID preview: {}", form.macro_id());
+        ui.label(RichText::new(preview).font(theme::monospace(12.0)).color(theme::LABEL_EMPHASIS));
+    });
+    ui.add_space(12.0);
+    ui.checkbox(&mut form.save_file, "Save as file");
+    ui.add_space(8.0);
+    ui.checkbox(&mut form.install, "Install in Nerthus");
 }
 
 /// `BtnOK_OnClick`: an option must be chosen and the project must make a
@@ -572,6 +592,25 @@ mod tests {
         install_examples(&folder);
         assert_ne!(std::fs::read(&first).unwrap(), b"changed");
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn export_macro_fits_small_windows_and_escape_cancels_it() {
+        use crate::ui::widgets::fit_checks;
+        let context = fit_checks::context();
+        let mut editor = Editor::new(crate::document::Document::new());
+        editor.files.export_macro = Some(files::ExportForm::for_project(&editor));
+        let mut ui_state = UiState::default();
+        let mut commands = Vec::new();
+        let mut windows = |ctx: &egui::Context| show(ctx, &mut editor, &mut ui_state, &mut commands);
+        for screen in fit_checks::SMALL_SCREENS {
+            let words = fit_checks::settle(&context, screen, &mut windows);
+            // The title and the button.
+            fit_checks::assert_fits(&context, screen, Id::new("export-macro"), &words, &["Export Macro", "Export Macro", "Cancel"]);
+        }
+        let escape = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        fit_checks::frame(&context, fit_checks::SMALL_SCREENS[1], vec![escape], &mut windows);
+        assert!(editor.files.export_macro.is_none(), "Escape closes Export Macro");
     }
 
     #[test]
