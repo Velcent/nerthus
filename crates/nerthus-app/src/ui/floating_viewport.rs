@@ -156,6 +156,7 @@ pub fn draw(
     ctx.set_zoom_factor(editor.user.options.ui_scale());
     crate::theme::set_settings(&ctx, editor.user.options.interface_settings());
     crate::ui::formulas::publish(&ctx, &editor);
+    crate::ui::menu_keys::begin(&ctx);
     let full = ctx.content_rect();
     let builder = UiBuilder::new().layer_id(LayerId::background()).max_rect(full);
     let mut root = Ui::new(ctx.clone(), "nerthus-floating-viewport".into(), builder);
@@ -188,5 +189,5 @@ pub fn draw(
         interface.viewport_focused = over_view && !over_window;
     }
     let modifiers = ctx.input(|state| state.modifiers);
-    input.keys = interface.viewport_focused && !ctx.egui_wants_keyboard_input() && !modifiers.command && !modifiers.ctrl;
+    input.keys = interface.viewport_focused && !ctx.egui_wants_keyboard_input() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
 }

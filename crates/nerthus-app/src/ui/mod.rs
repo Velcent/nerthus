@@ -39,6 +39,7 @@ mod input_box;
 mod markdown;
 mod math_editor;
 mod memory_dialogs;
+mod menu_keys;
 mod menus;
 mod mixer_layers;
 mod modifier_list;
@@ -497,6 +498,8 @@ fn draw_editor(
     // What the floating viewport asked for last frame.
     pending.append(&mut ui_state.floating_commands);
     let floating = editor.user.options.viewport_floating();
+    // An open menu takes its keys first.
+    menu_keys::begin(ctx);
     // Modal dialogs keep the shell's keys from it while they show.
     if !tool_commands::modal_open(ctx, ui_state) {
         options_window::take_escape(ctx, &mut ui_state.options);
@@ -694,7 +697,7 @@ fn draw_editor(
         ui_state.viewport_focused = over_view && !over_window;
     }
     let modifiers = ctx.input(|state| state.modifiers);
-    input.keys = ui_state.viewport_focused && !ctx.egui_wants_keyboard_input() && !modifiers.command && !modifiers.ctrl;
+    input.keys = ui_state.viewport_focused && !ctx.egui_wants_keyboard_input() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
     Ok(())
 }
 
