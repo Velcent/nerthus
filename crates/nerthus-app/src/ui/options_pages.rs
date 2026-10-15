@@ -15,6 +15,7 @@ use egui::{Align, Color32, Layout, RichText, Stroke, Ui, Vec2};
 use serde_json::{json, Value};
 
 use crate::theme;
+use crate::ui::colour_picker::colour_button;
 use crate::ui::editors;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::options_window::OptionsTab;
@@ -840,11 +841,12 @@ fn viewport(ui: &mut Ui, copy: &mut OptionsCopy) {
     }
     let background = copy.get(Opt("ViewportBackground"));
     let component = |name: &str| background.get(name).and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0);
-    let mut colour = [(component("R") * 255.0).round() as u8, (component("G") * 255.0).round() as u8, (component("B") * 255.0).round() as u8];
+    let colour = [(component("R") * 255.0).round() as u8, (component("G") * 255.0).round() as u8, (component("B") * 255.0).round() as u8];
     ui.horizontal(|ui| {
         row_label(ui, "Background", 96.0);
         ui.add_space(8.0);
-        if egui::color_picker::color_edit_button_srgb(ui, &mut colour).changed() {
+        let size = ui.spacing().interact_size;
+        if let Some(colour) = colour_button(ui, size, colour) {
             let value = json!({"R": colour[0] as f64 / 255.0, "G": colour[1] as f64 / 255.0, "B": colour[2] as f64 / 255.0});
             copy.set(Opt("ViewportBackground"), value);
         }

@@ -52,6 +52,8 @@ const PORT_GAP: f32 = 10.0;
 const CIRCUIT_RUN: f32 = 24.0;
 /// Below this zoom nodes draw simplified (`IsZoomedOut`).
 pub(crate) const SIMPLIFIED_ZOOM: f32 = 0.4;
+/// A simplified node's port: a block around its dot.
+const SIMPLIFIED_PORT: Vec2 = Vec2::new(24.0, 16.0);
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 2.0;
 /// The room Extents and Selection leave around what they frame.
@@ -1270,10 +1272,9 @@ fn draw_node(ui: &Ui, painter: &egui::Painter, editor: &Editor, layout: &NodeLay
 
     let simplified = zoom < SIMPLIFIED_ZOOM;
     if simplified {
-        let font = theme::semibold((24.0 * zoom).max(6.0));
-        let galley = painter.layout(node.name.clone(), font, title_color, screen.width() - 8.0);
-        let position = screen.center() - galley.size() / 2.0;
-        painter.galley(position, galley, title_color);
+        if let Some((position, galley)) = simplified_name(painter, layout, &node.name, screen, zoom, title_color) {
+            painter.galley(position, galley, title_color);
+        }
         if status.building {
             building_bar(ui, painter, screen, zoom, 6.0, 3.0, layout.color);
         }
@@ -1473,6 +1474,37 @@ pub(crate) fn elided_galley(painter: &egui::Painter, text: &str, font: egui::Fon
     painter.layout_job(job)
 }
 
+/// A simplified node's name and where it goes: one line in the middle of
+/// the node, between its port blocks, cut with an ellipsis; none when not
+/// a letter of it fits there.
+fn simplified_name(painter: &egui::Painter, layout: &NodeLayout, name: &str, screen: Rect, zoom: f32, color: Color32) -> Option<(Pos2, std::sync::Arc<egui::Galley>)> {
+    let room = simplified_name_room(layout, screen, zoom);
+    if room.width() <= 0.0 {
+        return None;
+    }
+    // The text stops shrinking at 6 while the node shrinks on: past that
+    // the name soon fits nowhere.
+    let font = theme::semibold((24.0 * zoom).max(6.0));
+    let galley = elided_galley(painter, name, font, color, room.width());
+    let glyphs: usize = galley.rows.iter().map(|row| row.glyphs.len()).sum();
+    let only_ellipsis = galley.elided && glyphs <= 1;
+    let fits = galley.size().x <= room.width() && galley.size().y <= room.height();
+    if only_ellipsis || !fits {
+        return None;
+    }
+    Some((room.center() - galley.size() / 2.0, galley))
+}
+
+/// The room for a simplified node's name (screen): the node less a margin
+/// and, on a side with ports, their blocks.
+fn simplified_name_room(layout: &NodeLayout, screen: Rect, zoom: f32) -> Rect {
+    let to_screen = |x: f32| screen.left() + (x - layout.rect.left()) * zoom;
+    let half_block = SIMPLIFIED_PORT.x / 2.0;
+    let left = layout.inputs.iter().map(|port| port.dot.center().x + half_block).fold(layout.rect.left(), f32::max);
+    let right = layout.outputs.iter().map(|port| port.dot.center().x - half_block).fold(layout.rect.right(), f32::min);
+    Rect::from_x_y_ranges(to_screen(left) + 4.0..=to_screen(right) - 4.0, screen.y_range())
+}
+
 fn draw_ports(painter: &egui::Painter, layouts: &[NodeLayout], view: &GraphView, origin: Pos2, state: &GraphState, pointer: Option<Pos2>) {
     let zoom = view.zoom;
     let simplified = zoom < SIMPLIFIED_ZOOM;
@@ -1501,7 +1533,7 @@ fn draw_ports(painter: &egui::Painter, layouts: &[NodeLayout], view: &GraphView,
             if let Some(portal) = port.portal {
                 draw_portal(painter, port, portal, base, view, origin, simplified);
             }
-            let dot_shape = if simplified { Rect::from_center_size(dot.center(), Vec2::new(24.0, 16.0) * zoom) } else { dot };
+            let dot_shape = if simplified { Rect::from_center_size(dot.center(), SIMPLIFIED_PORT * zoom) } else { dot };
             let corner = if simplified { 0.0 } else { dot.width() / 2.0 };
             painter.rect_filled(dot_shape, corner, fill);
             if snapping {
@@ -3157,6 +3189,74 @@ mod tests {
         let (mountain_box, mountain_name, no_mask) = shown(mountain);
         assert!(no_mask.is_none());
         assert!(mountain_name.left() < mask_dot.right() - combine_box.left() + mountain_box.left());
+    }
+
+    #[test]
+    fn simplified_names_stay_on_one_line_inside_their_nodes() {
+        // Zoomed out a small Combine with ports both sides (Final in Alpine
+        // Valley), a compact Mountain and a standard Erosion with a long
+        // name: each name is one line inside its node, clear of the port
+        // blocks, or none.
+        let long_name = "A very long node name with spaces that goes on and on past the edge of any node box";
+        for zoom in [0.37, 0.2, 0.05] {
+            let mut editor = Editor::new(Document::new());
+            let mut state = GraphState::default();
+            let context = themed_context();
+            frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+            state.view_mut().zoom = zoom;
+            let view = state.view();
+            let canvas_at = |x: f32, y: f32| {
+                let point = view.to_canvas(GRAPH.min, Pos2::new(x, y));
+                [point.x, point.y]
+            };
+            let final_node = editor.document.add_node("Combine", canvas_at(300.0, 400.0)).unwrap();
+            let white = editor.document.add_node("Mountain", canvas_at(500.0, 400.0)).unwrap();
+            let erosion = editor.document.add_node("ErosionPro", canvas_at(700.0, 400.0)).unwrap();
+            editor.document.set_member(final_node, "NodeSize", serde_json::json!("Small"), "Node size", false);
+            editor.document.set_member(white, "NodeSize", serde_json::json!("Compact"), "Node size", false);
+            editor.document.rename(final_node, "Final");
+            editor.document.rename(white, "White");
+            editor.document.rename(erosion, long_name);
+            let (shapes, _, _) = frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+
+            let view = state.view();
+            let shown = |node: i32| {
+                let data = editor.document.node(node).unwrap();
+                let layout = layout_node(data, editor.user.options.default_node_size());
+                let names: Vec<_> = shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        Shape::Text(text) if text.galley.text() == data.name => Some((text.galley.clone(), clipped.shape.visual_bounding_rect())),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(names.len() <= 1, "{} draws {} times at {zoom}", data.name, names.len());
+                let node_box = view.rect_to_screen(state.rect.min, layout.rect);
+                if let Some((galley, bounds)) = names.first() {
+                    assert_eq!(galley.rows.len(), 1, "{} wraps at {zoom}", data.name);
+                    assert!(node_box.expand(0.5).contains_rect(*bounds), "{} {bounds:?} leaves its node {node_box:?} at {zoom}", data.name);
+                    for port in layout.inputs.iter().chain(&layout.outputs) {
+                        let block = Rect::from_center_size(view.to_screen(state.rect.min, port.dot.center()), SIMPLIFIED_PORT * zoom);
+                        assert!(!bounds.intersects(block), "{} {bounds:?} is over the {} block {block:?} at {zoom}", data.name, port.name);
+                    }
+                }
+                names.into_iter().next().map(|(galley, _)| galley)
+            };
+            let final_name = shown(final_node);
+            let white_name = shown(white);
+            let long = shown(erosion);
+            // Just under the simplified zoom, the short name shows whole
+            // and the long one cut; the small node has no room left.
+            if zoom == 0.37 {
+                assert!(final_name.is_none(), "Final shows between its port blocks");
+                assert!(white_name.as_ref().is_some_and(|galley| !galley.elided), "White does not show whole");
+                assert!(long.as_ref().is_some_and(|galley| galley.elided), "the long name is not cut");
+            }
+            // At the least zoom no name fits.
+            if zoom == MIN_ZOOM {
+                assert!(final_name.is_none() && white_name.is_none() && long.is_none(), "a name shows at {zoom}");
+            }
+        }
     }
 
     #[test]
