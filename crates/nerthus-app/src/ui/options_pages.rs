@@ -18,7 +18,7 @@ use crate::theme;
 use crate::ui::editors;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::options_window::OptionsTab;
-use crate::ui::widgets::selectable_label;
+use crate::ui::widgets::{selectable_label, Tooltips};
 use crate::user::{Preferences, UserOptions};
 
 /// A setting a page changes.
@@ -419,7 +419,7 @@ fn fixed_check(ui: &mut Ui, indent: f32, text: &str, checked: bool, why: &str) {
     let mut shown = checked;
     ui.horizontal(|ui| {
         ui.add_space(indent);
-        ui.add_enabled(false, egui::Checkbox::new(&mut shown, RichText::new(text).font(theme::interface(12.0)))).on_disabled_hover_text(why);
+        ui.add_enabled(false, egui::Checkbox::new(&mut shown, RichText::new(text).font(theme::interface(12.0)))).disabled_tooltip(why);
     });
 }
 
@@ -472,7 +472,7 @@ fn folder_box(ui: &mut Ui, copy: &mut OptionsCopy, dialogs: &mut FileDialogs, se
             copy.set(setting, Value::String(text.clone()));
         }
         if !typing && !path.is_empty() {
-            response.on_hover_text(&path);
+            response.tooltip(&path);
         }
         if ui.add_enabled(!dialogs.pending(&key), egui::Button::new("…")).clicked() {
             let current = std::path::PathBuf::from(copy.text(setting));
@@ -849,7 +849,7 @@ fn viewport(ui: &mut Ui, copy: &mut OptionsCopy) {
             copy.set(Opt("ViewportBackground"), value);
         }
         // `btnResetViewportColor`: back to #050505.
-        if ui.button("x").on_hover_text("Reset").clicked() {
+        if ui.button("x").tooltip("Reset").clicked() {
             let value = UserOptions::new().value("ViewportBackground");
             copy.set(Opt("ViewportBackground"), value);
         }
@@ -921,7 +921,7 @@ fn navigation(ui: &mut Ui, copy: &mut OptionsCopy) {
                 ui.visuals_mut().selection.bg_fill = colour;
                 ui.add_sized(Vec2::new(200.0, 20.0), slider)
             });
-            let response = response.inner.on_hover_text(format!("{label} Sensitivity"));
+            let response = response.inner.tooltip(format!("{label} Sensitivity"));
             if response.changed() {
                 copy.set(Opt(sensitivity), json!(value as f64));
             }

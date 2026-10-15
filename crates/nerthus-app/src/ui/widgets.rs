@@ -1,10 +1,10 @@
 //! The recurring controls: toolbars (`Toolbar` border style), icon
 //! buttons (`Button-IconOnly`), icon menus (`MenuItem Tag="Icon"`), menu
 //! entries (`Default-Menu-Item`) with an icon, an accent and a shortcut,
-//! dialog buttons and selectable items.
+//! dialogs' frames and buttons, selectable items and tooltips.
 
 use egui::containers::menu::{MenuButton, MenuConfig, SubMenu};
-use egui::{Button, Color32, CornerRadius, FontId, Id, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetText};
+use egui::{Button, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetText};
 
 use crate::icons;
 use crate::theme;
@@ -17,6 +17,10 @@ pub fn toolbar_button(ui: &Ui) -> f32 {
 
 /// A dialog button's least height.
 pub const DIALOG_BUTTON_HEIGHT: f32 = 26.0;
+/// Inside a dialog's border (`DockPanel Margin="12"`) and a tooltip's.
+/// egui gives both the theme's `menu_margin`, which is 1 for the menus.
+const DIALOG_MARGIN: i8 = 12;
+const TOOLTIP_MARGIN: Margin = Margin::symmetric(6, 4);
 /// `Default-Menu-Item`: rows 23 high (11px text, padding 2, 4), a 30 icon
 /// column and a 20 arrow column; menus at least 190 wide.
 const MENU_ROW_HEIGHT: f32 = 23.0;
@@ -55,7 +59,7 @@ pub fn icon_button(ui: &mut Ui, icon: &str, tooltip: &str, tint: Option<Color32>
     let color = if hovered && tint.is_none() { theme::LABEL_EMPHASIS } else { base };
     let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icons::DEFAULT_SIZE));
     icons::paint(ui, icon_rect, icon, color);
-    response.on_hover_text(tooltip)
+    response.tooltip(tooltip)
 }
 
 /// `Button-IconOnly`: an icon of `icon_size` in a button of `size`; under
@@ -70,7 +74,7 @@ pub fn icon_button_sized(ui: &mut Ui, icon: &str, tooltip: &str, tint: Option<Co
     let color = if hovered { theme::ACCENT_MUTED_GRAY } else { base };
     let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icon_size));
     icons::paint(ui, icon_rect, icon, color);
-    response.on_hover_text(tooltip)
+    response.tooltip(tooltip)
 }
 
 /// A toggle shown as an icon button (`ToolbarToggleButton-IconX`): on, a
@@ -100,7 +104,7 @@ pub fn icon_toggle_sized(ui: &mut Ui, icon: &str, tooltip: &str, on: bool, accen
     let color = if (on || hovered) && !pressed { theme::LABEL_EMPHASIS } else { theme::ICON_DEFAULT };
     let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icons::DEFAULT_SIZE));
     icons::paint(ui, icon_rect, icon, color);
-    response.on_hover_text(tooltip)
+    response.tooltip(tooltip)
 }
 
 /// An icon that opens a menu (`MenuItem Tag="Icon"`): `Toolbar.ButtonSize`
@@ -117,14 +121,14 @@ pub fn icon_menu_sized(ui: &mut Ui, icon: &str, tooltip: &str, tint: Option<Colo
     let arrow_origin = response.rect.right_bottom() - Vec2::splat(1.0 + 8.0);
     let arrow = Rect::from_min_size(arrow_origin, Vec2::splat(8.0));
     icons::paint(ui, arrow, "chevron-down-right", theme::ICON_DEFAULT);
-    response.on_hover_text(tooltip)
+    response.tooltip(tooltip)
 }
 
 /// An icon button that opens a menu, without the corner mark (a
 /// `Button-IconOnly` with a context menu).
 pub fn icon_dropdown(ui: &mut Ui, icon: &str, tooltip: &str, tint: Option<Color32>, size: Vec2, contents: impl FnOnce(&mut Ui)) -> Response {
     let response = icon_menu_button(ui, icon, tint, size, contents);
-    response.on_hover_text(tooltip)
+    response.tooltip(tooltip)
 }
 
 fn icon_menu_button(ui: &mut Ui, icon: &str, tint: Option<Color32>, size: Vec2, contents: impl FnOnce(&mut Ui)) -> Response {
@@ -344,6 +348,17 @@ pub fn menu_separator(ui: &mut Ui) {
     ui.painter().line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], stroke);
 }
 
+/// A dialog's frame: a popup's fill, border, corners and shadow, with
+/// `DIALOG_MARGIN` inside.
+pub fn dialog_frame(ctx: &egui::Context) -> Frame {
+    Frame::popup(&ctx.global_style()).inner_margin(DIALOG_MARGIN)
+}
+
+/// A modal dialog in `dialog_frame`.
+pub fn dialog(ctx: &egui::Context, id: Id) -> egui::Modal {
+    egui::Modal::new(id).frame(dialog_frame(ctx))
+}
+
 /// A dialog's `Button`, or with `important` its `Button-Important`.
 pub fn dialog_button(ui: &mut Ui, text: &str, important: bool) -> Response {
     let label = RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_EMPHASIS);
@@ -360,6 +375,57 @@ pub fn dialog_button(ui: &mut Ui, text: &str, important: bool) -> Response {
 pub fn dialog_button_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     let row = Vec2::new(ui.available_width(), DIALOG_BUTTON_HEIGHT);
     ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), add_contents).inner
+}
+
+/// The tooltips, as egui's `on_hover_text` and its kin show them but
+/// with `TOOLTIP_MARGIN` round them.
+pub trait Tooltips {
+    /// `text` under the widget while it is hovered and enabled.
+    fn tooltip(self, text: impl Into<WidgetText>) -> Self;
+    /// `text` beside the pointer while the widget is hovered and enabled.
+    fn tooltip_at_pointer(self, text: impl Into<WidgetText>) -> Self;
+    /// `text` under the widget while it is hovered and disabled.
+    fn disabled_tooltip(self, text: impl Into<WidgetText>) -> Self;
+    /// `add_contents` under the widget while it is hovered and enabled.
+    fn tooltip_ui(self, add_contents: impl FnOnce(&mut Ui)) -> Self;
+}
+
+impl Tooltips for Response {
+    fn tooltip(self, text: impl Into<WidgetText>) -> Self {
+        show_tooltip(egui::Tooltip::for_enabled(&self), tooltip_text(text));
+        self
+    }
+
+    fn tooltip_at_pointer(self, text: impl Into<WidgetText>) -> Self {
+        show_tooltip(egui::Tooltip::for_enabled(&self).at_pointer().gap(12.0), tooltip_text(text));
+        self
+    }
+
+    fn disabled_tooltip(self, text: impl Into<WidgetText>) -> Self {
+        show_tooltip(egui::Tooltip::for_disabled(&self), tooltip_text(text));
+        self
+    }
+
+    fn tooltip_ui(self, add_contents: impl FnOnce(&mut Ui)) -> Self {
+        show_tooltip(egui::Tooltip::for_enabled(&self), add_contents);
+        self
+    }
+}
+
+fn show_tooltip(mut tooltip: egui::Tooltip<'_>, add_contents: impl FnOnce(&mut Ui)) {
+    let frame = Frame::popup(&tooltip.popup.ctx().global_style()).inner_margin(TOOLTIP_MARGIN);
+    tooltip.popup = tooltip.popup.frame(frame);
+    tooltip.show(add_contents);
+}
+
+/// A tooltip's words, laid out as egui's are.
+fn tooltip_text(text: impl Into<WidgetText>) -> impl FnOnce(&mut Ui) {
+    let text = text.into();
+    move |ui| {
+        // Kept from shrinking as the area sizes itself.
+        ui.set_max_width(ui.spacing().tooltip_width);
+        ui.add(egui::Label::new(text));
+    }
 }
 
 /// `Button-Link`: blue text (darker blue under the pointer) with the hand
@@ -959,5 +1025,74 @@ mod tests {
         let moved = keyed_frame(&context, Vec::new());
         assert!(moved.highlighted.contains(&"Exit"), "{:?}", moved.highlighted);
         assert!(!moved.submenu);
+    }
+
+    /// How far `inner` sits inside `outer` on its left, right, top and
+    /// bottom.
+    fn insets(inner: Rect, outer: Rect) -> [f32; 4] {
+        [inner.left() - outer.left(), outer.right() - inner.right(), inner.top() - outer.top(), outer.bottom() - inner.bottom()]
+    }
+
+    #[test]
+    fn a_dialog_keeps_its_contents_off_its_border() {
+        let context = themed_context();
+        let id = Id::new("test-dialog");
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mut contents = Rect::NOTHING;
+        for _ in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                let shown = dialog(ui.ctx(), id).show(ui.ctx(), |ui| {
+                    ui.label("Are you sure you want to delete all variables?");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| dialog_button(ui, "No", false));
+                    ui.min_rect()
+                });
+                contents = shown.inner;
+            });
+            output.drop_without_applying_deltas();
+        }
+        let window = context.memory(|memory| memory.area_rect(id)).expect("the dialog shows");
+        // Not the menus' 1.
+        let margin = DIALOG_MARGIN as f32;
+        assert!(insets(contents, window).iter().all(|inset| *inset >= margin), "{contents:?} in {window:?}");
+    }
+
+    #[test]
+    fn a_tooltip_keeps_its_words_off_its_border() {
+        let context = themed_context();
+        let text = "Bake the selected nodes";
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut button = Rect::NOTHING;
+            let mut output = context.run_ui(input, |ui| {
+                ui.add_space(100.0);
+                button = ui.button("Bake").tooltip(text).rect;
+            });
+            let words = std::mem::take(&mut output.shapes).into_iter().find_map(|clipped| match clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == text => Some(shape.galley.rect.translate(shape.pos.to_vec2())),
+                _ => None,
+            });
+            output.drop_without_applying_deltas();
+            (button, words)
+        };
+        let (button, _) = frame(Vec::new());
+        frame(vec![egui::Event::PointerMoved(button.center())]);
+        for _ in 0..120 {
+            let Some(words) = frame(Vec::new()).1 else {
+                continue;
+            };
+            let tooltip = context.memory(|memory| {
+                let layers = memory.areas().visible_layer_ids().into_iter().filter(|layer| layer.order == egui::Order::Tooltip);
+                layers.filter_map(|layer| memory.area_rect(layer.id)).find(|rect| rect.contains_rect(words))
+            });
+            let tooltip = tooltip.expect("the words show in a tooltip");
+            let [left, right, top, bottom] = insets(words, tooltip);
+            let margin = TOOLTIP_MARGIN;
+            assert!(left >= margin.left as f32 && right >= margin.right as f32, "{words:?} in {tooltip:?}");
+            assert!(top >= margin.top as f32 && bottom >= margin.bottom as f32, "{words:?} in {tooltip:?}");
+            return;
+        }
+        panic!("no tooltip shows");
     }
 }

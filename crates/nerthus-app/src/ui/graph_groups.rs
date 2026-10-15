@@ -13,7 +13,7 @@ use crate::ui::commands::Command;
 use crate::ui::graph_canvas::{drag_origin, drag_pointer, elided_galley, GraphState, SIMPLIFIED_ZOOM};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::{icon_grid, swatch_grid};
-use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, menu_style};
+use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, menu_style, Tooltips};
 
 /// `PART_Header`: the strip along the top a group is grabbed by (all of a
 /// collapsed group).
@@ -100,7 +100,7 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         let header = Rect::from_min_size(screen.min, Vec2::new(screen.width(), header_height));
         let header_response = ui.interact(header, ui.id().with(("group-header", group.id)), Sense::click_and_drag());
         let tooltip_text = group.name.clone();
-        let header_response = header_response.on_hover_text_at_pointer(tooltip_text);
+        let header_response = header_response.tooltip_at_pointer(tooltip_text);
         if header_response.clicked() {
             select_group(editor, state, group.id, modifiers.command || modifiers.shift);
         }

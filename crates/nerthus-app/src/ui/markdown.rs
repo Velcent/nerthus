@@ -15,6 +15,7 @@ use pulldown_cmark::{Alignment, BlockQuoteKind, Event, HeadingLevel, Parser, Tag
 use std::sync::Arc;
 
 use crate::theme;
+use crate::ui::widgets::Tooltips;
 
 /// Body text's size.
 const TEXT_SIZE: f32 = 13.0;
@@ -466,7 +467,7 @@ fn paragraph(ui: &mut Ui, spans: &[Span], style: TextStyle, context: &mut DrawCo
         if let Some((_, link)) = link {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             if link.contains("://") {
-                response.clone().on_hover_text(link.as_str());
+                response.clone().tooltip(link.as_str());
             }
             if response.clicked() {
                 context.drawn.clicked = Some(link.clone());

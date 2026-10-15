@@ -21,7 +21,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::GraphState;
 use crate::ui::graph_commands::GraphCommand;
-use crate::ui::widgets::{check_item, checked_icon_item, header_submenu, menu_caption, menu_item, menu_row_width, menu_separator, menu_style, submenu};
+use crate::ui::widgets::{check_item, checked_icon_item, header_submenu, menu_caption, menu_item, menu_row_width, menu_separator, menu_style, submenu, Tooltips};
 use crate::user::{ToolboxMode, ToolboxStyle, UserOptions};
 
 /// The toolbox categories, in toolbox order (`NodeCategory`).
@@ -150,10 +150,10 @@ fn node_entry(ui: &mut Ui, spec: &'static NodeSpec, look: &EntryLook, origin: Or
         })
         .inner;
     if let Some(description) = &spec.description {
-        response = response.on_hover_text(description);
+        response = response.tooltip(description);
     }
     if !implemented {
-        response = response.on_disabled_hover_text("Not available in Nerthus yet");
+        response = response.disabled_tooltip("Not available in Nerthus yet");
     }
     // `Member_PreviewMouseMove`: pressed and moved, the entry is dragged.
     let pressed_here = implemented && response.is_pointer_button_down_on();
@@ -234,7 +234,7 @@ fn macro_menu(ui: &mut Ui, commands: &mut Vec<Command>) {
             for entry in entries {
                 let mut response = menu_item(ui, Some("x-macro"), None, &entry.metadata.name, "");
                 if !entry.metadata.description.is_empty() {
-                    response = response.on_hover_text(&entry.metadata.description);
+                    response = response.tooltip(&entry.metadata.description);
                 }
                 if response.clicked() {
                     commands.push(Command::File(crate::files::FileCommand::AddMacro(entry.metadata.id())));
@@ -388,7 +388,7 @@ fn category_button(ui: &mut Ui, rect: Rect, category: &str, mode: ToolboxMode, l
         let galley = ui.painter().layout_no_wrap(category.to_string(), theme::semibold(10.0), text_color);
         ui.painter().galley(Pos2::new(rect.left() + ICON_COLUMN, rect.center().y - galley.size().y / 2.0), galley, text_color);
     }
-    let response = response.on_hover_text(category);
+    let response = response.tooltip(category);
     response.context_menu(|ui| settings_menu(ui, look.editor, settings));
 
     // The menu (`_SubMenuPopup`, placed right, margin 6).
@@ -517,11 +517,11 @@ fn panel_grid(ui: &mut Ui, categories: &[&str], columns: usize, look: &EntryLook
         let x = if left_aligned { button.left() + padding.x } else { button.center().x - galley.size().x / 2.0 };
         ui.painter().galley(Pos2::new(x, button.center().y - galley.size().y / 2.0), galley, text_color);
         let mut response = match &spec.description {
-            Some(description) => response.on_hover_text(description),
+            Some(description) => response.tooltip(description),
             None => response,
         };
         if !implemented {
-            response = response.on_hover_text("Not available in Nerthus yet");
+            response = response.tooltip("Not available in Nerthus yet");
         }
         response.context_menu(|ui| settings_menu(ui, look.editor, settings));
         if response.drag_started_by(egui::PointerButton::Primary) {

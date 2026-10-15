@@ -11,6 +11,7 @@ use egui::{Align, Id, Layout, RichText, Stroke, Vec2};
 use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
+use crate::ui::widgets;
 
 /// `TaskDialog.Width` (400 dialog units) in points, roughly.
 const WIDTH: f32 = 600.0;
@@ -70,11 +71,8 @@ pub fn show(ctx: &egui::Context, window: &mut Option<CommandLineWindow>) {
     };
     let mut copy = false;
     let mut close = false;
-    let mut frame = egui::Frame::popup(&ctx.global_style());
-    frame.fill = theme::WINDOW_BACKGROUND;
-    frame.inner_margin = egui::Margin::same(12);
-    let mut modal = egui::Modal::new(Id::new("build-command-line"));
-    modal = modal.frame(frame);
+    let frame = widgets::dialog_frame(ctx).fill(theme::WINDOW_BACKGROUND);
+    let modal = egui::Modal::new(Id::new("build-command-line")).frame(frame);
     let response = modal.show(ctx, |ui| {
         ui.set_width(WIDTH);
         let instruction = RichText::new("Build Command Line").font(theme::semibold(15.0)).color(theme::ACCENT_BLUE);

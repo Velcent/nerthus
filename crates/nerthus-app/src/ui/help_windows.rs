@@ -9,7 +9,7 @@ use egui::{Align, Align2, Color32, Id, Layout, RichText, Sense, Stroke, Ui, Vec2
 
 use crate::theme;
 use crate::ui::markdown;
-use crate::ui::widgets::{dialog_button, dialog_button_row};
+use crate::ui::widgets::{self, dialog_button, dialog_button_row};
 use crate::updates::{UpdateAnswer, UpdateToken};
 
 const SHORTCUTS: &str = include_str!("../../data/shortcuts.md");
@@ -439,7 +439,7 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
         UpdateAnswer::Available(_) => "Update available!".to_string(),
         _ => concat!("Nerthus ", env!("CARGO_PKG_VERSION")).to_string(),
     };
-    let modal = egui::Modal::new(Id::new("update-check"));
+    let modal = widgets::dialog(ctx, Id::new("update-check"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(460.0);
         ui.label(RichText::new(caption).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));

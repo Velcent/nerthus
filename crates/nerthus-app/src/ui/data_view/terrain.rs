@@ -16,7 +16,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::data_view::{toolbar, toolbar_divider, toolbar_row};
 use crate::ui::graph_canvas::{node_color, node_context_menu, node_icon, GraphState, ZoomRequest};
-use crate::ui::widgets::{icon_menu, menu_item, menu_separator};
+use crate::ui::widgets::{icon_menu, menu_item, menu_separator, Tooltips};
 use crate::user::IconState;
 
 /// `DataView-Foreground` (every row's text) and `Bright` (bookmarked
@@ -345,7 +345,7 @@ fn toolbar_icon(ui: &mut Ui, icon: &str, color: Color32, active: bool, tooltip: 
     }
     let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icons::DEFAULT_SIZE));
     icons::paint(ui, icon_rect, icon, color.gamma_multiply(opacity));
-    response.on_hover_text(tooltip)
+    response.tooltip(tooltip)
 }
 
 /// `NodeElement.GoToLocation` and `Select`: the node's tab, centred.
@@ -672,7 +672,7 @@ fn row(ui: &mut Ui, row: &Row, icon_state: IconState) -> RowResponse {
     ui.painter().galley(text_position, galley, text_color);
 
     let response = match &row.tooltip {
-        Some(tooltip) if !tooltip.is_empty() => response.on_hover_text(tooltip),
+        Some(tooltip) if !tooltip.is_empty() => response.tooltip(tooltip),
         _ => response,
     };
     RowResponse {

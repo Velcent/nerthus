@@ -17,7 +17,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::elided_galley;
 use crate::ui::tool_commands::ToolCommand;
-use crate::ui::widgets::{check_item, link_button, menu_caption, menu_item, menu_separator, menu_style, submenu};
+use crate::ui::widgets::{check_item, link_button, menu_caption, menu_item, menu_separator, menu_style, submenu, Tooltips};
 
 /// `ProportionateRegionsGridUnit`: a grid cell, in build pixels.
 const GRID_UNIT: f32 = 512.0;
@@ -625,7 +625,7 @@ fn region_menu(ui: &mut Ui, editor: &mut Editor, state: &mut RegionsState, name:
                 let color = theme::swatch_color(swatch);
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
                 ui.painter().rect_filled(rect, 2.0, color);
-                if response.on_hover_text(*swatch).clicked() {
+                if response.tooltip(*swatch).clicked() {
                     chosen = Some(color);
                 }
                 if index == SWATCHES.len() / 2 - 1 {
@@ -680,7 +680,7 @@ fn canvas_menu(ui: &mut Ui, editor: &mut Editor, state: &mut RegionsState, canva
     }
     menu_separator(ui);
     let snap_item = check_item(ui, state.snap, "Snap Regions", "");
-    let snap_item = snap_item.on_hover_text("Enables snapping behavior for regions on the canvas during drag or resize actions.");
+    let snap_item = snap_item.tooltip("Enables snapping behavior for regions on the canvas during drag or resize actions.");
     if snap_item.clicked() {
         state.snap = !state.snap;
     }

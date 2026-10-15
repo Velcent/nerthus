@@ -15,7 +15,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::{node_color, node_icon};
 use crate::ui::graph_commands::{GraphCommand, NodeSource, SearchPick};
-use crate::ui::widgets::{menu_style, submenu};
+use crate::ui::widgets::{menu_style, submenu, Tooltips};
 
 /// Nodes that hand terrain to other programs, which Nerthus leaves out.
 const LEFT_OUT: [&str; 3] = ["HoudiniOut", "Unity", "Unreal"];
@@ -555,7 +555,7 @@ fn result_row(ui: &mut Ui, editor: &Editor, found: &Found, highlighted: bool) ->
         ui.painter().galley(Pos2::new(right_edge, rect.center().y - right_galley.size().y / 2.0 + 1.0), right_galley, right_color);
     }
     let response = match tooltip {
-        Some(text) => response.on_hover_text(text),
+        Some(text) => response.tooltip(text),
         None => response,
     };
     response.clicked()

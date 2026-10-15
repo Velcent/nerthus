@@ -8,7 +8,7 @@ use crate::editor::Editor;
 use crate::presets;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::widgets::{dialog_button, menu_item, menu_item_enabled, menu_separator};
+use crate::ui::widgets::{dialog, dialog_button, menu_item, menu_item_enabled, menu_separator, Tooltips};
 
 /// `LoadNodePresets`: Create Preset, then the presets for the selected
 /// node's type (each with its description as the tooltip) or "No presets
@@ -31,7 +31,7 @@ pub fn presets_menu(ui: &mut egui::Ui, editor: &Editor, commands: &mut Vec<Comma
     for preset in presets {
         let response = menu_item(ui, None, None, &preset.name, "");
         let response = match &preset.description {
-            Some(description) if !description.is_empty() => response.on_hover_text(description),
+            Some(description) if !description.is_empty() => response.tooltip(description),
             _ => response,
         };
         if response.clicked() {
@@ -79,7 +79,7 @@ pub fn show_create_window(ctx: &egui::Context, editor: &mut Editor) {
     };
     let mut close = false;
     let mut create = false;
-    let modal = egui::Modal::new(window_id().with("modal"));
+    let modal = dialog(ctx, window_id().with("modal"));
     let response = modal.show(ctx, |ui| {
         ui.set_width(440.0 - 2.0 * 20.0);
         ui.spacing_mut().item_spacing.y = 2.0;

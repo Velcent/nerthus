@@ -12,6 +12,7 @@ use std::any::Any;
 use egui::{Align, Layout, RichText};
 
 use crate::theme;
+use crate::ui::widgets;
 
 /// How long the editor has to draw before it counts as started: the
 /// viewport's launch and the timer that settles it.
@@ -77,7 +78,7 @@ pub fn show(ctx: &egui::Context, crash: &mut Option<Crash>) {
     };
     let (caption, text) = if waiting.diagnose { (DIAGNOSE_CAPTION, DIAGNOSE_TEXT) } else { (CONTINUE_CAPTION, CONTINUE_TEXT) };
     let mut answer = None;
-    let modal = egui::Modal::new(egui::Id::new("crash-message-box"));
+    let modal = widgets::dialog(ctx, egui::Id::new("crash-message-box"));
     modal.show(ctx, |ui| {
         ui.set_width(420.0);
         ui.label(RichText::new(caption).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));

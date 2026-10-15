@@ -19,6 +19,7 @@ use egui::{Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use crate::icons;
 use crate::theme;
+use crate::ui::widgets::Tooltips;
 
 /// A slider's nudge commands (`NudgeCommand`), in the bar's order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -302,7 +303,7 @@ pub fn nudge_bar(ui: &Ui, id: Id, look: &NudgeLook) -> NudgeOutcome {
             let icon_rect = Rect::from_center_size(cell.center(), Vec2::splat(icons::DEFAULT_SIZE * scale));
             icons::paint(ui, icon_rect, icon, tint);
             let usable = nudge != Nudge::Default || look.has_default;
-            if button.on_hover_text(tooltip).clicked() && usable {
+            if button.tooltip(tooltip).clicked() && usable {
                 outcome.command = Some(nudge);
             }
         }
