@@ -2,7 +2,7 @@
 //! the window that follows a build (the build's console), and Save cached
 //! build's progress window.
 
-use egui::{Align, Color32, Layout, RichText, ScrollArea, Ui, Vec2};
+use egui::{Align, Color32, Layout, RichText, ScrollArea, Sense, Ui, Vec2};
 use nerthus_engine::StateOverride;
 use nerthus_export::build::BuildType;
 
@@ -15,8 +15,13 @@ use crate::ui::memory_dialogs;
 use crate::ui::tool_window;
 use crate::ui::UiState;
 
-/// The build log's height in the progress window.
-const LOG_HEIGHT: f32 = 240.0;
+/// The progress window's size when it first opens.
+const DEFAULT_SIZE: Vec2 = Vec2::new(560.0, 380.0);
+/// The smallest it can be made: room for the status, the footer and a few
+/// lines of the log.
+const MIN_SIZE: Vec2 = Vec2::new(360.0, 200.0);
+/// The height of the footer under the log.
+const FOOTER_HEIGHT: f32 = 20.0;
 
 /// The confirmation's state while it shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -149,7 +154,9 @@ pub fn progress(ctx: &egui::Context, editor: &Editor, commands: &mut Vec<Command
     let mut window = egui::Window::new(title);
     window = window.collapsible(false);
     window = window.resizable(true);
-    window = tool_window::place(ctx, window, egui::Id::new("build-progress"), Vec2::new(560.0, 380.0));
+    // Before `place`, which can fix the size for a frame.
+    window = window.min_size(MIN_SIZE);
+    window = tool_window::place(ctx, window, egui::Id::new("build-progress"), DEFAULT_SIZE);
     window = window.open(&mut open);
     window.show(ctx, |ui| {
             let status = if let Some(refusal) = &build.refusal {
@@ -177,35 +184,43 @@ pub fn progress(ctx: &egui::Context, editor: &Editor, commands: &mut Vec<Command
             progress_bar(ui, build.progress());
             ui.add_space(6.0);
 
+            // The room left, split between the log and the footer under
+            // it: the footer keeps its height and the log gets the rest, so
+            // that making the window shorter shrinks the log rather than
+            // cutting off the footer.
+            let (rest, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+            let footer = rest.with_min_y((rest.bottom() - FOOTER_HEIGHT).max(rest.top()));
+            // Between them a gap, with the separator's line along its middle.
+            let gap = 8.0;
+            let log_rect = rest.with_max_y((footer.top() - gap).max(rest.top()));
+            let mut log_ui = tool_window::part(ui, "build-log", log_rect, Layout::top_down(Align::Min));
             let mut log = ScrollArea::vertical();
-            log = log.max_height(LOG_HEIGHT);
             log = log.stick_to_bottom(true);
             log = log.auto_shrink([false, false]);
-            log.show(ui, |ui| {
+            log.show(&mut log_ui, |ui| {
                 for line in &build.log {
                     log_line(ui, line);
                 }
             });
 
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if build.finished {
-                        if ui.button("Close").clicked() {
-                            commands.push(Command::CloseBuildWindow);
-                        }
-                        let can_open = build.folder.as_ref().is_some_and(|folder| folder.is_dir());
-                        if ui.add_enabled(can_open, egui::Button::new("Open Folder")).clicked()
-                            && let Some(folder) = &build.folder
-                        {
-                            commands.push(Command::OpenFolder(folder.clone()));
-                        }
-                    } else if ui.button("Cancel").clicked() {
-                        commands.push(Command::CancelBuild);
+            let separator = ui.visuals().widgets.noninteractive.bg_stroke;
+            ui.painter().hline(rest.x_range(), footer.top() - gap / 2.0, separator);
+            tool_window::part(ui, "build-footer", footer, Layout::right_to_left(Align::Center)).scope(|ui| {
+                if build.finished {
+                    if ui.button("Close").clicked() {
+                        commands.push(Command::CloseBuildWindow);
                     }
-                    let elapsed = RichText::new(format!("{:.0} s", build.seconds()));
-                    ui.label(elapsed.font(theme::monospace(11.0)).color(theme::LABEL_DEFAULT));
-                });
+                    let can_open = build.folder.as_ref().is_some_and(|folder| folder.is_dir());
+                    if ui.add_enabled(can_open, egui::Button::new("Open Folder")).clicked()
+                        && let Some(folder) = &build.folder
+                    {
+                        commands.push(Command::OpenFolder(folder.clone()));
+                    }
+                } else if ui.button("Cancel").clicked() {
+                    commands.push(Command::CancelBuild);
+                }
+                let elapsed = RichText::new(format!("{:.0} s", build.seconds()));
+                ui.label(elapsed.font(theme::monospace(11.0)).color(theme::LABEL_DEFAULT));
             });
             if !build.finished {
                 ui.ctx().request_repaint();
@@ -249,7 +264,7 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::editor::NodeStatus;
-    use crate::export_build::BuildChoice;
+    use crate::export_build::{BuildChoice, ExportBuild};
     use crate::ui::commands;
     use crate::worker::{CachedPort, NodeCache};
     use bevy::prelude::Window;
@@ -338,5 +353,60 @@ mod tests {
         assert_eq!(editor.resume_build, None);
         assert_eq!(ui_state.prompt.as_ref().map(|prompt| prompt.caption.as_str()), Some("Save cached build?"));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A frame of the progress window with these events. Returns what was
+    /// painted and the window's rect.
+    fn progress_frame(context: &egui::Context, editor: &Editor, events: Vec<egui::Event>) -> (Vec<egui::epaint::ClippedShape>, egui::Rect) {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1600.0, 960.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut output = context.run_ui(input, |ui| {
+            progress(ui.ctx(), editor, &mut Vec::new());
+        });
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        let area = egui::AreaState::load(context, egui::Id::new("build-progress")).filter(|area| area.size.is_some());
+        (shapes, area.map(|area| area.rect()).unwrap_or(egui::Rect::NOTHING))
+    }
+
+    #[test]
+    fn a_shorter_progress_window_keeps_its_footer() {
+        let mut editor = Editor::new(Document::new());
+        let (_sender, messages) = crossbeam_channel::unbounded();
+        let mut build = ExportBuild::following("Footer".to_string(), 1024, false, messages);
+        build.finished = true;
+        build.log = (0..100).map(|index| LogLine::Step(format!("Step {index}"))).collect();
+        editor.export_build = Some(build);
+        let context = egui::Context::default();
+        let mut opened = egui::Rect::NOTHING;
+        for _ in 0..5 {
+            opened = progress_frame(&context, &editor, Vec::new()).1;
+        }
+        // The bottom right grip, dragged up past the smallest it can be.
+        let grip = opened.max - Vec2::splat(2.0);
+        let to = egui::pos2(grip.x, opened.top() + 60.0);
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        progress_frame(&context, &editor, vec![egui::Event::PointerMoved(grip)]);
+        progress_frame(&context, &editor, vec![button(grip, true)]);
+        for step in 1..=8 {
+            let pos = grip + (to - grip) * (step as f32 / 8.0);
+            progress_frame(&context, &editor, vec![egui::Event::PointerMoved(pos)]);
+        }
+        progress_frame(&context, &editor, vec![button(to, false)]);
+        for _ in 0..4 {
+            progress_frame(&context, &editor, Vec::new());
+        }
+        let (shapes, shorter) = progress_frame(&context, &editor, Vec::new());
+        assert!(shorter.height() < opened.height() - 100.0, "{shorter:?} was not made shorter than {opened:?}");
+        assert!((shorter.min - opened.min).length() <= 1.0, "the window's top left moved from {opened:?} to {shorter:?}");
+        for label in ["Close", "Open Folder"] {
+            let painted = shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => Some((clipped.clip_rect, text.visual_bounding_rect())),
+                _ => None,
+            });
+            let (clip, rect) = painted.unwrap_or_else(|| panic!("{label} is not painted"));
+            assert!(clip.expand(0.5).contains_rect(rect), "{label} at {rect:?} is cut off by {clip:?}");
+            assert!(shorter.contains_rect(rect), "{label} at {rect:?} is outside the window {shorter:?}");
+        }
     }
 }
