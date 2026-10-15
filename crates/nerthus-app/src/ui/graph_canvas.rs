@@ -43,6 +43,9 @@ const PORTS_SIDE: f32 = 8.0;
 const PORT_WIDTH: f32 = 20.0;
 const PORT_HEIGHT: f32 = 12.0;
 const PORT_DOT: f32 = 8.0;
+/// How far past its dot, towards the middle, a small node's port takes
+/// the pointer.
+const PORT_HIT_INSIDE: f32 = 4.0;
 /// `ConnectionElement.PortGap`.
 const PORT_GAP: f32 = 10.0;
 /// The circuit's horizontal run out of and into ports.
@@ -561,7 +564,17 @@ pub(crate) fn layout_node(node: &NodeData, default_size: &str) -> NodeLayout {
         // RefreshPoints: the element's centre, `PortGap` outwards.
         let anchor_x = if is_input { element.center().x - PORT_GAP } else { element.center().x + PORT_GAP };
         let anchor = Pos2::new(anchor_x, element.center().y);
-        let hit = element.expand2(Vec2::new(4.0, 2.0));
+        let mut hit = element.expand2(Vec2::new(4.0, 2.0));
+        // On a small node the two sides' elements meet across the middle:
+        // there a port takes the pointer near its dot only, leaving the
+        // icon between them to the node.
+        if size == NodeSize::Small {
+            if is_input {
+                hit.max.x = dot.right() + PORT_HIT_INSIDE;
+            } else {
+                hit.min.x = dot.left() - PORT_HIT_INSIDE;
+            }
+        }
         PortLayout {
             name: name.to_string(),
             label: String::new(),
@@ -1646,6 +1659,9 @@ fn handle_port_drags(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layou
     for (index, port, response) in ports {
         let node = layouts[*index].id;
         let collapsed = port.collapsed;
+        // A port has no menu of its own: a right-click on it goes on to
+        // its node's.
+        node_menu(response, editor, node, commands);
         // `PortElement.OnMouseDoubleClick` (Double-Click Connect): a
         // connection follows the pointer until the next click.
         if double_click_connect && response.double_clicked() {
@@ -1783,14 +1799,20 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
             let pointer_start = view.to_canvas(origin, pointer);
             start_element_drag(editor, state, id, pointer_start);
         }
-        response.context_menu(|ui| {
-            if !editor.selection.contains(&id) {
-                editor.select(Some(id));
-            }
-            node_context_menu(ui, editor, commands);
-        });
+        node_menu(&response, editor, id, commands);
     }
     drag_elements(ui, editor, state, layouts, groups, origin);
+}
+
+/// The node's context menu on a right-click of the node or one of its
+/// ports, the node selected unless it already is.
+fn node_menu(response: &Response, editor: &mut Editor, id: i32, commands: &mut Vec<Command>) {
+    response.context_menu(|ui| {
+        if !editor.selection.contains(&id) {
+            editor.select(Some(id));
+        }
+        node_context_menu(ui, editor, commands);
+    });
 }
 
 /// The drag of the selection begins: locked elements stay (`Locked`), and
@@ -3062,6 +3084,56 @@ mod tests {
         let (mountain_box, mountain_name, no_mask) = shown(mountain);
         assert!(no_mask.is_none());
         assert!(mountain_name.left() < mask_dot.right() - combine_box.left() + mountain_box.left());
+    }
+
+    #[test]
+    fn small_node_ports_leave_the_middle_to_the_node() {
+        // A small Combine, like Final in Alpine Valley: two inputs, which
+        // fill both rows on the left, and an output.
+        let mut document = Document::new();
+        let combine = document.add_node("Combine", [26100.0, 26100.0]).unwrap();
+        document.set_member(combine, "NodeSize", serde_json::json!("Small"), "Node size", false);
+        let mut editor = Editor::new(document);
+        let layout = layout_node(editor.document.node(combine).unwrap(), editor.user.options.default_node_size());
+        assert_eq!((layout.inputs.len(), layout.outputs.len()), (2, 1));
+
+        // Each port takes the pointer over its dot, but neither side reaches
+        // the icon in the middle or the other side.
+        let icon = Rect::from_center_size(layout.rect.center(), Vec2::splat(20.0));
+        for port in layout.ports() {
+            assert!(port.hit.contains_rect(port.dot), "{} {:?} misses its dot {:?}", port.name, port.hit, port.dot);
+            assert!(!port.hit.intersects(icon), "{} {:?} covers the icon {icon:?}", port.name, port.hit);
+        }
+        for input in &layout.inputs {
+            for output in &layout.outputs {
+                assert!(!input.hit.intersects(output.hit), "{} {:?} meets {} {:?}", input.name, input.hit, output.name, output.hit);
+            }
+        }
+
+        // A right-click in the middle, beside it in the output's row, or
+        // on a port's dot opens the node's menu.
+        let none = egui::Modifiers::NONE;
+        let output_row = layout.outputs[0].dot.center().y;
+        let points = [
+            ("the middle", layout.rect.center()),
+            ("the output's row", Pos2::new(layout.rect.center().x + 8.0, output_row)),
+            ("an input's dot", layout.inputs[1].dot.center()),
+            ("the output's dot", layout.outputs[0].dot.center()),
+        ];
+        for (place, at) in points {
+            let context = themed_context();
+            let mut state = GraphState::default();
+            editor.select(None);
+            graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+            let point = state.view().to_screen(state.rect.min, at);
+            let button = |pressed: bool| egui::Event::PointerButton { pos: point, button: PointerButton::Secondary, pressed, modifiers: none };
+            graph_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(point)], none);
+            graph_frame(&context, &mut editor, &mut state, vec![button(true)], none);
+            graph_frame(&context, &mut editor, &mut state, vec![button(false)], none);
+            graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+            assert!(egui::Popup::is_any_open(&context), "no menu opens on {place}");
+            assert_eq!(editor.selection, vec![combine], "the menu on {place} is not the node's");
+        }
     }
 
     #[test]
