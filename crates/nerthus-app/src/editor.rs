@@ -207,6 +207,10 @@ pub struct Editor {
     /// the property area.
     pub tiled_preview: bool,
     pub statuses: HashMap<i32, NodeStatus>,
+    /// The errors the running build's stale nodes had before it, until it
+    /// reports them: the property area's warning row keeps its place
+    /// meanwhile rather than every editor below it jumping up and back.
+    last_errors: HashMap<i32, String>,
     /// The previewed node's maps by port, and what colours drape over.
     pub outputs: Vec<(String, Arc<Map>)>,
     pub underlay: Option<Arc<Map>>,
@@ -333,6 +337,7 @@ impl Editor {
             flat_preview: false,
             tiled_preview: false,
             statuses: HashMap::new(),
+            last_errors: HashMap::new(),
             outputs: Vec::new(),
             underlay: None,
             custom_underlay: None,
@@ -409,6 +414,7 @@ impl Editor {
         self.preview_locked = false;
         self.preview_region = None;
         self.statuses.clear();
+        self.last_errors.clear();
         self.node_caches.clear();
         self.outputs.clear();
         self.underlay = None;
@@ -1216,6 +1222,30 @@ impl Editor {
         self.statuses.get(&node).cloned().unwrap_or_default()
     }
 
+    /// The error a node's warning row shows: its status's, or while the
+    /// running build has yet to report the node, the one it had before.
+    pub fn shown_error(&self, node: i32) -> Option<String> {
+        let error = self.statuses.get(&node).and_then(|status| status.error.clone());
+        error.or_else(|| self.last_errors.get(&node).cloned())
+    }
+
+    /// Drops a node's status for a rebuild, keeping its error until the
+    /// build reports the node.
+    fn forget_status(&mut self, node: i32) {
+        let Some(status) = self.statuses.remove(&node) else {
+            return;
+        };
+        // Started by a superseded build but never finished: the error that
+        // build kept still stands.
+        if status.built_at.is_none() {
+            return;
+        }
+        match status.error {
+            Some(error) => self.last_errors.insert(node, error),
+            None => self.last_errors.remove(&node),
+        };
+    }
+
     /// Counts the preview builds asked for.
     pub fn build_generation(&self) -> u64 {
         self.generation
@@ -1283,10 +1313,13 @@ impl Editor {
         self.pending_preparation = false;
         let (stale, clear) = self.document.take_stale();
         for node in &stale {
-            self.statuses.remove(node);
+            self.forget_status(*node);
         }
         if clear {
-            self.statuses.clear();
+            let built: Vec<i32> = self.statuses.keys().copied().collect();
+            for node in built {
+                self.forget_status(node);
+            }
         }
         let asset = &self.document.project.assets[0];
         let request = BuildRequest {
@@ -1345,6 +1378,7 @@ impl Editor {
                     range,
                 };
                 self.statuses.insert(node, status);
+                self.last_errors.remove(&node);
                 self.build_done += 1;
                 let total = self.build_total.max(1);
                 self.build_progress = (self.build_done as f32 / total as f32).min(1.0);
@@ -1361,6 +1395,7 @@ impl Editor {
                 }
                 self.cancelled_generation = generation;
                 self.building = false;
+                self.last_errors.clear();
                 if let Some(started) = self.build_started.take() {
                     self.last_build_seconds = started.elapsed().as_secs_f32();
                 }
@@ -1393,6 +1428,8 @@ impl Editor {
                 // `Build_BuildFinished`: the preview stands up again.
                 self.flat_preview = false;
                 self.building = false;
+                // What the build left unreported is unbuilt now.
+                self.last_errors.clear();
                 self.build_progress = 1.0;
                 if let Some(started) = self.build_started.take() {
                     self.last_build_seconds = started.elapsed().as_secs_f32();
@@ -2218,6 +2255,45 @@ mod tests {
         assert_eq!(adaptive_debounce(1000.5), Duration::from_millis(500));
         assert_eq!(adaptive_debounce(5000.0), Duration::from_millis(500));
         assert_eq!(adaptive_debounce(9000.0), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn a_rebuilt_nodes_error_stays_shown_until_the_build_reports_it() {
+        let mut document = Document::new();
+        let erosion = document.add_node("ErosionPro", [26000.0, 26000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.select(Some(erosion));
+        let error = "The port In is required and is not connected.".to_string();
+        let reported = |error: Option<String>| {
+            let state = if error.is_some() { NodeState::Error } else { NodeState::Built };
+            BuildEvent::NodeFinished { node: erosion, milliseconds: 1.0, state, error, range: None }
+        };
+        editor.handle_event(reported(Some(error.clone())));
+        assert_eq!(editor.shown_error(erosion), Some(error.clone()));
+
+        // An edit's rebuild drops the status but not the error shown, while
+        // the node waits, builds, and is taken over by a newer build.
+        let worker = BuildWorker::start();
+        editor.document.mark_stale(erosion);
+        editor.request_build(&worker);
+        assert_eq!(editor.status(erosion).error, None);
+        assert_eq!(editor.shown_error(erosion), Some(error.clone()));
+        editor.handle_event(BuildEvent::NodeStarted(erosion));
+        editor.document.mark_stale(erosion);
+        editor.request_build(&worker);
+        assert_eq!(editor.shown_error(erosion), Some(error.clone()));
+
+        // Reported again, it shows what the build found.
+        editor.handle_event(reported(None));
+        assert_eq!(editor.shown_error(erosion), None);
+        editor.handle_event(reported(Some(error.clone())));
+
+        // A build that ends without reporting it leaves it unbuilt.
+        editor.document.mark_all_stale();
+        editor.request_build(&worker);
+        assert_eq!(editor.shown_error(erosion), Some(error));
+        editor.handle_event(BuildEvent::Cancelled { generation: editor.generation });
+        assert_eq!(editor.shown_error(erosion), None);
     }
 
     #[test]

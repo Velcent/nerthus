@@ -135,8 +135,8 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
     if let Some(row) = command_row(ui, rect, body_top, editor, node_id, commands) {
         body_top = row.bottom() + sizes.property_border[3];
     }
-    let error = editor.status(node_id).error;
-    if let Some(error) = error {
+    // Kept through a rebuild until the build reports the node.
+    if let Some(error) = editor.shown_error(node_id) {
         body_top = warning_row(ui, rect, body_top, &error);
     }
 
