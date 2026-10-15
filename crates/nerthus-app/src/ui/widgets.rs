@@ -4,7 +4,7 @@
 //! dialogs' frames and buttons, selectable items and tooltips.
 
 use egui::containers::menu::{MenuButton, MenuConfig, SubMenu};
-use egui::{Button, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetText};
+use egui::{Button, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetText};
 
 use crate::icons;
 use crate::theme;
@@ -310,31 +310,59 @@ pub fn menu_caption(ui: &mut Ui, text: &str) {
 pub fn submenu<R>(ui: &mut Ui, icon: Option<&str>, accent: Option<Color32>, text: &str, contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     let tint = accent.unwrap_or(theme::MENU_ICON);
     let icon = icon.map(|name| (name, tint));
-    submenu_row(ui, contents, |ui, child, open| menu_row(ui, icon, text, "", true, Some(child), open))
+    submenu_row(ui, |ui, _| contents(ui), |ui, child, open| menu_row(ui, icon, text, "", true, Some(child), open))
+}
+
+/// A submenu entry whose rows scroll, for a list that can run long (the
+/// graph search's "more..."): the submenu is no taller than fits on the
+/// screen beside its row. egui only moves a menu to keep it on screen,
+/// which puts a long one over its menu and still past the window's edge.
+pub fn scrolling_submenu<R>(ui: &mut Ui, icon: Option<&str>, accent: Option<Color32>, text: &str, contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    let tint = accent.unwrap_or(theme::MENU_ICON);
+    let icon = icon.map(|name| (name, tint));
+    let rows = |ui: &mut Ui, room: f32| {
+        scroll_bar_gutter(ui);
+        ScrollArea::vertical().max_height(room).show(ui, contents).inner
+    };
+    submenu_row(ui, rows, |ui, child, open| menu_row(ui, icon, text, "", true, Some(child), open))
 }
 
 /// A family header with its submenu (the toolbox's `Tag="HEADER"` items):
 /// icon and small-caps text in `color`.
 pub fn header_submenu<R>(ui: &mut Ui, icon: &str, color: Color32, text: &str, contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     let style = RowText { color: Some(color), small_caps: true };
-    submenu_row(ui, contents, |ui, child, open| menu_row_styled(ui, Some((icon, color)), text, style, "", true, Some(child), open))
+    submenu_row(ui, |ui, _| contents(ui), |ui, child, open| menu_row_styled(ui, Some((icon, color)), text, style, "", true, Some(child), open))
 }
 
 /// The row `draw` draws (given its submenu's id and whether it is open)
-/// and the submenu beside it. While the keys are in use, only they open
+/// and the submenu beside it, `contents` given the height its rows have
+/// room for on the screen. While the keys are in use, only they open
 /// submenus.
-fn submenu_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R, draw: impl FnOnce(&mut Ui, Id, bool) -> Response) -> Option<R> {
+fn submenu_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui, f32) -> R, draw: impl FnOnce(&mut Ui, Id, bool) -> Response) -> Option<R> {
     let child = SubMenu::id_from_widget_id(ui.next_auto_id());
     let open = menu_keys::submenu_open(ui, child);
     let response = draw(ui, child, open);
     if !open && menu_keys::active(ui.ctx()) {
         return None;
     }
+    let room = submenu_room(ui, response.interact_rect);
     let shown = SubMenu::new().show(ui, &response, |ui| {
         menu_style(ui);
-        contents(ui)
+        contents(ui, room)
     });
     shown.map(|inner| inner.inner)
+}
+
+/// How tall a submenu's rows can be and the submenu still fit on the
+/// screen beside `row`: egui opens it down from the row's top or, where
+/// that runs off the screen, up from the row's foot (`RIGHT_START` and
+/// `RIGHT_END`, or the same on the left). The more of the two, less the
+/// submenu's frame (`SubMenu` frames it with `Frame::menu`).
+fn submenu_room(ui: &Ui, row: Rect) -> f32 {
+    let screen = ui.ctx().content_rect();
+    let room = (screen.bottom() - row.top()).max(row.bottom() - screen.top());
+    let frame = Frame::menu(ui.style()).total_margin().sum().y;
+    (room - frame).max(MENU_ROW_HEIGHT)
 }
 
 /// `MenuItem.SeparatorStyleKey`: a full-width 1px rule (`Menu-Separator`
