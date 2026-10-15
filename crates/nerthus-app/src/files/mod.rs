@@ -624,7 +624,7 @@ fn show_dialogs(_main_thread: NonSendMarker, mut editor: ResMut<Editor>) {
             if let Some(folder) = editor.user.locations.folder(locations::OPEN) {
                 dialog = dialog.set_directory(folder);
             }
-            let Some(path) = dialog.pick_file() else {
+            let Some(path) = pick_file(editor, dialog) else {
                 return;
             };
             repair(editor, &path);
@@ -802,9 +802,27 @@ fn import_graph(editor: &mut Editor, path: &Path) {
     }
 }
 
+/// What the chooser says when it could not be shown at all.
+const CHOOSER_FAILED_CAPTION: &str = "Cannot open the file chooser";
+const CHOOSER_FAILED_TEXT: &str = "The file chooser could not be shown, so no file was picked.\n\nNerthus picks files through the XDG desktop portal, or zenity where there is no portal. Install either one and try again.";
+
+/// A file picked in `dialog`. `rfd` answers a chooser it could not show as
+/// if it were cancelled, so that case is told apart by the failure it logs
+/// (`logging::chooser_failures`), and the user is told.
+#[cfg(not(target_arch = "wasm32"))]
+fn pick_file(editor: &mut Editor, dialog: rfd::FileDialog) -> Option<PathBuf> {
+    let failures = crate::logging::chooser_failures();
+    let picked = dialog.pick_file();
+    if picked.is_none() && crate::logging::chooser_failures() != failures {
+        editor.files.show_message(CHOOSER_FAILED_CAPTION, CHOOSER_FAILED_TEXT);
+    }
+    picked
+}
+
 /// File › Repair File… (`RepairFile`): a new project holding the chosen
 /// file's graph, read as File › Open reads it and imported tab by tab, in
-/// place of the new project's empty first tab.
+/// place of the new project's empty first tab. A file that cannot be read
+/// leaves the open project as it was.
 fn repair(editor: &mut Editor, path: &Path) {
     let stem = path.file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_default();
     let project = std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|text| nerthus_engine::Project::parse(&text).map_err(anyhow::Error::from));
@@ -816,6 +834,7 @@ fn repair(editor: &mut Editor, path: &Path) {
             return;
         }
     };
+    new_project(editor);
     editor.document.import_terrain(project.terrain(), &stem);
     editor.document.delete_graph_tab(0);
     editor.changed();
@@ -868,6 +887,33 @@ mod tests {
         assert_eq!(crate::ui::byte_size(1536), "1.5 KB");
         assert_eq!(crate::ui::byte_size(0), "0 b");
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn repair_keeps_the_project_until_a_file_is_read() {
+        let mut document = Document::new();
+        let mountain = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let ridge = PathBuf::from("Ridge.terrain");
+        editor.document.path = Some(ridge.clone());
+        let folder = std::env::temp_dir().join(format!("nerthus-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let broken = folder.join("Broken.terrain");
+        std::fs::write(&broken, "not a project").unwrap();
+        repair(&mut editor, &broken);
+        assert_eq!(editor.document.path, Some(ridge));
+        assert!(editor.document.terrain().nodes.contains_key(&mountain));
+        repair(&mut editor, &folder.join("Missing.terrain"));
+        assert!(editor.document.terrain().nodes.contains_key(&mountain));
+        std::fs::remove_dir_all(&folder).unwrap();
+        // A file that reads: a new, untitled project holding its graph.
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples/Alpine Valley.terrain");
+        let text = std::fs::read_to_string(&example).unwrap();
+        let nodes = nerthus_engine::Project::parse(&text).unwrap().terrain().nodes.len();
+        repair(&mut editor, &example);
+        assert_eq!(editor.document.path, None);
+        assert_eq!(editor.document.terrain().nodes.len(), nodes);
+        assert!(editor.document.dirty);
     }
 
     #[cfg(unix)]

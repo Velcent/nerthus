@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use bevy::app::App;
@@ -30,6 +30,7 @@ const MEMORY_LIMIT: usize = 8 << 20;
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 static SESSION: OnceLock<Mutex<SessionLog>> = OnceLock::new();
+static CHOOSER_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
 /// The session's log: the text in memory and the file being written.
 #[derive(Default)]
@@ -83,6 +84,18 @@ pub fn session_text() -> String {
 /// The log file being written.
 pub fn current_log_file() -> Option<PathBuf> {
     session().lock().ok().and_then(|log| log.path.clone())
+}
+
+/// How many times this session the file chooser could not be shown.
+pub fn chooser_failures() -> usize {
+    CHOOSER_FAILURES.load(Ordering::Relaxed)
+}
+
+/// Whether a message is the file chooser (`rfd`) giving up: on Linux it
+/// tries the XDG desktop portal, then zenity, and when zenity cannot run
+/// either it logs an error naming it and answers as if cancelled.
+fn is_chooser_failure(level: &Level, target: &str, message: &str) -> bool {
+    *level == Level::ERROR && target.starts_with("rfd") && message.contains("zenity")
 }
 
 /// `Logging.Initialize(verbose)`: a new log file for the rest of the
@@ -181,17 +194,21 @@ fn informational(level: &Level) -> bool {
     matches!(*level, Level::INFO | Level::WARN | Level::ERROR)
 }
 
-/// A message's text: its `message` field, then the others.
+/// A message's text: its `message` field, then the others; and, for one
+/// from the `log` crate, the target it was logged with (`log.target`).
 #[derive(Default)]
 struct MessageText {
     message: String,
     others: String,
+    target: Option<String>,
 }
 
 impl Visit for MessageText {
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "message" {
             self.message.push_str(value);
+        } else if field.name() == "log.target" {
+            self.target = Some(value.to_string());
         } else if !field.name().starts_with("log.") {
             let _ = write!(self.others, " {}={value}", field.name());
         }
@@ -214,6 +231,10 @@ impl<S: Subscriber> Layer<S> for SessionLayer {
         let level = *event.metadata().level();
         let mut text = MessageText::default();
         event.record(&mut text);
+        let target = text.target.as_deref().unwrap_or(event.metadata().target());
+        if is_chooser_failure(&level, target, &text.message) {
+            CHOOSER_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
         let stamp = chrono::Local::now().format("%H:%M:%S");
         let name = level_name(&level);
         let message = format!("{}{}", text.message, text.others);
@@ -280,5 +301,20 @@ fn record_fatal(message: &str) {
     let line = format!("[{stamp}] FTL {message}\n");
     if let Some(file) = log.file.as_mut() {
         let _ = file.write_all(line.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chooser_fails_only_once_zenity_cannot_run() {
+        let zenity = "Failed to pick file with zenity: No such file or directory (os error 2)";
+        assert!(is_chooser_failure(&Level::ERROR, "rfd::backend::xdg_desktop_portal", zenity));
+        // No portal: zenity is tried next, and may well show.
+        assert!(!is_chooser_failure(&Level::ERROR, "rfd::backend::xdg_desktop_portal::portal", "OpenFile failed: no portal"));
+        assert!(!is_chooser_failure(&Level::WARN, "rfd::backend::xdg_desktop_portal", "Using zenity fallback"));
+        assert!(!is_chooser_failure(&Level::ERROR, "nerthus_app", zenity));
     }
 }
