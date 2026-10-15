@@ -339,7 +339,7 @@ fn confirm_tab_delete(ui: &mut Ui, tabs: &[crate::document::GraphTabInfo], ui_st
     let modal = egui::Modal::new(egui::Id::new("confirm-delete-tab"));
     let response = modal.show(ui.ctx(), |ui| {
         ui.set_width(320.0);
-        ui.label(egui::RichText::new(format!("Delete Group \"{name}\" ?")).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
+        ui.label(egui::RichText::new(format!("Delete Graph Tab \"{name}\"?")).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
         ui.add_space(6.0);
         ui.label(format!("Are you sure you want to delete this Graph \"{name}\"?"));
         ui.add_space(10.0);
