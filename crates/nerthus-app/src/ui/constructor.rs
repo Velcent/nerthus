@@ -177,7 +177,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut ConstructorWi
     let mut open = true;
     let mut frame = egui::Frame::window(&ctx.global_style());
     frame.fill = theme::PANEL_BACKGROUND;
-    frame.inner_margin = egui::Margin::same(12);
+    frame.inner_margin = egui::Margin::same(tool_window::MARGIN);
     let mut constructor = egui::Window::new("God Mode: Constructor");
     constructor = constructor.open(&mut open);
     constructor = constructor.collapsible(false);

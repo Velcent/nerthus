@@ -16,10 +16,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crossbeam_channel::Receiver;
-use egui::{Align, Id, Layout, RichText, Vec2};
+use egui::{Id, RichText, Vec2};
 
 use crate::editor::Editor;
 use crate::theme;
+use crate::ui::widgets::{dialog_button, dialog_button_row};
 
 /// The tasks, in Watson's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,12 +114,12 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut DiagnosticsWi
         field = field.desired_width(f32::INFINITY);
         egui::ScrollArea::vertical().max_height(180.0).stick_to_bottom(true).show(ui, |ui| ui.add(field));
         ui.add_space(8.0);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Close").clicked() {
+        dialog_button_row(ui, |ui| {
+            if dialog_button(ui, "Close", false).clicked() {
                 close = true;
             }
             let busy = window.benchmark.is_some();
-            let started = ui.add_enabled_ui(!busy, |ui| crate::ui::help_windows::important_button(ui, "Start", 12.0, 87.0, Vec2::new(24.0, 6.0)));
+            let started = ui.add_enabled_ui(!busy, |ui| dialog_button(ui, "Start", true));
             if started.inner.clicked() {
                 request = start(editor, window);
             }

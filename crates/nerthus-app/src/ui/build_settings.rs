@@ -22,7 +22,7 @@ use crate::ui::input_box::{InputAnswer, InputBox};
 use crate::ui::regions::{self, RegionsState};
 use crate::ui::tool_commands::ToolCommand;
 use crate::ui::tool_window;
-use crate::ui::widgets::{icon_menu, link_button, menu_item, menu_separator, scroll_bar_gutter};
+use crate::ui::widgets::{icon_menu, link_button, menu_item, menu_separator, scroll_bar_gutter, selectable_label, selectable_text};
 
 /// `BuildSettingsWindow`'s tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,7 +218,8 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSe
                 for (tab, name, enabled) in TABS {
                     let selected = settings.tab == tab;
                     let enabled = if tab == SettingsTab::Tiles { tiled } else { enabled };
-                    let response = ui.add_enabled(enabled, egui::Button::selectable(selected, name));
+                    let text = selectable_text(ui, selected, name);
+                    let response = ui.add_enabled(enabled, egui::Button::selectable(selected, text));
                     if response.clicked() {
                         settings.tab = tab;
                     }
@@ -285,7 +286,7 @@ fn profiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsSt
                 ui.set_width(ui.available_width());
                 for name in &names {
                     let selected = settings.profile.as_deref() == Some(name.as_str());
-                    if ui.selectable_label(selected, name.as_str()).clicked() {
+                    if selectable_label(ui, selected, name.as_str()).clicked() {
                         settings.profile = Some(name.clone());
                     }
                 }
@@ -494,7 +495,7 @@ fn resolution_choice(ui: &mut Ui, current: usize) -> Option<usize> {
     combo = combo.width(260.0);
     combo.show_ui(ui, |ui| {
         for (size, name) in RESOLUTIONS {
-            if ui.selectable_label(size == current, name).clicked() {
+            if selectable_label(ui, size == current, name).clicked() {
                 chosen = Some(size);
             }
         }
@@ -513,12 +514,12 @@ fn region_choice(ui: &mut Ui, editor: &mut Editor, definition: &BuildDefinition,
     combo = combo.selected_text(current);
     combo = combo.width(260.0);
     combo.show_ui(ui, |ui| {
-        if ui.selectable_label(selected.is_none(), "Whole Terrain").clicked() {
+        if selectable_label(ui, selected.is_none(), "Whole Terrain").clicked() {
             chosen = Some(None);
         }
         for region in &regions {
             let is_selected = selected.is_some_and(|selected| selected.name == region.name);
-            if ui.selectable_label(is_selected, region.name.as_str()).clicked() {
+            if selectable_label(ui, is_selected, region.name.as_str()).clicked() {
                 chosen = Some(Some(region.clone()));
             }
         }
@@ -614,7 +615,7 @@ fn tile_size_choice(ui: &mut Ui, editor: &mut Editor, definition: &BuildDefiniti
     combo = combo.width(260.0);
     combo.show_ui(ui, |ui| {
         for size in sizes {
-            if ui.selectable_label(size == definition.tile_resolution, format!("{size} x {size}")).clicked() {
+            if selectable_label(ui, size == definition.tile_resolution, format!("{size} x {size}")).clicked() {
                 chosen = Some(size);
             }
         }
@@ -634,7 +635,7 @@ fn blending_choice(ui: &mut Ui, editor: &mut Editor, definition: &BuildDefinitio
     combo = combo.width(260.0);
     combo.show_ui(ui, |ui| {
         for (share, name) in BLENDINGS {
-            if ui.selectable_label(share == definition.edge_blending, name).clicked() {
+            if selectable_label(ui, share == definition.edge_blending, name).clicked() {
                 chosen = Some(share);
             }
         }
@@ -709,7 +710,7 @@ fn tiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState
     combo = combo.width(360.0);
     combo.show_ui(ui, |ui| {
         for (organize, name) in ORGANIZATIONS {
-            if ui.selectable_label(organize == definition.organize_files, name).clicked() {
+            if selectable_label(ui, organize == definition.organize_files, name).clicked() {
                 chosen = Some(organize);
             }
         }
@@ -736,7 +737,7 @@ fn tiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState
     combo = combo.width(360.0);
     combo.show_ui(ui, |ui| {
         for overlap in 0..=MOST_OVERLAP {
-            if ui.selectable_label(overlap == definition.overlapping_pixels, overlap.to_string()).clicked() {
+            if selectable_label(ui, overlap == definition.overlapping_pixels, overlap.to_string()).clicked() {
                 chosen_overlap = Some(overlap);
             }
         }
@@ -791,7 +792,7 @@ fn build_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState
     combo = combo.width(260.0);
     combo.show_ui(ui, |ui| {
         for name in COLOR_SPACES {
-            if ui.selectable_label(name == current_space, name).clicked() {
+            if selectable_label(ui, name == current_space, name).clicked() {
                 chosen_space = Some(name);
             }
         }
@@ -964,7 +965,7 @@ fn savable(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState, 
         ui.add_enabled_ui(export.enabled, |ui| {
             combo.show_ui(ui, |ui| {
                 for format in FileFormat::ALL {
-                    let item = ui.selectable_label(format == export.format, format.name());
+                    let item = selectable_label(ui, format == export.format, format.name());
                     if item.on_hover_text(format.description()).clicked() {
                         chosen = Some(format);
                     }
