@@ -13,7 +13,7 @@
 //! opens submenus, until it moves or presses.
 
 use egui::containers::menu::{find_menu_root, is_in_menu, MenuState};
-use egui::{Context, FocusDirection, Id, InputState, Key, Modifiers, Popup, Response, Ui, Vec2};
+use egui::{Context, FocusDirection, Id, InputState, Key, Modifiers, Popup, Response, Ui, UiKind, Vec2};
 
 /// Where the context keeps it.
 const KEYBOARD_ID: &str = "nerthus-menu-keys";
@@ -351,10 +351,18 @@ pub fn row(ui: &Ui, response: &Response, submenu: Option<Id>) -> bool {
     let focused = response.has_focus();
     let hovered = response.hovered();
     let row = Row { id: response.id, submenu };
-    with(ctx, |keyboard| {
+    let (highlighted, keyed) = with(ctx, |keyboard| {
         keyboard.note(menu, pass, row, focused, hovered);
-        if keyboard.active { focused } else { hovered }
-    })
+        if keyboard.active { (focused, true) } else { (hovered, false) }
+    });
+    // The keys on a row scrolled out of view (`widgets::menu_rows`) bring
+    // it back. A popup's `Ui` starts its own stack, so the scroll area is
+    // the menu's, not one of what the menu was opened from.
+    let scrolls = ui.stack().iter().any(|stack| stack.kind() == Some(UiKind::ScrollArea));
+    if keyed && response.gained_focus() && scrolls {
+        response.scroll_to_me(None);
+    }
+    highlighted
 }
 
 /// Whether the submenu `child` of a row about to be drawn in `ui` is

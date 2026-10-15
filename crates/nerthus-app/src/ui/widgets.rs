@@ -8,7 +8,7 @@ use egui::{Button, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect,
 
 use crate::icons;
 use crate::theme;
-use crate::ui::menu_keys;
+use crate::ui::{menu_keys, title_bar};
 
 /// `Toolbar.ButtonSize` as the size theme has it.
 pub fn toolbar_button(ui: &Ui) -> f32 {
@@ -174,6 +174,37 @@ pub fn menu_style(ui: &mut Ui) {
     ui.set_min_width(MENU_MIN_WIDTH);
 }
 
+/// The rows of a menu dropped from the main menu (`menu_rows_within`),
+/// in at most the window's height under the title bar. The menu then
+/// opens under the bar, rather than egui moving it up over the bar (and
+/// its own title there) with its last rows cut off at the window's bottom.
+pub fn menu_rows<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let room = ui.ctx().content_rect().height() - title_bar::HEIGHT;
+    menu_rows_within(ui, room, contents)
+}
+
+/// A menu's rows (`menu_style`) in at most `room` high with the menu's
+/// frame, scrolling once they are taller. While they scroll, the bar's
+/// handle shows, beside them (`scroll_bar_gutter`).
+fn menu_rows_within<R>(ui: &mut Ui, room: f32, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let frame = Frame::menu(ui.style()).total_margin().sum().y;
+    let max_height = (room - frame).max(MENU_ROW_HEIGHT);
+    // A popup is laid out in the size it took last (egui's 400 high when
+    // it first opens): the rows may take all the room there is.
+    ui.set_max_height(max_height);
+    let style = ui.spacing().scroll;
+    scroll_bar_gutter(ui);
+    let scroll = &mut ui.spacing_mut().scroll;
+    scroll.dormant_handle_opacity = scroll.active_handle_opacity;
+    let rows = egui::ScrollArea::vertical().id_salt("menu-rows").max_height(max_height).show(ui, |ui| {
+        // Not for scroll areas in the rows.
+        ui.spacing_mut().scroll = style;
+        menu_style(ui);
+        contents(ui)
+    });
+    rows.inner
+}
+
 /// How a menu row's text is drawn.
 #[derive(Clone, Copy, Default)]
 struct RowText {
@@ -330,11 +361,35 @@ fn submenu_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R, draw: impl F
     if !open && menu_keys::active(ui.ctx()) {
         return None;
     }
-    let shown = SubMenu::new().show(ui, &response, |ui| {
-        menu_style(ui);
-        contents(ui)
-    });
+    // egui opens the submenu with the pointer anywhere on the row: of a
+    // row scrolled partly out of its menu's view (`menu_rows`), only on
+    // what shows. It opens it beside the row, which in a menu that
+    // scrolls is past the scroll bar beside the rows.
+    let mut row = response.clone();
+    row.rect = response.interact_rect;
+    let scrolled = ui.stack().iter().find(|stack| stack.kind() == Some(egui::UiKind::ScrollArea));
+    if let Some(menu) = scrolled.and_then(|stack| stack.parent.as_deref()) {
+        row.interact_rect.max.x = row.interact_rect.max.x.max(menu.max_rect.right());
+    }
+    let room = submenu_room(ui, &row);
+    let shown = SubMenu::new().show(ui, &row, |ui| menu_rows_within(ui, room, contents));
     shown.map(|inner| inner.inner)
+}
+
+/// The most room a submenu has beside its row and under the title bar:
+/// down from the row's top, where egui opens it first
+/// (`RectAlign::RIGHT_START`), or up from the row's bottom (`RIGHT_END`),
+/// a pixel short against rounding. No taller, the submenu fits one of
+/// them, so egui opens it beside the row rather than centred across it
+/// (over the bar) or, when nothing fits, moved over its menu.
+fn submenu_room(ui: &Ui, row: &Response) -> f32 {
+    let window = ui.ctx().content_rect();
+    // egui's anchor: the row, taller by half the submenu's frame each way.
+    let frame = Frame::menu(ui.style()).total_margin().sum().y;
+    let anchor = row.interact_rect.expand2(Vec2::new(0.0, frame / 2.0));
+    let below = window.bottom() - anchor.top();
+    let above = anchor.bottom() - (window.top() + title_bar::HEIGHT);
+    below.max(above) - 1.0
 }
 
 /// `MenuItem.SeparatorStyleKey`: a full-width 1px rule (`Menu-Separator`
@@ -1013,6 +1068,134 @@ mod tests {
         let clicked = press(&context, egui::Key::Space);
         assert_eq!(clicked.clicked, ["One"]);
         assert!(!clicked.open);
+    }
+
+    /// The long test menu's rows, and its submenu's.
+    const LONG_ROWS: usize = 40;
+    /// A window too short for them.
+    const SHORT_SCREEN: Vec2 = Vec2::new(1000.0, 300.0);
+
+    /// A frame of the long test menu: the menu and its submenu as their
+    /// areas were laid out, the menu's rows and the one with the focus.
+    struct Long {
+        button: Rect,
+        menu: Option<Rect>,
+        submenu: Option<Rect>,
+        rows: Vec<Rect>,
+        focused: Option<usize>,
+    }
+
+    /// One frame of a menu dropped from a button at the bottom of the
+    /// title bar on `SHORT_SCREEN`, with the keys taken as the app takes
+    /// them: `LONG_ROWS` rows, and before the `more`th a submenu (More)
+    /// of as many.
+    fn long_frame(context: &egui::Context, more: usize, events: Vec<egui::Event>) -> Long {
+        let screen = Rect::from_min_size(Pos2::ZERO, SHORT_SCREEN);
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut long = Long { button: Rect::NOTHING, menu: None, submenu: None, rows: Vec::new(), focused: None };
+        let mut submenu_id = None;
+        let output = context.run_ui(input, |ui| {
+            menu_keys::begin(ui.ctx());
+            let slot = Rect::from_min_size(Pos2::new(200.0, title_bar::HEIGHT - 24.0), Vec2::new(60.0, 24.0));
+            let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(slot));
+            let (response, inner) = MenuButton::new("Long").config(menu_config()).ui(&mut bar, |ui| {
+                menu_rows(ui, |ui| {
+                    for row in 0..LONG_ROWS {
+                        if row == more {
+                            let id = ui.next_auto_id();
+                            let shown = submenu(ui, None, None, "More", |ui| {
+                                for index in 0..LONG_ROWS {
+                                    menu_item(ui, None, None, &format!("More {index}"), "");
+                                }
+                            });
+                            submenu_id = shown.map(|_| SubMenu::id_from_widget_id(id));
+                        }
+                        let response = menu_item(ui, None, None, &format!("Row {row}"), "");
+                        if response.has_focus() {
+                            long.focused = Some(row);
+                        }
+                        long.rows.push(response.rect);
+                    }
+                });
+            });
+            long.button = response.rect;
+            long.menu = inner.map(|inner| inner.response.rect);
+        });
+        output.drop_without_applying_deltas();
+        long.submenu = submenu_id.and_then(|id| context.memory(|memory| memory.area_rect(id)));
+        long
+    }
+
+    /// `long_frame` and then `frames` more without input, as the app
+    /// draws them: the last.
+    fn long_frames(context: &egui::Context, more: usize, events: Vec<egui::Event>, frames: usize) -> Long {
+        let mut shown = long_frame(context, more, events);
+        for _ in 0..frames {
+            shown = long_frame(context, more, Vec::new());
+        }
+        shown
+    }
+
+    /// Opens the long test menu with a click, the pointer left off it.
+    fn long_opened(more: usize) -> (egui::Context, Long) {
+        let context = themed_context();
+        let button = long_frame(&context, more, Vec::new()).button.center();
+        long_frame(&context, more, vec![egui::Event::PointerMoved(button), click(button, true)]);
+        long_frame(&context, more, vec![click(button, false)]);
+        let shown = long_frames(&context, more, vec![egui::Event::PointerMoved(Pos2::new(600.0, 5.0))], 3);
+        assert!(shown.menu.is_some(), "the menu opens");
+        (context, shown)
+    }
+
+    /// Between `top` and the window's bottom.
+    fn assert_under(rect: Rect, top: f32, what: &str) {
+        assert!(rect.top() >= top - 0.5, "the {what} at {rect:?} is above {top}");
+        assert!(rect.bottom() <= SHORT_SCREEN.y + 0.5, "the {what} at {rect:?} runs past the window's bottom at {}", SHORT_SCREEN.y);
+    }
+
+    #[test]
+    fn a_menu_too_long_for_the_window_scrolls_under_the_title_bar() {
+        let (_, shown) = long_opened(5);
+        let menu = shown.menu.unwrap();
+        assert_under(menu, shown.button.bottom(), "menu");
+        let last = shown.rows[LONG_ROWS - 1];
+        assert!(last.top() > menu.bottom(), "the last row at {last:?} shows in the menu at {menu:?} before it scrolls");
+    }
+
+    #[test]
+    fn a_submenu_too_long_for_the_window_opens_beside_its_row_under_the_title_bar() {
+        // Near the menu's top, More's submenu runs down from its row; near
+        // the window's bottom, up from it.
+        for (more, down) in [(2, true), (5, true), (9, false)] {
+            let (context, shown) = long_opened(more);
+            let menu = shown.menu.unwrap();
+            let row = Rect::from_min_size(shown.rows[more - 1].left_bottom(), Vec2::new(menu.width(), MENU_ROW_HEIGHT));
+            assert!(row.bottom() < menu.bottom(), "More at {row:?} is out of the menu at {menu:?}");
+            let shown = long_frames(&context, more, vec![egui::Event::PointerMoved(row.center())], 3);
+            let submenu = shown.submenu.expect("hovering More opens its submenu");
+            assert_under(submenu, title_bar::HEIGHT, &format!("submenu of row {more}"));
+            assert!(submenu.left() >= menu.right() - 0.5, "{submenu:?} covers {menu:?}");
+            let (edge, row_edge) = if down { (submenu.top(), row.top()) } else { (submenu.bottom(), row.bottom()) };
+            assert!((edge - row_edge).abs() <= 3.0, "the submenu at {submenu:?} is not level with its row at {row:?}");
+            // As tall as there is room for, it scrolls.
+            assert!(submenu.height() < LONG_ROWS as f32 * MENU_ROW_HEIGHT);
+        }
+    }
+
+    #[test]
+    fn the_keys_scroll_a_long_menu_to_the_row_they_are_on() {
+        let (context, _) = long_opened(5);
+        let inside = |shown: &Long, row: usize| {
+            let (menu, row) = (shown.menu.unwrap(), shown.rows[row]);
+            row.top() >= menu.top() - 0.5 && row.bottom() <= menu.bottom() + 0.5
+        };
+        let shown = long_frames(&context, 5, vec![key(egui::Key::End, egui::Modifiers::NONE)], 60);
+        assert_eq!(shown.focused, Some(LONG_ROWS - 1));
+        assert!(inside(&shown, LONG_ROWS - 1), "the last row at {:?} is out of the menu at {:?}", shown.rows[LONG_ROWS - 1], shown.menu);
+        assert!(!inside(&shown, 0));
+        let shown = long_frames(&context, 5, vec![key(egui::Key::Home, egui::Modifiers::NONE)], 60);
+        assert_eq!(shown.focused, Some(0));
+        assert!(inside(&shown, 0), "the first row at {:?} is out of the menu at {:?}", shown.rows[0], shown.menu);
     }
 
     #[test]
