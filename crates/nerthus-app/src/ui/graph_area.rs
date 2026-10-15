@@ -1102,6 +1102,49 @@ mod tests {
     }
 
     #[test]
+    fn a_node_dragged_out_of_a_toolbox_menu_lands_where_it_is_let_go() {
+        for nested in [true, false] {
+            let (context, mut editor, mut ui_state) = graph_grid_context();
+            editor.user.options.set_toolbox_style(ToolboxStyle::Menus);
+            editor.user.options.set_toolbox_mode(ToolboxMode::Expanded);
+            editor.user.options.set_toolbox_nested(nested);
+            let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(1200.0, 700.0));
+            grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+            let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+            let primitive = toolbox_text(&shapes, "Primitive").expect("Primitive in sight");
+            click(&context, grid, &mut editor, &mut ui_state, primitive.center());
+            if nested {
+                let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                let basic = toolbox_text(&shapes, "BASIC").expect("Basic in Primitive's menu");
+                for _ in 0..5 {
+                    grid_frame(&context, grid, &mut editor, &mut ui_state, vec![egui::Event::PointerMoved(basic.center())]);
+                }
+            }
+            let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+            let constant = toolbox_text(&shapes, "Constant").expect("Constant in the menu").center();
+            // Pressed on Constant and dragged out over the empty graph: the
+            // menu closes and the node's name follows the pointer.
+            let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            grid_frame(&context, grid, &mut editor, &mut ui_state, vec![egui::Event::PointerMoved(constant)]);
+            grid_frame(&context, grid, &mut editor, &mut ui_state, vec![button(constant, true)]);
+            grid_frame(&context, grid, &mut editor, &mut ui_state, vec![egui::Event::PointerMoved(constant + Vec2::new(12.0, 0.0))]);
+            let graph = ui_state.graph.rect;
+            let drop = graph.center();
+            let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, vec![egui::Event::PointerMoved(drop)]);
+            assert_eq!(ui_state.graph.toolbox_drag.as_deref(), Some("Constant"), "nested: {nested}");
+            assert!(!egui::Popup::is_any_open(&context), "nested: {nested}: the menu stayed open");
+            let preview = toolbox_text(&shapes, "Constant").expect("the dragged node's name");
+            assert!(preview.left() > drop.x && preview.top() > drop.y, "nested: {nested}: the name at {preview:?}, the pointer at {drop:?}");
+            // Let go there, it is added there.
+            let (_, commands) = grid_frame(&context, grid, &mut editor, &mut ui_state, vec![button(drop, false)]);
+            let at = ui_state.graph.view().to_canvas(graph.min, drop);
+            let added = GraphCommand::ToolboxDrop { type_name: "Constant".to_string(), at: [at.x, at.y], onto: None };
+            assert_eq!(commands, vec![Command::Graph(added)], "nested: {nested}");
+            assert_eq!(ui_state.graph.toolbox_drag, None);
+        }
+    }
+
+    #[test]
     fn a_short_toolbar_scrolls_to_its_bottom_group_and_keeps_it_inside() {
         let (context, mut editor, mut ui_state) = graph_grid_context();
         let grid = Rect::from_min_size(Pos2::new(10.0, 300.0), Vec2::new(900.0, 250.0));
