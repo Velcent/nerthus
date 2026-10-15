@@ -565,17 +565,17 @@ pub fn slider(ui: &mut Ui, id: Id, label: &str, value: f64, spec: &SliderSpec, c
     // `_displayName` (margin 10, -1, 8, 0) and `_valueDisplay` (18 high,
     // margin 0, 3, 10, 1, monospace 13).
     // The value keeps its room; the name gets what is left, trimmed, and
-    // nothing leaves the bar. The name hides while the nudge bar shows
-    // (`NudgePopup_Opened`).
+    // nothing leaves the bar. Both hide while the nudge bar shows
+    // (`NudgePopup_Opened`): its box holds the value.
     let text_painter = painter.with_clip_rect(content);
     let shown = spec.format(value, settings.precise_values);
     let shown_color = color.gamma_multiply(value_opacity);
     let value_galley = painter.layout_no_wrap(shown, theme::monospace(13.0), shown_color);
     let value_box_top = content.top() + 3.0 + (content.height() - 4.0 - 18.0) / 2.0;
     let value_rect = Rect::from_min_size(Pos2::new(content.right() - 10.0 - value_galley.size().x, value_box_top), Vec2::new(value_galley.size().x, 18.0));
-    text_painter.galley(value_rect.min, value_galley, shown_color);
     let nudging = slider_popups::nudge_open(ui.ctx(), nudge_id).is_some();
     if !nudging {
+        text_painter.galley(value_rect.min, value_galley, shown_color);
         let label_color = color.gamma_multiply(control_opacity);
         let label_left = content.left() + 10.0;
         let label_room = value_rect.left() - 8.0 - label_left;
@@ -618,11 +618,13 @@ pub fn slider(ui: &mut Ui, id: Id, label: &str, value: f64, spec: &SliderSpec, c
         }
         return typed_value(ui.ctx(), &text, spec).filter(|new_value| (new_value - value).abs() > f64::EPSILON);
     }
-    // The bar: 2 left of and above the slider's bar, as wide as the whole
-    // control.
+    // The bar: 2 left of and above the slider's bar, and 2 past its right,
+    // short of the parameter menu beside the control.
+    let nudge_top_left = track.min - Vec2::splat(2.0 * popup_scale);
+    let nudge_right = (track.right() + 2.0 * popup_scale).min(content.right());
     let nudge_look = NudgeLook {
-        top_left: track.min - Vec2::splat(2.0 * popup_scale),
-        width: row.width(),
+        top_left: nudge_top_left,
+        width: nudge_right - nudge_top_left.x,
         color,
         has_default: spec.default.is_some(),
     };
@@ -785,8 +787,9 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
 
     // The two values keep their room; the name sits between them,
     // trimmed, and nothing leaves the bar. The range (`Panel.ZIndex` 50)
-    // and the thumbs (100) lie over them. The name hides while the nudge
-    // bar shows (`NudgePopup_Opened`).
+    // and the thumbs (100) lie over them. The name and the values hide
+    // while the nudge bar shows (`NudgePopup_Opened`): its box holds the
+    // value it steps.
     let text_painter = painter.with_clip_rect(content);
     let text_color = accent.gamma_multiply(opacity);
     let precise = theme::settings(ui.ctx()).precise_values;
@@ -798,11 +801,14 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
     let value_top = content.top() + 2.0 + (content.height() - 3.0 - 15.0) / 2.0;
     let low_rect = Rect::from_min_size(Pos2::new(content.left() + 8.0, value_top), Vec2::new(low_galley.size().x, 15.0));
     let high_rect = Rect::from_min_size(Pos2::new(content.right() - 8.0 - high_galley.size().x, value_top), Vec2::new(high_galley.size().x, 15.0));
-    text_painter.galley(low_rect.min, low_galley, text_color);
-    text_painter.galley(high_rect.min, high_galley, text_color);
     let nudge_end = slider_popups::nudge_open(ui.ctx(), nudge_id).flatten();
+    let nudging = nudge_end.is_some();
+    if !nudging {
+        text_painter.galley(low_rect.min, low_galley, text_color);
+        text_painter.galley(high_rect.min, high_galley, text_color);
+    }
     if let RangeLook::Accent { label, .. } = look
-        && nudge_end.is_none()
+        && !nudging
     {
         let name_room = (high_rect.left() - low_rect.right() - 16.0).min(content.width());
         let name_galley = fitted_line(ui, label, theme::interface(12.0), text_color, name_room);
@@ -888,15 +894,17 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
         return changed(typed.0, typed.1);
     }
     // The bar covers the control from 2 before the sliders' corner (they
-    // sit 2 in), as wide as the whole control; its buttons take the
-    // style's accent.
+    // sit 2 in) to 2 past their right, short of the parameter menu beside
+    // it; its buttons take the style's accent.
     let button_color = match look {
         RangeLook::Accent { color, .. } => *color,
         RangeLook::Palette(_) => theme::ACCENT_PRIMARY,
     };
+    let nudge_top_left = track.min - Vec2::splat(2.0 * popup_scale);
+    let nudge_right = (track.right() + 2.0 * popup_scale).min(content.right());
     let nudge_look = NudgeLook {
-        top_left: content.min + Vec2::splat(2.0 - 2.0 * popup_scale),
-        width: row.width(),
+        top_left: nudge_top_left,
+        width: nudge_right - nudge_top_left.x,
         color: button_color,
         has_default: spec.default.is_some(),
     };
@@ -1473,12 +1481,32 @@ pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, heig
     frame.stroke = Stroke::new(1.0, theme::POPUP_BORDER);
     frame.corner_radius = CornerRadius::same(3);
     frame.inner_margin = egui::Margin::symmetric(2, 0);
+    // The list is as wide as its widest entry (text 10 in, as much spare
+    // after it, inside the frame) and no narrower than the box. It keeps
+    // to the box's right edge and grows left, or to its left edge where
+    // only the right has the room; with too little room either way,
+    // entries are cut and named whole under the pointer.
+    let frame_width = frame.total_margin().sum().x;
+    let widest = entries.iter().map(|(_, text)| ui.painter().layout_no_wrap(text.clone(), font.clone(), Color32::WHITE).size().x).fold(0.0, f32::max);
+    let wanted = (widest + 2.0 * 10.0 + frame_width).ceil().max(box_rect.width());
+    let screen = ui.ctx().content_rect();
+    let room_left = box_rect.right() - screen.left();
+    let room_right = screen.right() - box_rect.left();
+    let (align, flipped, room) = if wanted <= room_left || room_left >= room_right {
+        (egui::RectAlign::BOTTOM_END, egui::RectAlign::TOP_END, room_left)
+    } else {
+        (egui::RectAlign::BOTTOM_START, egui::RectAlign::TOP_START, room_right)
+    };
+    let popup_width = wanted.min(room).max(box_rect.width());
+    let alternatives = [flipped];
     let mut popup = egui::Popup::from_toggle_button_response(&response);
     popup = popup.frame(frame);
     popup = popup.gap(0.0);
-    popup = popup.width(box_rect.width());
+    popup = popup.align(align);
+    popup = popup.align_alternatives(&alternatives);
+    popup = popup.width(popup_width);
     popup.show(|ui| {
-        ui.set_min_width(box_rect.width() - 4.0);
+        ui.set_min_width(popup_width - frame_width);
         let mut scroll = egui::ScrollArea::vertical();
         scroll = scroll.max_height(340.0);
         scroll.show(ui, |ui| {
@@ -1494,6 +1522,7 @@ pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, heig
                 let color = if hovered || is_current { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
                 let room = item.width() - 10.0 - 4.0;
                 let galley = fitted_line(ui, text, font.clone(), color, room);
+                let item_response = if galley.elided { item_response.tooltip(text) } else { item_response };
                 ui.painter().galley(Pos2::new(item.left() + 10.0, item.center().y - galley.size().y / 2.0), galley, color);
                 if item_response.clicked() {
                     chosen = Some(value.clone());
@@ -2122,6 +2151,78 @@ mod tests {
         assert_eq!(dropdown("Mode", 120.0).as_deref(), Some("Mode"));
     }
 
+    /// A dropdown box at `boxed` in a screen `screen_width` wide, opened
+    /// with a click and its first entry hovered for a while: its list's
+    /// rect and each entry as drawn, tooltips included.
+    fn opened_dropdown(screen_width: f32, boxed: Rect, entries: &[(String, String)]) -> (Rect, Vec<(String, String)>) {
+        let context = themed_context();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(screen_width, 600.0));
+        let time = std::cell::Cell::new(0.0);
+        let frame = |events: Vec<egui::Event>| {
+            time.set(time.get() + 0.1);
+            let input = egui::RawInput { screen_rect: Some(screen), time: Some(time.get()), events, ..Default::default() };
+            let mut output = context.run_ui(input, |ui| {
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(boxed));
+                dropdown_box(&mut row, Id::new("dropdown"), None, 0.0, boxed.height(), "Shown", entries, "", theme::interface(12.0));
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            shapes
+        };
+        let position = boxed.center();
+        let button = |pressed: bool| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        for events in [vec![egui::Event::PointerMoved(position)], vec![button(true)], vec![button(false)], Vec::new(), Vec::new()] {
+            frame(events);
+        }
+        let popup = context.memory(|memory| memory.areas().top_layer_id(egui::Order::Foreground).and_then(|layer| memory.area_rect(layer.id)));
+        let popup = popup.expect("the click opens the list");
+        frame(vec![egui::Event::PointerMoved(Pos2::new(popup.center().x, popup.top() + 12.0))]);
+        for _ in 0..20 {
+            frame(Vec::new());
+        }
+        let shapes = frame(Vec::new());
+        let drawn = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if entries.iter().any(|(_, entry)| entry == text.galley.text()) => {
+                Some((text.galley.text().to_string(), text.galley.rows.iter().flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr)).collect()))
+            }
+            _ => None,
+        });
+        (popup, drawn.collect())
+    }
+
+    #[test]
+    fn dropdown_lists_widen_to_their_entries() {
+        // Export › Format: the .raw and .r16 pairs differ only at the end.
+        let names = ["Pure Raw (.graw)", "Half Raw 16-bit (.raw)", "Half Raw 16-bit (.r16)", "Ushort Raw 16-bit (.raw)", "Ushort Raw 16-bit (.r16)", "OpenEXR 32-bit (.exr)"];
+        let entries: Vec<(String, String)> = names.iter().map(|name| (name.to_string(), name.to_string())).collect();
+        // Every entry drawn once and whole, with no tooltip.
+        let whole = |drawn: &[(String, String)]| drawn.len() == entries.len() && drawn.iter().all(|(text, shown)| text == shown);
+
+        // Room to the left: the list keeps to the box's right edge.
+        let boxed = Rect::from_min_size(Pos2::new(600.0, 100.0), Vec2::new(131.0, 26.0));
+        let (popup, drawn) = opened_dropdown(800.0, boxed, &entries);
+        assert!(popup.width() > boxed.width() + 10.0, "{popup:?}");
+        assert!((popup.right() - boxed.right()).abs() < 1.0, "{popup:?}");
+        assert!(whole(&drawn), "{drawn:?}");
+
+        // Room only to the right: it keeps to the box's left edge.
+        let boxed = Rect::from_min_size(Pos2::new(10.0, 100.0), Vec2::new(131.0, 26.0));
+        let (popup, drawn) = opened_dropdown(400.0, boxed, &entries);
+        assert!(popup.width() > boxed.width() + 10.0, "{popup:?}");
+        assert!((popup.left() - boxed.left()).abs() < 1.0, "{popup:?}");
+        assert!(whole(&drawn), "{drawn:?}");
+
+        // Too little room either way: it takes what there is to the left,
+        // cuts the entries short and names the hovered one whole.
+        let boxed = Rect::from_min_size(Pos2::new(10.0, 100.0), Vec2::new(80.0, 26.0));
+        let (popup, drawn) = opened_dropdown(100.0, boxed, &entries);
+        assert!(popup.left().abs() < 1.0 && (popup.right() - boxed.right()).abs() < 1.0, "{popup:?}");
+        assert!(drawn.iter().any(|(_, shown)| shown.ends_with('…')), "{drawn:?}");
+        let first = &entries[0].1;
+        assert_eq!(drawn.iter().filter(|(text, _)| text == first).count(), 2, "{drawn:?}");
+        assert!(drawn.iter().any(|(text, shown)| text == first && shown == first), "{drawn:?}");
+    }
+
     #[test]
     fn text_boxes_keep_to_the_dropdown_columns() {
         // Each width shrinks the header column differently (none, a
@@ -2539,13 +2640,14 @@ mod tests {
         // Up 10, the eighth button: a tenth of the range, and the box
         // follows.
         let bar_left = SLIDER_ROW.left() + 20.0 + 3.5 - 2.0;
-        let up_ten = Pos2::new(bar_left + 7.0 * 28.0 + 14.0, SLIDER_ROW.top() + 1.0 - 2.0 + 13.0);
+        let (button, _) = slider_popups::nudge_widths(SLIDER_ROW.right() - 3.5 + 2.0 - bar_left, 1.0);
+        let up_ten = Pos2::new(bar_left + 7.5 * button, SLIDER_ROW.top() + 1.0 - 2.0 + 13.0);
         let changes = left_click(&context, 0.25, &spec, up_ten);
         let changed = changes.into_iter().flatten().next().expect("Up 10 changes the value");
         assert!((changed - 0.35).abs() < 1e-6, "{changed}");
         assert_eq!(slider_popups::nudge_text(&context, nudge_id).as_deref(), Some("0.3500"));
         // The box takes a formula with Enter.
-        let field = Pos2::new(bar_left + 9.0 * 28.0 + 6.0 + 20.0, up_ten.y);
+        let field = Pos2::new(bar_left + 9.0 * button + 6.0 + 20.0, up_ten.y);
         left_click(&context, 0.35, &spec, field);
         slider_frame(&context, 0.35, &spec, vec![egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }]);
         slider_frame(&context, 0.35, &spec, vec![egui::Event::Text("1/8".to_string())]);
@@ -2557,6 +2659,78 @@ mod tests {
         assert!(slider_popups::nudge_text(&context, nudge_id).is_some());
         slider_frame(&context, 0.25, &spec, vec![egui::Event::PointerMoved(Pos2::new(120.0, 150.0))]);
         assert!(slider_popups::nudge_text(&context, nudge_id).is_none());
+    }
+
+    /// The texts a frame of `draw` in the slider row painted, and where.
+    fn painted_texts(context: &egui::Context, mut draw: impl FnMut(&mut Ui)) -> Vec<(String, Rect)> {
+        let output = context.run_ui(frame_input(Vec::new(), egui::Modifiers::NONE), |ui| {
+            let mut row = ui.new_child(egui::UiBuilder::new().max_rect(SLIDER_ROW));
+            draw(&mut row);
+        });
+        let texts = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((text.galley.text().to_string(), Rect::from_min_size(text.pos, text.galley.size()))),
+                _ => None,
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+        texts
+    }
+
+    /// Opens the slider's nudge bar `along` its width, the interface at
+    /// `scale`: the bar, and the texts the slider and the bar painted.
+    fn nudge_shown(scale: f32, along: f32, mut draw: impl FnMut(&mut Ui)) -> (Rect, Vec<(String, Rect)>) {
+        let context = themed_context();
+        context.set_zoom_factor(scale);
+        slider_popups::request_right_click(&context, slider_id(), along);
+        // The pass it opens in, then one with it in place.
+        painted_texts(&context, &mut draw);
+        let texts = painted_texts(&context, &mut draw);
+        let bar = context.memory(|memory| memory.area_rect(slider_id().with("nudge").with("area"))).expect("the bar shows");
+        (bar, texts)
+    }
+
+    #[test]
+    fn the_nudge_bar_keeps_to_its_slider_and_shows_the_value_in_its_box() {
+        let spec = SliderSpec::linear(0.0, 1.0);
+        let draw = |ui: &mut Ui| {
+            slider(ui, slider_id(), "Scale", 0.25, &spec, Color32::WHITE);
+        };
+        assert!(painted_texts(&themed_context(), draw).iter().any(|(text, _)| text == "0.25"));
+        for scale in [0.8, 1.0, 1.2] {
+            let (bar, texts) = nudge_shown(scale, 0.3, draw);
+            // Areas sit on whole pixels: within one of the slider's bar,
+            // short of the parameter menu past the row.
+            let pixel = 1.0 / scale;
+            let content = Rect::from_min_max(Pos2::new(SLIDER_ROW.left() + 20.0, SLIDER_ROW.top()), SLIDER_ROW.max);
+            assert!(bar.left() >= content.left() - pixel && bar.right() <= content.right() + pixel, "at {scale}: {bar:?} leaves {content:?}");
+            let (_, boxed) = texts.iter().find(|(text, _)| text == "0.2500").unwrap_or_else(|| panic!("at {scale}: the box shows"));
+            assert!(bar.contains_rect(*boxed), "at {scale}: the box's text {boxed:?} leaves {bar:?}");
+            // The slider's own value hides under it.
+            assert!(!texts.iter().any(|(text, _)| text == "0.25"), "at {scale}: the value shows under the bar");
+        }
+    }
+
+    #[test]
+    fn a_range_nudge_bar_keeps_to_its_slider_and_hides_both_values() {
+        let spec = RangeSpec::linear(0.0, 1.0);
+        let draw = |ui: &mut Ui| {
+            range_slider(ui, slider_id(), "Range", 0.2, 0.6, &spec, Color32::WHITE);
+        };
+        let closed = painted_texts(&themed_context(), draw);
+        assert!(closed.iter().any(|(text, _)| text == "0.20") && closed.iter().any(|(text, _)| text == "0.60"));
+        for scale in [0.8, 1.0, 1.2] {
+            // The low end's bar: its box on the left.
+            let (bar, texts) = nudge_shown(scale, 0.3, draw);
+            let pixel = 1.0 / scale;
+            let content = Rect::from_min_max(Pos2::new(SLIDER_ROW.left() + 20.0, SLIDER_ROW.top()), SLIDER_ROW.max);
+            assert!(bar.left() >= content.left() - pixel && bar.right() <= content.right() + pixel, "at {scale}: {bar:?} leaves {content:?}");
+            let (_, boxed) = texts.iter().find(|(text, _)| text == "0.2000").unwrap_or_else(|| panic!("at {scale}: the box shows"));
+            assert!(bar.contains_rect(*boxed) && boxed.center().x < bar.center().x, "at {scale}: the box's text {boxed:?} in {bar:?}");
+            assert!(!texts.iter().any(|(text, _)| text == "0.20" || text == "0.60"), "at {scale}: a value shows under the bar");
+        }
     }
 
     #[test]
