@@ -191,34 +191,40 @@ fn gigabytes(bytes: u64) -> String {
 }
 
 /// The dialog (a task dialog): a command link per recovery, and Cancel.
-/// Returns the recovery chosen.
+/// The words and links scroll when the window is too small for them,
+/// Cancel and the statistics staying below them. Returns the recovery
+/// chosen.
 pub fn show_optimize_memory(ctx: &egui::Context, state: &mut Option<OptimizeMemory>) -> Option<Recovery> {
     let figures = state.as_ref()?;
     let mut chosen = None;
     let mut cancelled = false;
-    let modal = widgets::dialog(ctx, Id::new("optimize-memory"));
+    let id = Id::new("optimize-memory");
+    let fit = widgets::DialogFit::new(ctx, id, &widgets::dialog_frame(ctx));
+    let modal = widgets::dialog(ctx, id);
     let response = modal.show(ctx, |ui| {
-        ui.set_width(460.0);
-        ui.label(RichText::new("Optimize Memory").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
-        ui.add_space(6.0);
-        let size = crate::ui::data_view::stats::byte_size(figures.process as usize);
-        let heading = format!("{size} currently allocated to Nerthus's terrain engine.");
-        ui.label(RichText::new(heading).font(theme::semibold(14.0)).color(theme::ACCENT_YELLOW));
-        ui.add_space(6.0);
-        let text = "You can force Nerthus's engine to release as much unused RAM as possible or clear various caches to free up memory.\n\nPlease note if you find yourself using this too frequently, you may want to Bake some nodes instead to free up memory.";
-        ui.add(egui::Label::new(RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT)).wrap());
-        ui.add_space(10.0);
-        let links = [
-            (Recovery::OptimizeRam, "Optimize RAM", "Recover RAM while preserving performance."),
-            (Recovery::Maximum, "Maximum RAM Recovery", "Extended RAM recovery."),
-            (Recovery::ViewportCache, "Delete Viewport Cache", "Clear viewport cache. Does not require rebuild."),
-            (Recovery::AllCache, "Delete All Cache", "WARNING: Requires all nodes to be rebuilt."),
-        ];
-        for (recovery, title, note) in links {
-            if command_link(ui, title, note).clicked() {
-                chosen = Some(recovery);
+        ui.set_width(fit.width(460.0));
+        fit.body(ui, |ui| {
+            ui.label(RichText::new("Optimize Memory").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
+            ui.add_space(6.0);
+            let size = crate::ui::data_view::stats::byte_size(figures.process as usize);
+            let heading = format!("{size} currently allocated to Nerthus's terrain engine.");
+            ui.label(RichText::new(heading).font(theme::semibold(14.0)).color(theme::ACCENT_YELLOW));
+            ui.add_space(6.0);
+            let text = "You can force Nerthus's engine to release as much unused RAM as possible or clear various caches to free up memory.\n\nPlease note if you find yourself using this too frequently, you may want to Bake some nodes instead to free up memory.";
+            ui.add(egui::Label::new(RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT)).wrap());
+            ui.add_space(10.0);
+            let links = [
+                (Recovery::OptimizeRam, "Optimize RAM", "Recover RAM while preserving performance."),
+                (Recovery::Maximum, "Maximum RAM Recovery", "Extended RAM recovery."),
+                (Recovery::ViewportCache, "Delete Viewport Cache", "Clear viewport cache. Does not require rebuild."),
+                (Recovery::AllCache, "Delete All Cache", "WARNING: Requires all nodes to be rebuilt."),
+            ];
+            for (recovery, title, note) in links {
+                if command_link(ui, title, note).clicked() {
+                    chosen = Some(recovery);
+                }
             }
-        }
+        });
         ui.add_space(8.0);
         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
             if ui.button("Cancel").clicked() {
@@ -236,6 +242,7 @@ pub fn show_optimize_memory(ctx: &egui::Context, state: &mut Option<OptimizeMemo
         );
         ui.label(RichText::new(statistics).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
     });
+    fit.end(ctx, response.response.rect);
     if chosen.is_some() || cancelled || response.should_close() {
         *state = None;
     }
@@ -353,5 +360,18 @@ mod tests {
         assert_eq!(warning.yes, Some(Command::BakeAnyway { nodes: vec![erosion], selected: true }));
         assert!(!editor.baking);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn optimize_memory_keeps_its_caption_and_statistics_in_small_windows() {
+        use crate::ui::widgets::fit_checks;
+        let context = fit_checks::context();
+        let mut state = Some(OptimizeMemory { process: 6 << 30, cache: 2 << 30 });
+        for screen in fit_checks::SMALL_SCREENS {
+            let words = fit_checks::settle(&context, screen, |ctx| {
+                show_optimize_memory(ctx, &mut state);
+            });
+            fit_checks::assert_fits(&context, screen, Id::new("optimize-memory"), &words, &["Optimize Memory", "Cancel", "Memory Statistics"]);
+        }
     }
 }

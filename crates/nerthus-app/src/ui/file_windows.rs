@@ -15,13 +15,18 @@ use crate::ui::graph_canvas::elided_galley;
 use crate::ui::options_window::OptionsState;
 use crate::ui::tool_commands::{self, ToolCommand};
 use crate::ui::tool_window;
-use crate::ui::widgets::Tooltips;
+use crate::ui::widgets::{DialogFit, Tooltips};
 use crate::ui::UiState;
 
 /// The Start dialog's size (`Width="770" Height="660"`) and its column of
-/// buttons (164 wide, 64 from the right and 56 from the bottom).
+/// buttons (164 wide, 64 from the right and 56 from the bottom), with the
+/// recent files' list at most 250 tall.
 const START_SIZE: Vec2 = Vec2::new(770.0, 660.0);
 const START_COLUMN: f32 = 164.0;
+const START_COLUMN_HEIGHT: f32 = 4.0 + 28.0 + 8.0 + 28.0 + 8.0 + 4.0 + 24.0 + 8.0 + START_LIST + 4.0 + 120.0;
+const START_LIST: f32 = 250.0;
+/// The least room the dialog's parts leave to its edges (the settings').
+const START_EDGE: f32 = 24.0;
 /// The examples window (`Width="1280" Height="660"`, six columns), and
 /// the narrowest a card gets before a row holds one fewer.
 const EXAMPLES_SIZE: Vec2 = Vec2::new(1280.0, 660.0);
@@ -33,6 +38,8 @@ const EXAMPLE_SPACING: f32 = 8.0;
 const THUMBNAIL_WIDTH: u32 = 400;
 /// `CreateMRUButton(…, attemptThumbnail: count < 20)`.
 const THUMBNAIL_LIMIT: usize = 19;
+/// Export Macro's content: a 720 window less its margins.
+const EXPORT_MACRO_WIDTH: f32 = 696.0;
 
 /// What the windows remember between frames.
 #[derive(Clone, Default)]
@@ -145,21 +152,25 @@ fn start_dialog(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState
     }
     let mut open = true;
     let title = concat!("Welcome to Nerthus ", env!("CARGO_PKG_VERSION"));
+    // In the shell's body, as large as it has room for there.
+    let body = tool_window::body(ctx);
     let mut window = egui::Window::new(title);
     window = window.id(Id::new("start-dialog"));
     window = window.collapsible(false);
     window = window.resizable(false);
-    window = window.fixed_size(START_SIZE);
+    window = window.constrain_to(body);
+    window = window.fixed_size(START_SIZE.min(body.size()));
     window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
     window = window.frame(egui::Frame::window(&ctx.global_style()).fill(theme::WINDOW_DARK));
     window = window.open(&mut open);
     window.show(ctx, |ui| {
         let area = ui.max_rect();
-        // The logo, top left (at 82, 82).
-        let logo = egui::Rect::from_min_size(area.min + Vec2::new(82.0, 82.0), Vec2::splat(64.0));
+        let name = ui.painter().layout_no_wrap("NERTHUS".to_string(), theme::semibold(28.0), theme::ACCENT_PRIMARY);
+        let parts = start_parts(area, name.size().x);
+        // The logo, top left, and the name beside it.
+        let logo = parts.logo;
         let source = egui::ImageSource::Bytes { uri: "bytes://nerthus-logo.svg".into(), bytes: include_bytes!("../../assets/nerthus.svg").as_slice().into() };
         egui::Image::new(source).paint_at(ui, logo);
-        let name = ui.painter().layout_no_wrap("NERTHUS".to_string(), theme::semibold(28.0), theme::ACCENT_PRIMARY);
         ui.painter().galley(egui::Pos2::new(logo.right() + 16.0, logo.center().y - name.size().y / 2.0), name, theme::ACCENT_PRIMARY);
 
         // The settings, bottom left.
@@ -187,9 +198,8 @@ fn start_dialog(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState
             }
         }
 
-        let column_height = 4.0 + 28.0 + 8.0 + 28.0 + 8.0 + 4.0 + 24.0 + 8.0 + 250.0 + 4.0 + 120.0;
-        let column = egui::Rect::from_min_size(egui::Pos2::new(area.right() - 64.0 - START_COLUMN, area.bottom() - 56.0 - column_height), Vec2::new(START_COLUMN, column_height));
-        let mut column_ui = ui.new_child(egui::UiBuilder::new().max_rect(column).layout(egui::Layout::top_down(egui::Align::Min)));
+        // Kept to its place: what does not fit is cut off at its edges.
+        let mut column_ui = tool_window::part(ui, "start-column", parts.column, egui::Layout::top_down(egui::Align::Min));
         start_column(&mut column_ui, ctx, editor, &mut memory, commands);
     });
     // Escape belongs to a window over the dialog (What's New, the Nahimic
@@ -199,6 +209,37 @@ fn start_dialog(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState
         editor.files.start_dialog_open = false;
     }
     store(ctx, memory);
+}
+
+/// Where the Start dialog's parts go.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StartParts {
+    /// The logo, with the name beside it.
+    logo: egui::Rect,
+    /// The buttons, the search box and the recent files.
+    column: egui::Rect,
+}
+
+/// The parts in `area`, the dialog's inside, with the name `name_width`
+/// wide. In the full dialog they are where `StartExperience` has them:
+/// the logo at 82, 82 and the column 64 from the right and 56 from the
+/// bottom. A dialog too short for the column moves it up to 24 under the
+/// title bar and lets it reach down to the settings' 24 from the bottom,
+/// the recent files taking what room is left; one too narrow for the
+/// column beside the name takes the column's right margin in, from 64 to
+/// 24, then the logo's, from 82 to 24.
+fn start_parts(area: egui::Rect, name_width: f32) -> StartParts {
+    let across = 82.0 + 64.0 + 16.0 + name_width + START_EDGE + START_COLUMN + 64.0;
+    let short_by = (across - area.width()).max(0.0);
+    let right = 64.0 - short_by.min(64.0 - START_EDGE);
+    let margin = 82.0 - (short_by - (64.0 - START_EDGE)).clamp(0.0, 82.0 - START_EDGE);
+    let logo = egui::Rect::from_min_size(area.min + Vec2::splat(margin), Vec2::splat(64.0));
+    let bottom = area.bottom() - 56.0;
+    let top = (bottom - START_COLUMN_HEIGHT).max(area.top() + START_EDGE);
+    let bottom = bottom.max((top + START_COLUMN_HEIGHT).min(area.bottom() - START_EDGE)).max(top);
+    let left = area.right() - right - START_COLUMN;
+    let column = egui::Rect::from_min_max(egui::Pos2::new(left, top), egui::Pos2::new(left + START_COLUMN, bottom));
+    StartParts { logo, column }
 }
 
 fn start_column(ui: &mut Ui, ctx: &egui::Context, editor: &mut Editor, memory: &mut WindowMemory, commands: &mut Vec<Command>) {
@@ -233,7 +274,10 @@ fn start_column(ui: &mut Ui, ctx: &egui::Context, editor: &mut Editor, memory: &
         editor.user.recent.files().to_vec()
     };
     let listed = searching || editor.user.options.populate_recent_on_start();
-    ScrollArea::vertical().id_salt("start-recent").max_height(250.0).min_scrolled_height(250.0).show(ui, |ui| {
+    // The list takes the room Open Examples leaves, up to its own height.
+    let below = ui.spacing().item_spacing.y + 4.0 + 28.0;
+    let list_height = (ui.max_rect().bottom() - ui.cursor().top() - below).clamp(0.0, START_LIST);
+    ScrollArea::vertical().id_salt("start-recent").max_height(list_height).min_scrolled_height(list_height).show(ui, |ui| {
         ui.set_width(width);
         if !listed {
             return;
@@ -448,79 +492,33 @@ pub fn close_export_macro(editor: &mut Editor) {
 
 /// Export Macro (`ExportMacroDialog`): name, version, author, URL and
 /// description, the id they make, and whether to save a file and install
-/// the macro. Its button runs `BtnOK_OnClick`'s checks.
+/// the macro. Its button runs `BtnOK_OnClick`'s checks; Cancel and the
+/// close button close it, and so does Escape (`IsCancel`), which the shell
+/// takes for it (`tool_commands::take_escape`). The form scrolls when the
+/// window is too small for it, the buttons staying below it.
 fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut Vec<Command>) {
     let Some(mut form) = editor.files.export_macro.clone() else {
         return;
     };
     let mut open = true;
     let mut action = None;
+    let id = export_macro_id();
+    let fit = DialogFit::new(ctx, id, &egui::Frame::window(&ctx.global_style()));
     let mut window = egui::Window::new("Export Macro");
-    window = window.id(export_macro_id());
+    window = window.id(id);
     window = window.collapsible(false);
     window = window.resizable(false);
-    window = window.default_width(720.0);
+    window = fit.window(window, EXPORT_MACRO_WIDTH);
     window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
     window = window.open(&mut open);
-    window.show(ctx, |ui| {
-        ui.set_width(696.0);
-        // The text's runs, with its bold ones.
-        let runs = [
-            ("Export your macro to a .macro file. Each macro is identified by its ", false),
-            ("Macro ID", true),
-            (".\n\nTo install a macro, drag and drop the .macro file into the Nerthus window. Exporting a macro also installs it automatically into your ", false),
-            ("current macro collection", true),
-            (".\n\n", false),
-            ("Best practices:", true),
-            ("\n• ", false),
-            ("Keep the same Macro ID", true),
-            (" when updating an existing macro (so it upgrades in place).\n• ", false),
-            ("Use a new Macro ID", true),
-            (" when you want a new macro to exist alongside an older version (so both can be installed).", false),
-        ];
-        let regular = egui::TextFormat { font_id: theme::interface(12.0), color: theme::LABEL_DEFAULT, ..Default::default() };
-        let bold_font = egui::FontId::new(12.0, egui::FontFamily::Name(theme::FONT_BOLD.into()));
-        let bold = egui::TextFormat { font_id: bold_font, color: theme::LABEL_DEFAULT, ..Default::default() };
-        let mut intro = egui::text::LayoutJob::default();
-        intro.wrap.max_width = ui.available_width();
-        for (text, is_bold) in runs {
-            let format = if is_bold { bold.clone() } else { regular.clone() };
-            intro.append(text, 0.0, format);
-        }
-        ui.label(intro);
+    let shown = window.show(ctx, |ui| {
+        ui.set_width(fit.width(EXPORT_MACRO_WIDTH));
+        fit.body(ui, |ui| export_macro_form(ui, &mut form));
         ui.add_space(16.0);
-        ui.separator();
-        ui.add_space(8.0);
-        // Two equal columns (`UniformGrid Rows="2"`).
-        ui.columns(2, |columns| {
-            columns[0].label("Macro Name");
-            columns[0].add(egui::TextEdit::singleline(&mut form.name).desired_width(f32::INFINITY));
-            columns[1].label("Macro Version");
-            columns[1].add(egui::TextEdit::singleline(&mut form.version).desired_width(f32::INFINITY));
-        });
-        ui.add_space(4.0);
-        ui.columns(2, |columns| {
-            columns[0].label("Author Name");
-            columns[0].add(egui::TextEdit::singleline(&mut form.author).desired_width(f32::INFINITY));
-            columns[1].label("URL");
-            columns[1].add(egui::TextEdit::singleline(&mut form.url).desired_width(f32::INFINITY));
-        });
-        ui.add_space(8.0);
-        ui.label("Description");
-        ui.add(egui::TextEdit::singleline(&mut form.description).desired_width(f32::INFINITY));
-        ui.add_space(16.0);
-        let id_frame = egui::Frame::new().fill(theme::ACCENT_MUTED_GREEN.gamma_multiply(0.15)).stroke(Stroke::new(1.5, theme::ACCENT_MUTED_GREEN)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(6, 4));
-        id_frame.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let preview = format!("Macro ID preview: {}", form.macro_id());
-            ui.label(RichText::new(preview).font(theme::monospace(12.0)).color(theme::LABEL_EMPHASIS));
-        });
-        ui.add_space(12.0);
-        ui.checkbox(&mut form.save_file, "Save as file");
-        ui.add_space(8.0);
-        ui.checkbox(&mut form.install, "Install in Nerthus");
-        ui.add_space(16.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // As high as the buttons: a layout given the rest of the window
+        // would take it all.
+        let row = Vec2::new(ui.available_width(), 28.0);
+        ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if button(ui, "Cancel", false, Vec2::new(90.0, 28.0)).clicked() {
                 action = Some(false);
             }
@@ -529,6 +527,9 @@ fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut 
             }
         });
     });
+    if let Some(shown) = shown {
+        fit.end(ctx, shown.response.rect);
+    }
     editor.files.export_macro = Some(form.clone());
     if !open || action == Some(false) {
         close_export_macro(editor);
@@ -537,6 +538,65 @@ fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut 
     if action == Some(true) {
         export_macro_checks(editor, &form, commands);
     }
+}
+
+/// Export Macro's text and fields, above its buttons.
+fn export_macro_form(ui: &mut Ui, form: &mut files::ExportForm) {
+    // The text's runs, with its bold ones.
+    let runs = [
+        ("Export your macro to a .macro file. Each macro is identified by its ", false),
+        ("Macro ID", true),
+        (".\n\nTo install a macro, drag and drop the .macro file into the Nerthus window. Exporting a macro also installs it automatically into your ", false),
+        ("current macro collection", true),
+        (".\n\n", false),
+        ("Best practices:", true),
+        ("\n• ", false),
+        ("Keep the same Macro ID", true),
+        (" when updating an existing macro (so it upgrades in place).\n• ", false),
+        ("Use a new Macro ID", true),
+        (" when you want a new macro to exist alongside an older version (so both can be installed).", false),
+    ];
+    let regular = egui::TextFormat { font_id: theme::interface(12.0), color: theme::LABEL_DEFAULT, ..Default::default() };
+    let bold_font = egui::FontId::new(12.0, egui::FontFamily::Name(theme::FONT_BOLD.into()));
+    let bold = egui::TextFormat { font_id: bold_font, color: theme::LABEL_DEFAULT, ..Default::default() };
+    let mut intro = egui::text::LayoutJob::default();
+    intro.wrap.max_width = ui.available_width();
+    for (text, is_bold) in runs {
+        let format = if is_bold { bold.clone() } else { regular.clone() };
+        intro.append(text, 0.0, format);
+    }
+    ui.label(intro);
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+    // Two equal columns (`UniformGrid Rows="2"`).
+    ui.columns(2, |columns| {
+        columns[0].label("Macro Name");
+        columns[0].add(egui::TextEdit::singleline(&mut form.name).desired_width(f32::INFINITY));
+        columns[1].label("Macro Version");
+        columns[1].add(egui::TextEdit::singleline(&mut form.version).desired_width(f32::INFINITY));
+    });
+    ui.add_space(4.0);
+    ui.columns(2, |columns| {
+        columns[0].label("Author Name");
+        columns[0].add(egui::TextEdit::singleline(&mut form.author).desired_width(f32::INFINITY));
+        columns[1].label("URL");
+        columns[1].add(egui::TextEdit::singleline(&mut form.url).desired_width(f32::INFINITY));
+    });
+    ui.add_space(8.0);
+    ui.label("Description");
+    ui.add(egui::TextEdit::singleline(&mut form.description).desired_width(f32::INFINITY));
+    ui.add_space(16.0);
+    let id_frame = egui::Frame::new().fill(theme::ACCENT_MUTED_GREEN.gamma_multiply(0.15)).stroke(Stroke::new(1.5, theme::ACCENT_MUTED_GREEN)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(6, 4));
+    id_frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let preview = format!("Macro ID preview: {}", form.macro_id());
+        ui.label(RichText::new(preview).font(theme::monospace(12.0)).color(theme::LABEL_EMPHASIS));
+    });
+    ui.add_space(12.0);
+    ui.checkbox(&mut form.save_file, "Save as file");
+    ui.add_space(8.0);
+    ui.checkbox(&mut form.install, "Install in Nerthus");
 }
 
 /// `BtnOK_OnClick`: an option must be chosen and the project must make a
@@ -563,6 +623,165 @@ fn export_macro_checks(editor: &mut Editor, form: &files::ExportForm, commands: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Document;
+    use egui::epaint::ClippedShape;
+    use egui::{AreaState, Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Shape};
+
+    /// The screen, in points, of 1600 × 960, 1024 × 700, 800 × 600 and
+    /// 640 × 480 at the default 120%, and 1024 × 768 at 175%.
+    const START_SCREENS: [Vec2; 5] = [Vec2::new(1333.0, 800.0), Vec2::new(853.0, 583.0), Vec2::new(666.0, 500.0), Vec2::new(533.0, 400.0), Vec2::new(585.0, 438.0)];
+    /// What the column shows besides the recent files.
+    const COLUMN_TEXTS: [&str; 4] = ["New Project", "Open Project", "Search files...", "Open Examples..."];
+
+    fn start_context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        // Not the documents folder of whoever runs the tests.
+        store(&context, WindowMemory { documents_read: true, ..Default::default() });
+        context
+    }
+
+    /// An editor whose recent files are `count` projects in `folder`.
+    fn start_editor(folder: &Path, count: usize) -> Editor {
+        let mut editor = Editor::new(Document::new());
+        std::fs::create_dir_all(folder).unwrap();
+        for index in 0..count {
+            let project = folder.join(format!("Recent Project {index}.terrain"));
+            std::fs::write(&project, b"").unwrap();
+            editor.user.add_recent(&project);
+        }
+        editor
+    }
+
+    /// A frame of the Start dialog at this screen size with these events.
+    /// Returns what was painted, the dialog's rect and what it asked for.
+    fn start_frame(context: &egui::Context, screen: Vec2, editor: &mut Editor, events: Vec<Event>) -> (Vec<ClippedShape>, Rect, Vec<Command>) {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
+        let mut ui_state = UiState::default();
+        let mut commands = Vec::new();
+        let mut output = context.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            start_dialog(&ctx, editor, &mut ui_state, &mut commands);
+        });
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        let rect = AreaState::load(context, Id::new("start-dialog")).filter(|area| area.size.is_some()).map(|area| area.rect());
+        (shapes, rect.unwrap_or(Rect::NOTHING), commands)
+    }
+
+    /// Frames enough for egui's first-frame sizing to settle and the
+    /// dialog to fade in.
+    fn start_settle(context: &egui::Context, screen: Vec2, editor: &mut Editor) -> (Vec<ClippedShape>, Rect) {
+        for _ in 0..10 {
+            start_frame(context, screen, editor, Vec::new());
+        }
+        let (shapes, rect, _) = start_frame(context, screen, editor, Vec::new());
+        (shapes, rect)
+    }
+
+    /// Each text painted, with the part of it that shows and whether it
+    /// shows whole. Texts that do not show, or are empty, are left out.
+    fn texts(shapes: &[ClippedShape]) -> Vec<(String, Rect, bool)> {
+        let mut texts = Vec::new();
+        for clipped in shapes {
+            let mut stack = vec![&clipped.shape];
+            while let Some(shape) = stack.pop() {
+                match shape {
+                    Shape::Vec(inner) => stack.extend(inner),
+                    Shape::Text(text) if !text.galley.text().is_empty() => {
+                        let bounds = shape.visual_bounding_rect();
+                        let shown = bounds.intersect(clipped.clip_rect);
+                        if shown.is_positive() {
+                            texts.push((text.galley.text().to_string(), shown, clipped.clip_rect.expand(0.5).contains_rect(bounds)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        texts
+    }
+
+    /// Where `text` shows (whole).
+    fn text_at(texts: &[(String, Rect, bool)], text: &str, what: &str) -> Rect {
+        let (_, rect, whole) = texts.iter().find(|(shown, ..)| shown == text).unwrap_or_else(|| panic!("{what}: no {text:?} in {texts:?}"));
+        assert!(*whole, "{what}: {text:?} at {rect:?} is cut off");
+        *rect
+    }
+
+    /// Whether two rects share more than a sliver.
+    fn overlap(a: Rect, b: Rect) -> bool {
+        a.intersect(b).shrink(0.5).is_positive()
+    }
+
+    #[test]
+    fn the_full_start_dialog_keeps_its_layout() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(756.0, 620.0));
+        let parts = start_parts(area, 130.0);
+        assert_eq!(parts.logo, Rect::from_min_size(Pos2::new(82.0, 82.0), Vec2::splat(64.0)));
+        let column = Rect::from_min_size(Pos2::new(756.0 - 64.0 - START_COLUMN, 620.0 - 56.0 - START_COLUMN_HEIGHT), Vec2::new(START_COLUMN, START_COLUMN_HEIGHT));
+        assert_eq!(parts.column, column);
+    }
+
+    #[test]
+    fn the_start_dialog_fits_small_screens() {
+        let folder = std::env::temp_dir().join(format!("nerthus-start-{}", std::process::id()));
+        for count in [0, 9] {
+            // The dialog stays open as the screen gets smaller, then larger.
+            let context = start_context();
+            let mut editor = start_editor(&folder, count);
+            let mut full = None;
+            for screen in START_SCREENS.into_iter().chain([START_SCREENS[0]]) {
+                let what = format!("{count} recent files at {screen:?}");
+                let (shapes, window) = start_settle(&context, screen, &mut editor);
+                let body = tool_window::body(&context);
+                assert!(window.is_positive() && body.expand(0.5).contains_rect(window), "{what}: the dialog {window:?} is outside the body {body:?}");
+                if screen == START_SCREENS[0] {
+                    let full = *full.get_or_insert(window);
+                    assert!((window.min - full.min).abs().max_elem() <= 0.5 && (window.max - full.max).abs().max_elem() <= 0.5, "{what}: the dialog {window:?} is not back to {full:?}");
+                }
+                let texts = texts(&shapes);
+                let title = text_at(&texts, concat!("Welcome to Nerthus ", env!("CARGO_PKG_VERSION")), &what);
+                for text in ["NERTHUS"].into_iter().chain(COLUMN_TEXTS) {
+                    text_at(&texts, text, &what);
+                }
+                // Below the title bar, in the dialog, and clear of each other.
+                for (index, (text, rect, _)) in texts.iter().enumerate() {
+                    assert!(window.expand(0.5).contains_rect(*rect), "{what}: {text:?} at {rect:?} is outside the dialog {window:?}");
+                    if rect != &title {
+                        assert!(rect.top() >= title.bottom(), "{what}: {text:?} at {rect:?} is on the title bar, {title:?}");
+                    }
+                    for (other, other_rect, _) in &texts[index + 1..] {
+                        assert!(!overlap(*rect, *other_rect), "{what}: {text:?} at {rect:?} runs into {other:?} at {other_rect:?}");
+                    }
+                }
+                // Rows of recent files show, where there are any.
+                let recent = texts.iter().filter(|(text, ..)| text.starts_with("Recent Project")).count();
+                assert!(count == 0 || recent >= 2, "{what}: {recent} recent files show");
+            }
+        }
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn new_and_open_project_are_in_reach_on_small_screens() {
+        let folder = std::env::temp_dir().join(format!("nerthus-start-reach-{}", std::process::id()));
+        for screen in START_SCREENS {
+            for (label, wanted) in [("New Project", FileCommand::StartNew), ("Open Project", FileCommand::StartOpen)] {
+                let context = start_context();
+                let mut editor = start_editor(&folder, 9);
+                let (shapes, _) = start_settle(&context, screen, &mut editor);
+                let position = text_at(&texts(&shapes), label, label).center();
+                let press = |pressed| Event::PointerButton { pos: position, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+                start_frame(&context, screen, &mut editor, vec![Event::PointerMoved(position)]);
+                start_frame(&context, screen, &mut editor, vec![press(true)]);
+                let (.., commands) = start_frame(&context, screen, &mut editor, vec![press(false)]);
+                assert_eq!(commands, vec![Command::File(wanted)], "{label} at {screen:?}");
+            }
+        }
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
 
     #[test]
     fn bundled_examples_install_and_open() {
@@ -583,6 +802,29 @@ mod tests {
         install_examples(&folder);
         assert_ne!(std::fs::read(&first).unwrap(), b"changed");
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn export_macro_fits_small_windows_and_escape_cancels_it() {
+        use crate::ui::widgets::fit_checks;
+        let context = fit_checks::context();
+        let mut editor = Editor::new(crate::document::Document::new());
+        editor.files.export_macro = Some(files::ExportForm::for_project(&editor));
+        let mut ui_state = UiState::default();
+        let mut commands = Vec::new();
+        let mut windows = |ctx: &egui::Context| {
+            // Esc taken as the shell takes it, before the windows.
+            tool_commands::take_escape(ctx, &mut editor, &mut ui_state);
+            show(ctx, &mut editor, &mut ui_state, &mut commands);
+        };
+        for screen in fit_checks::SMALL_SCREENS {
+            let words = fit_checks::settle(&context, screen, &mut windows);
+            // The title and the button.
+            fit_checks::assert_fits(&context, screen, Id::new("export-macro"), &words, &["Export Macro", "Export Macro", "Cancel"]);
+        }
+        let escape = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        fit_checks::frame(&context, fit_checks::SMALL_SCREENS[1], vec![escape], &mut windows);
+        assert!(editor.files.export_macro.is_none(), "Escape closes Export Macro");
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::theme;
 use crate::ui::editors::{self, SliderSpec};
 use crate::ui::graph_canvas::elided_galley;
 use crate::ui::tool_window;
-use crate::ui::widgets::{check_item, icon_menu, menu_separator, toolbar_button, Tooltips};
+use crate::ui::widgets::{check_item, icon_menu, menu_separator, scroll_bar_gutter, toolbar_button, Tooltips};
 
 /// The right column's narrowest and the left's (`MinWidth`s).
 const LIST_MIN_WIDTH: f32 = 300.0;
@@ -482,14 +482,21 @@ fn edit_transforms(editor: &mut Editor, window: &mut ConstructorWindow, f: impl 
     window.unbuilt = true;
 }
 
-/// The toolbar, the terrains and the chosen one's settings.
+/// The toolbar, then the terrains and the chosen one's settings, which
+/// scroll when the window is too short for them.
 fn side_panel(ui: &mut Ui, editor: &mut Editor, window: &mut ConstructorWindow) {
     ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
     toolbar(ui, window);
     ui.add_space(4.0);
-    terrain_list(ui, editor, window);
-    ui.add_space(8.0);
-    terrain_editor(ui, editor, window);
+    scroll_bar_gutter(ui);
+    let mut scroll = egui::ScrollArea::vertical();
+    scroll = scroll.id_salt(("constructor-terrains", window.node));
+    scroll = scroll.auto_shrink(false);
+    scroll.show(ui, |ui| {
+        terrain_list(ui, editor, window);
+        ui.add_space(8.0);
+        terrain_editor(ui, editor, window);
+    });
 }
 
 fn toolbar(ui: &mut Ui, window: &mut ConstructorWindow) {
@@ -847,5 +854,39 @@ mod tests {
         let shapes = frame(&context, &mut window, 170.0);
         let (labels, _) = labels_and_icons(&shapes);
         assert!(labels.is_empty(), "at 170, the buttons are their icons alone, not {labels:?}");
+    }
+
+    #[test]
+    fn a_short_panel_scrolls_to_the_mask_settings() {
+        let context = themed_context();
+        let mut editor = Editor::new(crate::document::Document::new());
+        let node = editor.document.add_node("Construction", [0.0, 0.0]).expect("a Construction node");
+        editor.document.set_values_quietly(node, &[("Transforms".to_string(), json!([{"Index": 0}, {"Index": 1}]))]);
+        let mut window = ConstructorWindow::new(node);
+        // The side panel squeezed into an 800 by 600 window at 120%.
+        let panel = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(SQUEEZED_WIDTH, 360.0));
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(667.0, 500.0))), events, ..Default::default() };
+            let mut output = context.run_ui(input, |ui| {
+                let mut panel_ui = ui.new_child(UiBuilder::new().max_rect(panel));
+                panel_ui.set_clip_rect(panel);
+                side_panel(&mut panel_ui, &mut editor, &mut window);
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            // Whether Mask Bias shows whole.
+            shapes.iter().any(|clipped| match &clipped.shape {
+                Shape::Text(text) => text.galley.text() == "Mask Bias" && clipped.clip_rect.intersect(panel).contains_rect(text.visual_bounding_rect()),
+                _ => false,
+            })
+        };
+        frame(vec![egui::Event::PointerMoved(panel.center())]);
+        assert!(!frame(Vec::new()), "the panel is tall enough for Mask Bias without scrolling");
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        frame(vec![wheel]);
+        for _ in 0..30 {
+            frame(Vec::new());
+        }
+        assert!(frame(Vec::new()), "Mask Bias does not scroll into the panel");
     }
 }

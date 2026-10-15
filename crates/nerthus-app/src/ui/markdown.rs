@@ -838,4 +838,27 @@ mod tests {
             assert!(response.rect.height() < 2.5 * row_height, "{} for rows {row_height} high", response.rect.height());
         });
     }
+
+    #[test]
+    fn code_draws_box_drawing_a_column_wide() {
+        // The build report's rules and separators and the folder trees'
+        // branches. `has_glyph` can't tell: Hack, which draws them, also
+        // draws the box egui puts in place of what no font has.
+        let lines = "─│├└";
+        let missing = '\u{378}';
+        with_ui(|ui| {
+            for font in [theme::monospace(TEXT_SIZE - 1.0), theme::monospace_semibold(TEXT_SIZE), theme::monospace_bold(TEXT_SIZE)] {
+                let laid_out = |text: String| ui.painter().layout_no_wrap(text, font.clone(), Color32::WHITE);
+                let drawn = |character: char| laid_out(character.to_string()).rows[0].row.glyphs[0].uv_rect;
+                let width = |character: char| laid_out(character.to_string().repeat(20)).size().x;
+                for line in lines.chars() {
+                    assert_ne!(drawn(line), drawn(missing), "{line} draws as a box at {font:?}");
+                    // As wide as the letters, for the report's columns to
+                    // line up.
+                    let difference = width(line) - width('a');
+                    assert!(difference.abs() < 1.0, "{line} is off the columns by {difference} in 20 at {font:?}");
+                }
+            }
+        });
+    }
 }

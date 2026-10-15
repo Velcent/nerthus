@@ -20,7 +20,7 @@ use egui::{Id, RichText, Vec2};
 
 use crate::editor::Editor;
 use crate::theme;
-use crate::ui::widgets::{dialog_button, dialog_button_row};
+use crate::ui::widgets::{dialog_button, dialog_button_row, DialogFit};
 
 /// The tasks, in Watson's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,9 @@ enum Task {
     Cleanup,
     Benchmark,
 }
+
+/// The window's content, where there is room.
+const WIDTH: f32 = 540.0;
 
 const TASKS: [(Task, &str); 6] = [
     (Task::Package, "Create a diagnostics package (required for technical support)"),
@@ -80,7 +83,9 @@ pub fn window_id() -> Id {
     Id::new("diagnostics")
 }
 
-/// The window. Returns whether it is still open, and a request.
+/// The window: its text, the tasks and the output scroll when the window
+/// is too small for them, Start and Close staying below them. Returns
+/// whether it is still open, and a request.
 pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut DiagnosticsWindow) -> (bool, Option<DiagnosticsRequest>) {
     poll_benchmark(window);
     if window.benchmark.is_some() {
@@ -89,35 +94,40 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut DiagnosticsWi
     let mut request = None;
     let mut open = true;
     let mut close = false;
+    let id = window_id();
+    let fit = DialogFit::new(ctx, id, &egui::Frame::window(&ctx.global_style()));
     let mut frame = egui::Window::new("Nerthus Diagnostics");
-    frame = frame.id(window_id());
+    frame = frame.id(id);
     frame = frame.collapsible(false);
     frame = frame.resizable(false);
+    frame = fit.window(frame, WIDTH);
     frame = frame.anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO);
     frame = frame.open(&mut open);
-    frame.show(ctx, |ui| {
-        ui.set_width(540.0);
-        let text = "This program is designed to create diagnostics logs for technical support, find and fix potential issues in your Nerthus installation, and perform other tasks such as benchmarks.";
-        ui.add(egui::Label::new(RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT)).wrap());
-        ui.add_space(12.0);
-        ui.label(RichText::new("Troubleshooting").font(theme::semibold(12.0)).color(theme::LABEL_EMPHASIS));
-        ui.add_space(4.0);
-        for (task, label) in TASKS {
-            ui.radio_value(&mut window.task, task, RichText::new(label).font(theme::interface(12.0)));
-            if task == Task::FactoryReset && window.task == Task::FactoryReset {
-                ui.horizontal(|ui| {
-                    ui.add_space(24.0);
-                    ui.checkbox(&mut window.backup, "Backup current settings");
-                });
+    let shown = frame.show(ctx, |ui| {
+        ui.set_width(fit.width(WIDTH));
+        fit.body(ui, |ui| {
+            let text = "This program is designed to create diagnostics logs for technical support, find and fix potential issues in your Nerthus installation, and perform other tasks such as benchmarks.";
+            ui.add(egui::Label::new(RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT)).wrap());
+            ui.add_space(12.0);
+            ui.label(RichText::new("Troubleshooting").font(theme::semibold(12.0)).color(theme::LABEL_EMPHASIS));
+            ui.add_space(4.0);
+            for (task, label) in TASKS {
+                ui.radio_value(&mut window.task, task, RichText::new(label).font(theme::interface(12.0)));
+                if task == Task::FactoryReset && window.task == Task::FactoryReset {
+                    ui.horizontal(|ui| {
+                        ui.add_space(24.0);
+                        ui.checkbox(&mut window.backup, "Backup current settings");
+                    });
+                }
             }
-        }
-        ui.add_space(12.0);
-        let mut output = window.output.as_str();
-        let mut field = egui::TextEdit::multiline(&mut output);
-        field = field.font(theme::monospace(11.0));
-        field = field.desired_rows(8);
-        field = field.desired_width(f32::INFINITY);
-        egui::ScrollArea::vertical().max_height(180.0).stick_to_bottom(true).show(ui, |ui| ui.add(field));
+            ui.add_space(12.0);
+            let mut output = window.output.as_str();
+            let mut field = egui::TextEdit::multiline(&mut output);
+            field = field.font(theme::monospace(11.0));
+            field = field.desired_rows(8);
+            field = field.desired_width(f32::INFINITY);
+            egui::ScrollArea::vertical().max_height(180.0).stick_to_bottom(true).show(ui, |ui| ui.add(field));
+        });
         ui.add_space(8.0);
         dialog_button_row(ui, |ui| {
             if dialog_button(ui, "Close", false).clicked() {
@@ -130,6 +140,9 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut DiagnosticsWi
             }
         });
     });
+    if let Some(shown) = shown {
+        fit.end(ctx, shown.response.rect);
+    }
     (open && !close, request)
 }
 
@@ -464,6 +477,25 @@ fn crc32(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_keeps_its_title_and_buttons_in_small_windows() {
+        use crate::ui::widgets::fit_checks;
+        let context = fit_checks::context();
+        let mut editor = Editor::new(crate::document::Document::new());
+        let mut window = DiagnosticsWindow::open();
+        window.task = Task::FactoryReset;
+        for line in 0..40 {
+            window.say(format!("Line {line}"));
+        }
+        for screen in fit_checks::SMALL_SCREENS {
+            let words = fit_checks::settle(&context, screen, |ctx| {
+                show(ctx, &mut editor, &mut window);
+            });
+            let expected = ["Nerthus Diagnostics", "This program is designed", "Start", "Close"];
+            fit_checks::assert_fits(&context, screen, Id::new("diagnostics"), &words, &expected);
+        }
+    }
 
     #[test]
     fn crc_matches_the_standard() {
