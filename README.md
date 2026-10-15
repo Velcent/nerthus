@@ -4,9 +4,9 @@
 
 # Nerthus
 
-Nerthus is a clean room reimplementation of Gaea 2.0, the node-based terrain
+Nerthus is a clean room reimplementation of Gaea 2.3.1.0, the node-based terrain
 generator, written in Rust. It opens and saves Gaea 2 `.terrain` projects, and
-projects it saves open in Gaea 2.3.1.0. Its goal is to build them into the
+projects it saves open in Gaea. Its goal is to build them into the
 same heightfields, masks and colour maps that Gaea does.
 
 Nerthus is an independent project. It is not affiliated with or endorsed by
