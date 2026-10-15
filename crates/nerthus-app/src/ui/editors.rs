@@ -1473,12 +1473,32 @@ pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, heig
     frame.stroke = Stroke::new(1.0, theme::POPUP_BORDER);
     frame.corner_radius = CornerRadius::same(3);
     frame.inner_margin = egui::Margin::symmetric(2, 0);
+    // The list is as wide as its widest entry (text 10 in, as much spare
+    // after it, inside the frame) and no narrower than the box. It keeps
+    // to the box's right edge and grows left, or to its left edge where
+    // only the right has the room; with too little room either way,
+    // entries are cut and named whole under the pointer.
+    let frame_width = frame.total_margin().sum().x;
+    let widest = entries.iter().map(|(_, text)| ui.painter().layout_no_wrap(text.clone(), font.clone(), Color32::WHITE).size().x).fold(0.0, f32::max);
+    let wanted = (widest + 2.0 * 10.0 + frame_width).ceil().max(box_rect.width());
+    let screen = ui.ctx().content_rect();
+    let room_left = box_rect.right() - screen.left();
+    let room_right = screen.right() - box_rect.left();
+    let (align, flipped, room) = if wanted <= room_left || room_left >= room_right {
+        (egui::RectAlign::BOTTOM_END, egui::RectAlign::TOP_END, room_left)
+    } else {
+        (egui::RectAlign::BOTTOM_START, egui::RectAlign::TOP_START, room_right)
+    };
+    let popup_width = wanted.min(room).max(box_rect.width());
+    let alternatives = [flipped];
     let mut popup = egui::Popup::from_toggle_button_response(&response);
     popup = popup.frame(frame);
     popup = popup.gap(0.0);
-    popup = popup.width(box_rect.width());
+    popup = popup.align(align);
+    popup = popup.align_alternatives(&alternatives);
+    popup = popup.width(popup_width);
     popup.show(|ui| {
-        ui.set_min_width(box_rect.width() - 4.0);
+        ui.set_min_width(popup_width - frame_width);
         let mut scroll = egui::ScrollArea::vertical();
         scroll = scroll.max_height(340.0);
         scroll.show(ui, |ui| {
@@ -1494,6 +1514,7 @@ pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, heig
                 let color = if hovered || is_current { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
                 let room = item.width() - 10.0 - 4.0;
                 let galley = fitted_line(ui, text, font.clone(), color, room);
+                let item_response = if galley.elided { item_response.tooltip(text) } else { item_response };
                 ui.painter().galley(Pos2::new(item.left() + 10.0, item.center().y - galley.size().y / 2.0), galley, color);
                 if item_response.clicked() {
                     chosen = Some(value.clone());
@@ -2120,6 +2141,78 @@ mod tests {
         assert_eq!(dropdown("Artifact Reduction", 250.0).as_deref(), Some("Artifact Reduction"));
         // Narrower than 150 the name is not shown at all.
         assert_eq!(dropdown("Mode", 120.0).as_deref(), Some("Mode"));
+    }
+
+    /// A dropdown box at `boxed` in a screen `screen_width` wide, opened
+    /// with a click and its first entry hovered for a while: its list's
+    /// rect and each entry as drawn, tooltips included.
+    fn opened_dropdown(screen_width: f32, boxed: Rect, entries: &[(String, String)]) -> (Rect, Vec<(String, String)>) {
+        let context = themed_context();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(screen_width, 600.0));
+        let time = std::cell::Cell::new(0.0);
+        let frame = |events: Vec<egui::Event>| {
+            time.set(time.get() + 0.1);
+            let input = egui::RawInput { screen_rect: Some(screen), time: Some(time.get()), events, ..Default::default() };
+            let mut output = context.run_ui(input, |ui| {
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(boxed));
+                dropdown_box(&mut row, Id::new("dropdown"), None, 0.0, boxed.height(), "Shown", entries, "", theme::interface(12.0));
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            shapes
+        };
+        let position = boxed.center();
+        let button = |pressed: bool| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        for events in [vec![egui::Event::PointerMoved(position)], vec![button(true)], vec![button(false)], Vec::new(), Vec::new()] {
+            frame(events);
+        }
+        let popup = context.memory(|memory| memory.areas().top_layer_id(egui::Order::Foreground).and_then(|layer| memory.area_rect(layer.id)));
+        let popup = popup.expect("the click opens the list");
+        frame(vec![egui::Event::PointerMoved(Pos2::new(popup.center().x, popup.top() + 12.0))]);
+        for _ in 0..20 {
+            frame(Vec::new());
+        }
+        let shapes = frame(Vec::new());
+        let drawn = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if entries.iter().any(|(_, entry)| entry == text.galley.text()) => {
+                Some((text.galley.text().to_string(), text.galley.rows.iter().flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr)).collect()))
+            }
+            _ => None,
+        });
+        (popup, drawn.collect())
+    }
+
+    #[test]
+    fn dropdown_lists_widen_to_their_entries() {
+        // Export › Format: the .raw and .r16 pairs differ only at the end.
+        let names = ["Pure Raw (.graw)", "Half Raw 16-bit (.raw)", "Half Raw 16-bit (.r16)", "Ushort Raw 16-bit (.raw)", "Ushort Raw 16-bit (.r16)", "OpenEXR 32-bit (.exr)"];
+        let entries: Vec<(String, String)> = names.iter().map(|name| (name.to_string(), name.to_string())).collect();
+        // Every entry drawn once and whole, with no tooltip.
+        let whole = |drawn: &[(String, String)]| drawn.len() == entries.len() && drawn.iter().all(|(text, shown)| text == shown);
+
+        // Room to the left: the list keeps to the box's right edge.
+        let boxed = Rect::from_min_size(Pos2::new(600.0, 100.0), Vec2::new(131.0, 26.0));
+        let (popup, drawn) = opened_dropdown(800.0, boxed, &entries);
+        assert!(popup.width() > boxed.width() + 10.0, "{popup:?}");
+        assert!((popup.right() - boxed.right()).abs() < 1.0, "{popup:?}");
+        assert!(whole(&drawn), "{drawn:?}");
+
+        // Room only to the right: it keeps to the box's left edge.
+        let boxed = Rect::from_min_size(Pos2::new(10.0, 100.0), Vec2::new(131.0, 26.0));
+        let (popup, drawn) = opened_dropdown(400.0, boxed, &entries);
+        assert!(popup.width() > boxed.width() + 10.0, "{popup:?}");
+        assert!((popup.left() - boxed.left()).abs() < 1.0, "{popup:?}");
+        assert!(whole(&drawn), "{drawn:?}");
+
+        // Too little room either way: it takes what there is to the left,
+        // cuts the entries short and names the hovered one whole.
+        let boxed = Rect::from_min_size(Pos2::new(10.0, 100.0), Vec2::new(80.0, 26.0));
+        let (popup, drawn) = opened_dropdown(100.0, boxed, &entries);
+        assert!(popup.left().abs() < 1.0 && (popup.right() - boxed.right()).abs() < 1.0, "{popup:?}");
+        assert!(drawn.iter().any(|(_, shown)| shown.ends_with('…')), "{drawn:?}");
+        let first = &entries[0].1;
+        assert_eq!(drawn.iter().filter(|(text, _)| text == first).count(), 2, "{drawn:?}");
+        assert!(drawn.iter().any(|(text, shown)| text == first && shown == first), "{drawn:?}");
     }
 
     #[test]
