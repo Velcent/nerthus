@@ -10,11 +10,12 @@ use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Stroke, Str
 use nerthus_engine::Region;
 use nerthus_export::build::OutputType;
 
-use crate::document::SWATCHES;
+use crate::document::{last_region_position, SWATCHES};
 use crate::editor::Editor;
 use crate::progress::{ProgressStep, StepEnd};
 use crate::theme;
 use crate::ui::commands::Command;
+use crate::ui::graph_canvas::elided_galley;
 use crate::ui::tool_commands::ToolCommand;
 use crate::ui::widgets::{check_item, link_button, menu_caption, menu_item, menu_separator, menu_style, submenu};
 
@@ -161,11 +162,6 @@ fn truncate_to_five_places(value: f32) -> f32 {
 /// `MathF.Round(value, 5)` (ties to even).
 fn round_to_five_places(value: f32) -> f32 {
     (value * 100000.0).round_ties_even() / 100000.0
-}
-
-/// Clamped to 0–1.
-fn clamp_unit(value: f32) -> f32 {
-    value.clamp(0.0, 1.0)
 }
 
 /// The region's square on the canvas.
@@ -385,7 +381,10 @@ fn draw_grid(painter: &egui::Painter, canvas: Rect, cells: usize, color: Color32
 /// `RegionControl`: the region's colour at 35% under a 30% black shade,
 /// a 2-pixel outline in its colour, its name (on its colour when it is the
 /// one previewed, `SelectRegion`), its size and place in the middle, the
-/// focus outline (`FocusRegion`) and the four corner thumbs.
+/// focus outline (`FocusRegion`) and the four corner thumbs. The labels
+/// stay inside the region and clear of the thumbs: the name is cut short
+/// before the top-right thumb, and the size and place show only where they
+/// fit under the name.
 fn draw_region(painter: &egui::Painter, region: &Region, rect: Rect, focused: bool, previewed: bool) {
     let color = theme::from_sc_rgb(region.color, 1.0);
     let fill = theme::from_sc_rgb(region.color, 0.35);
@@ -398,16 +397,23 @@ fn draw_region(painter: &egui::Painter, region: &Region, rect: Rect, focused: bo
 
     let name_color = if previewed { theme::WINDOW_DARK } else { color };
     let name_font = if previewed { theme::monospace(12.0) } else { theme::monospace_bold(12.0) };
-    let name = painter.layout_no_wrap(region.name.clone(), name_font, name_color);
-    let name_rect = Rect::from_min_size(rect.min + Vec2::splat(1.0), name.size() + Vec2::new(16.0, 4.0));
-    if previewed {
-        painter.rect_filled(name_rect, 0.0, color);
+    let name_corner = rect.min + Vec2::splat(1.0);
+    let name_position = name_corner + Vec2::new(8.0, 2.0);
+    let name_room = rect.right() - THUMB - 1.0 - name_position.x;
+    let name = elided_galley(painter, &region.name, name_font, name_color, name_room.max(1.0));
+    let name_rect = Rect::from_min_size(name_corner, name.size() + Vec2::new(16.0, 4.0));
+    if name.size().x <= name_room && name_rect.bottom() <= rect.bottom() - THUMB {
+        if previewed {
+            painter.rect_filled(name_rect, 0.0, color);
+        }
+        painter.galley(name_position, name, name_color);
     }
-    painter.galley(name_rect.min + Vec2::new(8.0, 2.0), name, name_color);
 
     let data = painter.layout(data_text(region), theme::monospace(12.0), color, f32::INFINITY);
-    let data_position = rect.center() - data.size() / 2.0;
-    painter.galley(data_position, data, color);
+    let data_rect = Rect::from_center_size(rect.center(), data.size());
+    if data_rect.top() >= name_rect.bottom() && data_rect.width() <= rect.width() - 4.0 {
+        painter.galley(data_rect.min, data, color);
+    }
 
     for corner in Corner::ALL {
         painter.rect_filled(corner.thumb(rect), CornerRadius::ZERO, Color32::from_rgb(0x80, 0x80, 0x80));
@@ -561,8 +567,9 @@ fn drag_resizing(state: &RegionsState, canvas: Rect, point: Pos2, snap_unit: f32
 }
 
 /// `Canvas_MouseUp` (a moved region takes its place, rounded to five
-/// places from its whole-pixel corner) and `ResizeThumb_DragCompleted`;
-/// either way a previewed region is cut again (`RegionUpdated`).
+/// places from its whole-pixel corner and kept wholly on the terrain) and
+/// `ResizeThumb_DragCompleted`; either way a previewed region is cut again
+/// (`RegionUpdated`).
 fn finish_drag(editor: &mut Editor, state: &mut RegionsState, canvas: Rect) {
     if let Some(resizing) = state.resizing.take() {
         editor.region_changed(&resizing.region);
@@ -579,7 +586,8 @@ fn finish_drag(editor: &mut Editor, state: &mut RegionsState, canvas: Rect) {
     let bound = canvas.width();
     let left = corner.x.trunc();
     let top = corner.y.trunc();
-    region.position = [clamp_unit(truncate_to_five_places(left / bound)), clamp_unit(round_to_five_places(top / bound))];
+    let last = last_region_position(region.width);
+    region.position = [truncate_to_five_places(left / bound).clamp(0.0, last), round_to_five_places(top / bound).clamp(0.0, last)];
     editor.document.update_region(&moving.region, region);
     editor.region_changed(&moving.region);
 }
