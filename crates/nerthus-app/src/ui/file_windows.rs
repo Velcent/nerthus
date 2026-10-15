@@ -187,8 +187,8 @@ fn start_dialog(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState
         start_column(&mut column_ui, ctx, editor, &mut memory, commands);
     });
     // Escape belongs to a window over the dialog (What's New, the Nahimic
-    // warning) while one shows.
-    let escaped = !tool_commands::modal_open(ui_state) && ctx.input(|input| input.key_pressed(Key::Escape));
+    // warning, a modal) while one shows.
+    let escaped = !tool_commands::modal_open(ctx, ui_state) && ctx.input(|input| input.key_pressed(Key::Escape));
     if !open || escaped {
         editor.files.start_dialog_open = false;
     }
