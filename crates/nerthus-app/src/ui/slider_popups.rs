@@ -116,7 +116,8 @@ pub fn close_typing(ctx: &egui::Context, id: Id) {
 
 /// Shows the typing box `id` names while it is open (its font at 100%,
 /// in a `TextBox`: a 1px blue border round 4 of padding); the text once
-/// it closes taking it.
+/// it closes taking it. The box stays in the window, moved back from its
+/// place as far as it needs; one wider than the window scrolls its text.
 pub fn typing_box(ui: &Ui, id: Id, look: &TypingLook) -> Option<String> {
     let mut typing: Typing = ui.data(|data| data.get_temp(id))?;
     if went_away(ui.ctx(), typing.shown) {
@@ -130,15 +131,24 @@ pub fn typing_box(ui: &Ui, id: Id, look: &TypingLook) -> Option<String> {
     let border = TEXT_BOX_BORDER * scale;
     let padding = TEXT_BOX_PADDING * scale;
     let chrome = 2.0 * (border + padding);
-    let galley = ui.painter().layout_no_wrap(typing.text.clone(), font.clone(), theme::LABEL_EMPHASIS);
     let line = ui.fonts_mut(|fonts| fonts.row_height(&font));
-    let outer_width = match look.width {
-        BoxWidth::Fixed(width) => width,
-        // The caret's room past the text.
-        BoxWidth::AtLeast(least) => (galley.size().x + 4.0 * scale + chrome).max(least),
+    let screen = ui.ctx().content_rect();
+    let outer_width = |text: &str| {
+        let width = match look.width {
+            BoxWidth::Fixed(width) => width,
+            BoxWidth::AtLeast(least) => {
+                let galley = ui.painter().layout_no_wrap(text.to_owned(), font.clone(), theme::LABEL_EMPHASIS);
+                // The caret's room past the text.
+                (galley.size().x + 4.0 * scale + chrome).max(least)
+            }
+        };
+        width.min(screen.width())
     };
-    let size = Vec2::new(outer_width, line + chrome);
-    let area = egui::Area::new(id.with("area")).fixed_pos(look.top_left).order(egui::Order::Foreground);
+    let size = Vec2::new(outer_width(&typing.text), line + chrome);
+    // Kept in the window by hand: egui's own constraint goes by the size
+    // the box had the pass before, which typing has since changed.
+    let top_left = kept_in(look.top_left, size, screen);
+    let area = egui::Area::new(id.with("area")).fixed_pos(top_left).constrain(false).order(egui::Order::Foreground);
     let shown = area.show(ui.ctx(), |ui| {
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         ui.painter().rect_filled(rect, 3.0 * scale, theme::TEXTBOX_BACKGROUND);
@@ -164,12 +174,28 @@ pub fn typing_box(ui: &Ui, id: Id, look: &TypingLook) -> Option<String> {
     let pressed_elsewhere = pressed_outside(ui, shown.response.rect);
     let outcome = if pressed_elsewhere { Some(theme::settings(ui.ctx()).accept_on_lost_focus) } else { crate::ui::widgets::popup_outcome(ui, &response) };
     let Some(accepted) = outcome else {
+        // The box was sized before the edit took this pass's keys: one
+        // that no longer fits its text would show a pass behind it (and
+        // stay so until something repaints), so the pass runs again.
+        if outer_width(&typing.text) != size.x {
+            ui.ctx().request_discard("the typing box's width");
+            if !ui.ctx().will_discard() {
+                ui.ctx().request_repaint();
+            }
+        }
         ui.data_mut(|data| data.insert_temp(id, typing));
         return None;
     };
     close_typing(ui.ctx(), id);
     response.surrender_focus();
     accepted.then_some(typing.text)
+}
+
+/// `top_left` moved just as far as a box of `size` needs to lie in
+/// `screen` (against its top left when the box is the bigger).
+fn kept_in(top_left: Pos2, size: Vec2, screen: Rect) -> Pos2 {
+    let furthest = (screen.max - size).max(screen.min);
+    top_left.clamp(screen.min, furthest)
 }
 
 /// A right-click asked for from outside (the launch checks): the slider
@@ -465,6 +491,17 @@ pub fn value_font() -> FontId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_box_moves_back_into_the_window_only_as_far_as_it_needs() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
+        let size = Vec2::new(100.0, 30.0);
+        assert_eq!(kept_in(Pos2::new(50.0, 20.0), size, screen), Pos2::new(50.0, 20.0));
+        assert_eq!(kept_in(Pos2::new(350.0, 190.0), size, screen), Pos2::new(300.0, 170.0));
+        assert_eq!(kept_in(Pos2::new(-8.0, -8.0), size, screen), Pos2::ZERO);
+        // Bigger than the window: against its top left.
+        assert_eq!(kept_in(Pos2::new(250.0, 20.0), Vec2::new(500.0, 30.0), screen), Pos2::new(0.0, 20.0));
+    }
 
     #[test]
     fn short_decimals_round_like_the_custom_format() {
