@@ -86,15 +86,21 @@ pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut U
         Rect::from_min_max(border.min + Vec2::new(TAB_BORDER + 2.0, 2.0), border.max - Vec2::splat(TAB_BORDER + 2.0))
     };
     // `Toolbox`: margin 0, 35, 0, 0 for the menus and 0, 16, 0, 24 for the
-    // panel; none without tabs. It is placed before the graph lays out,
-    // for Extents and Selection to leave room for it, and drawn over it.
-    let toolbox_area = if tabs_hidden {
+    // panel; none without tabs. The menus end above the build strip, which
+    // is drawn over the graph's bottom left after them. It is placed before
+    // the graph lays out, for Extents and Selection to leave room for it,
+    // and drawn over it.
+    let menus = editor.user.options.toolbox_style() == ToolboxStyle::Menus;
+    let mut toolbox_area = if tabs_hidden {
         grid
-    } else if editor.user.options.toolbox_style() == ToolboxStyle::Menus {
+    } else if menus {
         Rect::from_min_max(grid.min + Vec2::new(0.0, 35.0), grid.max)
     } else {
         Rect::from_min_max(grid.min + Vec2::new(0.0, 16.0), grid.max - Vec2::new(0.0, 24.0))
     };
+    if menus {
+        toolbox_area.max.y = footer_top(grid).max(toolbox_area.min.y);
+    }
     ui_state.graph.toolbox_rect = toolbox::place(ui, toolbox_area, &editor.user.options);
     graph_canvas::show(ui, graph_rect, editor, &mut ui_state.graph, commands);
     toolbox::show(ui, toolbox_area, editor, &mut ui_state.graph, commands);
@@ -371,8 +377,9 @@ fn confirm_tab_delete(ui: &mut Ui, tabs: &[crate::document::GraphTabInfo], ui_st
     }
 }
 
-/// The build strip's width while the graph has room for it.
+/// The build strip's width while the graph has room for it, and its height.
 const FOOTER_WIDTH: f32 = 200.0;
+const FOOTER_HEIGHT: f32 = 26.0;
 /// The build strip's inset from the graph's left and bottom edges (inside
 /// the border), and from its right edge while the graph is narrower than
 /// the strip.
@@ -392,8 +399,13 @@ fn footer_rect(area: Rect) -> Option<Rect> {
     if width <= 0.0 {
         return None;
     }
-    let min = Pos2::new(area.left() + FOOTER_INSET, area.bottom() - FOOTER_INSET - 26.0);
-    Some(Rect::from_min_size(min, Vec2::new(width, 26.0)))
+    let min = Pos2::new(area.left() + FOOTER_INSET, footer_top(area));
+    Some(Rect::from_min_size(min, Vec2::new(width, FOOTER_HEIGHT)))
+}
+
+/// The top of the build strip at the bottom of the graph `area`.
+fn footer_top(area: Rect) -> f32 {
+    area.bottom() - FOOTER_INSET - FOOTER_HEIGHT
 }
 
 /// How many of the progress ticks, the first centred at `start_x`, fit
@@ -590,6 +602,7 @@ fn engine_toggle(ui: &mut Ui, suspended: bool) -> egui::Response {
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::user::ToolboxMode;
 
     /// The build strip painted at the bottom of a graph frame `width` wide,
     /// its clock at `seconds`: the strip and the shapes painted, and among
@@ -780,6 +793,116 @@ mod tests {
             if visible.left() < area_right {
                 assert!(visible.right() <= area_right + 0.5, "{:?} painted at {visible:?} past the graph's edge {area_right}", clipped.shape);
             }
+        }
+    }
+
+    /// The toolbox's category buttons as painted: the part of each outline
+    /// (`TOOLBOX_BUTTON_BACKGROUND`) left in sight by its clip.
+    fn toolbox_buttons(shapes: &[egui::epaint::ClippedShape]) -> Vec<Rect> {
+        let buttons = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            Shape::Rect(rect) if rect.stroke.color == theme::TOOLBOX_BUTTON_BACKGROUND => Some(rect.rect.intersect(clipped.clip_rect)),
+            _ => None,
+        });
+        buttons.filter(|visible| visible.is_positive()).collect()
+    }
+
+    /// Where the toolbox shows `text` (an Expanded category's name), in
+    /// full sight.
+    fn toolbox_text(shapes: &[egui::epaint::ClippedShape], text: &str) -> Option<Rect> {
+        shapes.iter().find_map(|clipped| match &clipped.shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                let bounds = clipped.shape.visual_bounding_rect();
+                clipped.clip_rect.contains_rect(bounds).then_some(bounds)
+            }
+            _ => None,
+        })
+    }
+
+    /// The graph frame's inside: `grid` less its border (and the tabs).
+    fn graph_frame(grid: Rect, tabs_hidden: bool) -> Rect {
+        let top = if tabs_hidden { grid.top() } else { grid.top() + GRAPH_TOP };
+        Rect::from_min_max(Pos2::new(grid.left(), top), grid.max).shrink(TAB_BORDER)
+    }
+
+    #[test]
+    fn the_toolbox_menus_keep_inside_the_graph_above_the_build_strip() {
+        for mode in [ToolboxMode::Single, ToolboxMode::Double, ToolboxMode::Expanded] {
+            for tabs_hidden in [false, true] {
+                let (context, mut editor, mut ui_state) = graph_grid_context();
+                editor.user.options.set_toolbox_style(ToolboxStyle::Menus);
+                editor.user.options.set_toolbox_mode(mode);
+                editor.user.options.set_value("HideTabs", serde_json::json!(tabs_hidden));
+                let mut scrolled = false;
+                for height in (60..=700).step_by(20) {
+                    let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, height as f32));
+                    grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                    let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+                    let case = format!("{mode:?} at {height} (tabs hidden: {tabs_hidden})");
+                    let toolbox = ui_state.graph.toolbox_rect;
+                    let strip_top = footer_top(grid);
+                    if toolbox.height() > 0.0 {
+                        assert!(toolbox.bottom() <= strip_top, "{case}: the toolbox reaches {} under the strip at {strip_top}", toolbox.bottom());
+                    }
+                    let frame = graph_frame(grid, tabs_hidden);
+                    let buttons = toolbox_buttons(&shapes);
+                    for button in &buttons {
+                        assert!(toolbox.expand(0.5).contains_rect(*button), "{case}: a button at {button:?} past the toolbox {toolbox:?}");
+                        assert!(frame.contains_rect(*button), "{case}: a button at {button:?} outside the graph frame {frame:?}");
+                        assert!(button.bottom() <= strip_top, "{case}: a button at {button:?} under the strip at {strip_top}");
+                    }
+                    scrolled |= buttons.len() < toolbox::CATEGORIES.len();
+                    if height >= 600 {
+                        assert_eq!(buttons.len(), toolbox::CATEGORIES.len(), "{case}: not every category shows");
+                    }
+                }
+                assert!(scrolled, "{mode:?}: no graph short enough to cut the toolbox off");
+            }
+        }
+    }
+
+    #[test]
+    fn every_toolbox_category_is_in_reach_in_a_short_graph() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        editor.user.options.set_toolbox_style(ToolboxStyle::Menus);
+        editor.user.options.set_toolbox_mode(ToolboxMode::Expanded);
+        // About the graph of a 1280 by 500 window: three categories show.
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, 200.0));
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        assert!(toolbox_text(&shapes, "Primitive").is_some());
+        assert!(toolbox_text(&shapes, "Macro").is_none(), "Macro shows without scrolling");
+        // The wheel over the toolbox scrolls it, not the graph.
+        let toolbox = ui_state.graph.toolbox_rect;
+        let zoom = ui_state.graph.view().zoom;
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        grid_frame(&context, grid, &mut editor, &mut ui_state, vec![egui::Event::PointerMoved(toolbox.center())]);
+        grid_frame(&context, grid, &mut editor, &mut ui_state, vec![wheel]);
+        for _ in 0..60 {
+            grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        }
+        let (shapes, _) = grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        assert_eq!(ui_state.graph.view().zoom, zoom);
+        assert!(toolbox_text(&shapes, "Primitive").is_none(), "the toolbox did not scroll");
+        let name = toolbox_text(&shapes, "Macro").expect("Macro in sight at the end");
+        assert!(toolbox.contains_rect(name), "Macro at {name:?} outside the toolbox {toolbox:?}");
+        // Its menu opens from there.
+        assert!(!egui::Popup::is_any_open(&context));
+        click(&context, grid, &mut editor, &mut ui_state, name.center());
+        assert!(egui::Popup::is_any_open(&context), "Macro's menu did not open");
+    }
+
+    #[test]
+    fn a_click_under_the_toolbox_opens_no_menu() {
+        // Below the cut-off column, on the strip: no category's menu.
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        editor.user.options.set_toolbox_style(ToolboxStyle::Menus);
+        editor.user.options.set_toolbox_mode(ToolboxMode::Single);
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, 200.0));
+        grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
+        let toolbox = ui_state.graph.toolbox_rect;
+        for y in [toolbox.bottom() + 4.0, footer_top(grid) + 4.0, grid.bottom() + 4.0] {
+            click(&context, grid, &mut editor, &mut ui_state, Pos2::new(toolbox.center().x, y));
+            assert!(!egui::Popup::is_any_open(&context), "a menu opened at {y}");
         }
     }
 
