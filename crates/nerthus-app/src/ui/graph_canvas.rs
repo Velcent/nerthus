@@ -2,10 +2,11 @@
 //! with the toolbox category's colour on the title, icon, ports and
 //! outgoing connections, borders that show the build state, "circuit"
 //! connections, groups and notes behind the nodes, and the mouse
-//! handling (drag to move or connect, marquee selection, Ctrl Shift drag
-//! to push elements aside, wheel zoom, middle or right drag to pan, a
-//! connection dropped into the node search or onto another output, files
-//! and toolbox entries dropped onto the graph).
+//! handling (drag to move, the view scrolling at the graph's edge, or to
+//! connect, marquee selection, Ctrl Shift drag to push elements aside,
+//! wheel zoom, middle or right drag to pan, a connection dropped into the
+//! node search or onto another output, files and toolbox entries dropped
+//! onto the graph).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -50,8 +51,10 @@ const CIRCUIT_RUN: f32 = 24.0;
 pub(crate) const SIMPLIFIED_ZOOM: f32 = 0.4;
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 2.0;
-/// The gap Extents and Zoom to Selection leave right of the toolbox (its
-/// own margin from the graph's edge).
+/// The room Extents and Selection leave around what they frame.
+const FRAME_MARGIN: f32 = 60.0;
+/// The gap Extents and Selection leave right of the toolbox (its own
+/// margin from the graph's edge).
 const TOOLBOX_GAP: f32 = 10.0;
 /// How far from a port a dragged connection still snaps to it.
 const SNAP_DISTANCE: f32 = 18.0;
@@ -59,6 +62,13 @@ const SNAP_DISTANCE: f32 = 18.0;
 const SNAP_ITEMS_DISTANCE: f32 = 36.0;
 /// `Line-SnapLine-Stroke`.
 const SNAP_LINE: Color32 = Color32::from_rgb(0x60, 0x53, 0x8f);
+/// The view scrolls under an element dragged within `AUTO_PAN_MARGIN`
+/// screen points of the graph's edge, or past it: `AUTO_PAN_RATE` points
+/// a second for each point the pointer is beyond the margin, counting no
+/// more than `AUTO_PAN_REACH` of them.
+const AUTO_PAN_MARGIN: f32 = 24.0;
+const AUTO_PAN_RATE: f32 = 12.0;
+const AUTO_PAN_REACH: f32 = 100.0;
 /// `CreateCollapsedPortElement`: the port standing in for a compact or
 /// small node's ports past the first when it has more than two.
 pub const COLLAPSED_PORT: &str = "CollapsedPort";
@@ -238,8 +248,9 @@ pub struct GraphState {
     /// the toolbox's own state.
     pub toolbox_drag: Option<String>,
     pub toolbox: crate::ui::toolbox::ToolboxState,
-    /// Where the toolbox was last frame: the wheel over it is the
-    /// toolbox's, not the graph's.
+    /// Where the toolbox goes this frame, placed before the graph lays
+    /// out: the wheel over it is the toolbox's, not the graph's, and
+    /// Extents and Selection leave room for it.
     pub toolbox_rect: Rect,
     /// The editor's areas this frame, and where the Lazy Menu asked the
     /// pointer to go.
@@ -790,7 +801,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     name_portals(&mut layouts, editor);
     let by_id: HashMap<i32, usize> = layouts.iter().enumerate().map(|(index, layout)| (layout.id, index)).collect();
 
-    apply_zoom_request(ui, state, &layouts, &frame.groups, editor, rect);
+    apply_zoom_request(state, &layouts, &frame, editor, rect);
 
     // The background takes clicks, drags and the context menu.
     let background_id = ui.id().with("graph-background");
@@ -801,6 +812,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     if pan_started && editor.user.options.record_graph_movements() {
         editor.document.checkpoint("Graph panned");
     }
+    auto_pan(ui, state, rect);
 
     let view = state.view();
     let zoom = view.zoom;
@@ -961,18 +973,10 @@ pub fn connection_ends(editor: &Editor, state: &GraphState, to: i32, to_port: &s
     Some((view.to_screen(origin, start), view.to_screen(origin, end)))
 }
 
-fn apply_zoom_request(ui: &Ui, state: &mut GraphState, layouts: &[NodeLayout], groups: &[GroupData], editor: &Editor, rect: Rect) {
+fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &GroupFrame, editor: &Editor, rect: Rect) {
     let Some(request) = state.zoom_request.take() else {
         return;
     };
-    // The toolbox is laid out after the graph, so before its first frame
-    // a fit has nothing to leave room for: it waits a frame for it.
-    let fits = matches!(request, ZoomRequest::Extents | ZoomRequest::Selection);
-    if fits && state.toolbox_rect == Rect::NOTHING {
-        state.zoom_request = Some(request);
-        ui.ctx().request_repaint();
-        return;
-    }
     let fit = fit_rect(rect, state.toolbox_rect);
     let tab = state.tab;
     let view = state.view_mut();
@@ -985,7 +989,7 @@ fn apply_zoom_request(ui: &Ui, state: &mut GraphState, layouts: &[NodeLayout], g
     let centred = match request {
         ZoomRequest::Center(id) => layouts.iter().find(|layout| layout.id == id).map(|layout| layout.rect),
         ZoomRequest::CenterNote(id) => crate::ui::graph_notes::note_rect(editor, tab, id),
-        ZoomRequest::CenterGroup(id) => groups.iter().find(|group| group.id == id).map(GroupData::bounds),
+        ZoomRequest::CenterGroup(id) => frame.groups.iter().find(|group| group.id == id).map(GroupData::bounds),
         _ => None,
     };
     if let Some(element) = centred {
@@ -993,18 +997,24 @@ fn apply_zoom_request(ui: &Ui, state: &mut GraphState, layouts: &[NodeLayout], g
         view.location = element.center().to_vec2() - visible / 2.0;
         return;
     }
-    let chosen: Vec<&NodeLayout> = match request {
-        ZoomRequest::Selection => layouts.iter().filter(|layout| editor.selection.contains(&layout.id)).collect(),
-        _ => layouts.iter().collect(),
+    // Extents takes in the tab's groups and the notes no collapsed group
+    // hides as well as its nodes; Selection the selected nodes.
+    let items: Vec<Rect> = match request {
+        ZoomRequest::Selection => layouts.iter().filter(|layout| editor.selection.contains(&layout.id)).map(|layout| layout.rect).collect(),
+        _ => {
+            let nodes = layouts.iter().map(|layout| layout.rect);
+            let groups = frame.groups.iter().map(GroupData::bounds);
+            let notes = crate::ui::graph_notes::note_rects(editor, tab).into_iter();
+            let shown_notes = notes.filter(|(id, _)| !frame.hidden_in.contains_key(id)).map(|(_, note)| note);
+            nodes.chain(groups).chain(shown_notes).collect()
+        }
     };
-    let Some(first) = chosen.first() else {
+    let reach = fit.size() / MIN_ZOOM - Vec2::splat(2.0 * FRAME_MARGIN);
+    let focus = view.location + (fit.center() - rect.min) / view.zoom;
+    let Some(bounds) = framed_bounds(&items, reach, focus.to_pos2()) else {
         return;
     };
-    let mut bounds = first.rect;
-    for layout in &chosen {
-        bounds = bounds.union(layout.rect);
-    }
-    let bounds = bounds.expand(60.0);
+    let bounds = bounds.expand(FRAME_MARGIN);
     let zoom_x = fit.width() / bounds.width();
     let zoom_y = fit.height() / bounds.height();
     let zoom = zoom_x.min(zoom_y).clamp(MIN_ZOOM, 1.0);
@@ -1012,15 +1022,39 @@ fn apply_zoom_request(ui: &Ui, state: &mut GraphState, layouts: &[NodeLayout], g
     view.location = bounds.center().to_vec2() - (fit.center() - rect.min) / zoom;
 }
 
-/// Where Extents and Zoom to Selection fit the nodes on the graph `rect`:
-/// right of the toolbox floating over it, so none starts hidden under it,
-/// though never in less than the graph's right half.
+/// Where Extents and Selection fit what they frame on the graph `rect`:
+/// right of the toolbox floating over it, so nothing starts hidden under
+/// it, though never in less than the graph's right half.
 fn fit_rect(rect: Rect, toolbox: Rect) -> Rect {
     if !toolbox.intersects(rect) {
         return rect;
     }
     let left = (toolbox.right() + TOOLBOX_GAP).clamp(rect.left(), rect.center().x);
     Rect::from_min_max(Pos2::new(left, rect.top()), rect.max)
+}
+
+/// What Extents and Selection frame: the bounds of all `items` when they
+/// fit within `reach` (the canvas the graph shows at the least zoom).
+/// Items too far apart for that leave the view on the most of them that
+/// fit around any one, the one nearest `focus` on a tie, rather than on
+/// the empty canvas between them.
+fn framed_bounds(items: &[Rect], reach: Vec2, focus: Pos2) -> Option<Rect> {
+    let all = items.iter().copied().reduce(Rect::union)?;
+    if all.width() <= reach.x && all.height() <= reach.y {
+        return Some(all);
+    }
+    let mut best: Option<(usize, f32, Rect)> = None;
+    for seed in items {
+        let window = Rect::from_center_size(seed.center(), reach);
+        let near = items.iter().filter(|item| window.contains_rect(**item));
+        let (count, bounds) = near.fold((0, *seed), |(count, bounds), item| (count + 1, bounds.union(*item)));
+        let distance = bounds.center().distance_sq(focus);
+        let better = best.is_none_or(|(most, nearest, _)| count > most || (count == most && distance < nearest));
+        if better {
+            best = Some((count, distance, bounds));
+        }
+    }
+    best.map(|(_, _, bounds)| bounds)
 }
 
 /// Pans with the middle button (anywhere on the graph) or a right drag on
@@ -1065,6 +1099,44 @@ fn handle_pan_and_zoom(ui: &Ui, background: &Response, state: &mut GraphState, r
     let after_offset = (point - rect.min) / view.zoom;
     view.location = before.to_vec2() - after_offset;
     pan_started
+}
+
+/// While nodes, a group or a note are moved with the pointer near or past
+/// the graph's edge, the view scrolls that way, so what is dragged can go
+/// anywhere on the canvas (`drag_pointer` keeps it in sight meanwhile).
+fn auto_pan(ui: &Ui, state: &mut GraphState, rect: Rect) {
+    let moving = matches!(state.drag, Some(Drag::Elements { .. })) || state.group_drag.is_some_and(|drag| drag.moves()) || state.note_drag.is_some_and(|drag| drag.moves());
+    let (held, pointer, dt) = ui.input(|input| (input.pointer.primary_down(), input.pointer.interact_pos(), input.stable_dt.min(0.1)));
+    let Some(pointer) = pointer.filter(|_| moving && held) else {
+        return;
+    };
+    let velocity = auto_pan_velocity(rect, pointer);
+    if velocity == Vec2::ZERO {
+        return;
+    }
+    let view = state.view_mut();
+    view.location += velocity * dt / view.zoom;
+    // The pointer may rest there: the view keeps scrolling without events.
+    ui.ctx().request_repaint();
+}
+
+/// How fast (screen points a second) the view scrolls with the pointer at
+/// `pointer`: towards each edge it is within `AUTO_PAN_MARGIN` of or past.
+fn auto_pan_velocity(rect: Rect, pointer: Pos2) -> Vec2 {
+    let axis = |low: f32, high: f32, at: f32| {
+        let margin = AUTO_PAN_MARGIN.min((high - low) / 4.0);
+        let past_low = (low + margin - at).clamp(0.0, AUTO_PAN_REACH);
+        let past_high = (at - (high - margin)).clamp(0.0, AUTO_PAN_REACH);
+        (past_high - past_low) * AUTO_PAN_RATE
+    };
+    Vec2::new(axis(rect.left(), rect.right(), pointer.x), axis(rect.top(), rect.bottom(), pointer.y))
+}
+
+/// Where a moved element's pointer counts (screen): kept inside the
+/// graph, so what is dragged past its edge stays in sight, at the edge,
+/// while `auto_pan` scrolls the view under it.
+pub(crate) fn drag_pointer(ui: &Ui, rect: Rect) -> Option<Pos2> {
+    ui.input(|input| input.pointer.interact_pos()).map(|point| point.clamp(rect.min, rect.max))
 }
 
 /// `SnapElementToGrid`: to the nearer multiple of the unit, halves down
@@ -1666,8 +1738,10 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
     let modifiers = ui.input(|input| input.modifiers);
     for (index, response) in nodes {
         let id = layouts[*index].id;
+        // Beside the pointer, not under the node's corner, which at a
+        // high zoom is far off or past the graph's edge.
         let tooltip = node_tooltip(editor, id);
-        let response = response.clone().on_hover_text(tooltip);
+        let response = response.clone().on_hover_text_at_pointer(tooltip);
         if response.clicked() {
             if modifiers.command || modifiers.shift {
                 editor.toggle_selected(id);
@@ -1733,8 +1807,7 @@ fn drag_elements(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layouts: 
     };
     let view = state.view();
     let dragging = ui.input(|input| input.pointer.primary_down());
-    let pointer = ui.input(|input| input.pointer.interact_pos());
-    if let Some(pointer) = pointer {
+    if let Some(pointer) = drag_pointer(ui, state.rect) {
         let current = view.to_canvas(origin, pointer);
         let delta = current - pointer_start;
         let place = |start: [f32; 2]| {
@@ -2507,15 +2580,10 @@ mod tests {
         let mut editor = Editor::new(document);
         let mut state = GraphState::default();
         let context = themed_context();
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        // Before the toolbox's first frame the fit waits for it.
-        state.zoom_request = Some(ZoomRequest::Extents);
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        assert_eq!(state.zoom_request, Some(ZoomRequest::Extents));
         // The menus' column down the graph's left edge.
         state.toolbox_rect = Rect::from_min_size(Pos2::new(10.0, 45.0), Vec2::new(36.0, 400.0));
+        state.zoom_request = Some(ZoomRequest::Extents);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        assert_eq!(state.zoom_request, None);
         let shown = |id: i32| {
             let layout = layout_node(editor.document.node(id).unwrap(), editor.user.options.default_node_size());
             state.view().rect_to_screen(state.rect.min, layout.rect)
@@ -2741,6 +2809,66 @@ mod tests {
     }
 
     #[test]
+    fn the_view_scrolls_faster_the_further_past_the_edge() {
+        let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0));
+        assert_eq!(auto_pan_velocity(rect, Pos2::new(400.0, 300.0)), Vec2::ZERO);
+        assert_eq!(auto_pan_velocity(rect, Pos2::new(AUTO_PAN_MARGIN, 300.0)), Vec2::ZERO);
+        // Near the top right corner: up and to the right.
+        let near = auto_pan_velocity(rect, Pos2::new(790.0, 5.0));
+        assert!(near.x > 0.0 && near.y < 0.0);
+        let past = auto_pan_velocity(rect, Pos2::new(900.0, 300.0));
+        assert!(past.x > near.x && past.y == 0.0);
+        // Up to a point.
+        let fastest = AUTO_PAN_REACH * AUTO_PAN_RATE;
+        assert_eq!(auto_pan_velocity(rect, Pos2::new(5000.0, 300.0)), Vec2::new(fastest, 0.0));
+        assert_eq!(auto_pan_velocity(rect, Pos2::new(400.0, -5000.0)), Vec2::new(0.0, -fastest));
+    }
+
+    #[test]
+    fn nodes_dragged_past_the_edge_scroll_the_view_and_stay_in_sight() {
+        let mut editor = Editor::new(Document::new());
+        let mut state = GraphState::default();
+        let context = themed_context();
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+        let view = state.view();
+        let corner = view.to_canvas(GRAPH.min, GRAPH.center());
+        let node = editor.document.add_node("Mountain", [corner.x, corner.y]).unwrap();
+
+        // Taken by its title and moved well inside the graph: the view
+        // stays.
+        let title = GRAPH.center() + Vec2::new(100.0, 15.0);
+        let button = |pos: Pos2, pressed: bool| egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame_amid_panels(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(title)]);
+        frame_amid_panels(&context, &mut editor, &mut state, vec![button(title, true)]);
+        frame_amid_panels(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(title + Vec2::new(40.0, 0.0))]);
+        assert_eq!(state.view(), view);
+
+        // Held past the right edge, over the panel beside the graph: the
+        // view scrolls right frame after frame, the pointer still.
+        let past = Pos2::new(GRAPH.right() + 60.0, title.y);
+        frame_amid_panels(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(past)]);
+        let mut location = state.view().location;
+        for _ in 0..30 {
+            frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+            let scrolled = state.view().location;
+            assert!(scrolled.x > location.x);
+            assert_eq!(scrolled.y, location.y);
+            location = scrolled;
+        }
+
+        // Let go there, the node stays at the edge, in sight, and the
+        // view stops.
+        frame_amid_panels(&context, &mut editor, &mut state, vec![button(past, false)]);
+        let layout = layout_node(editor.document.node(node).unwrap(), editor.user.options.default_node_size());
+        let screen = state.view().rect_to_screen(GRAPH.min, layout.rect);
+        assert!(screen.intersects(GRAPH), "{screen:?} is out of sight");
+        assert!(layout.rect.left() > corner.x + 500.0);
+        let stopped = state.view();
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+        assert_eq!(state.view(), stopped);
+    }
+
+    #[test]
     fn hidden_parts_leave_hover_clicks_and_drags_to_the_panels_around() {
         let mut editor = Editor::new(Document::new());
         let mut state = GraphState::default();
@@ -2810,6 +2938,70 @@ mod tests {
         frame(vec![egui::Event::PointerMoved(hidden_input)]);
         assert!(frame(vec![button(hidden_input, false)]).is_empty());
         assert!(state.drag.is_none() && state.popup.is_none());
+    }
+
+    /// Rests the pointer at `point` until the tooltip saying `text` shows:
+    /// where it shows.
+    fn tooltip_at(context: &egui::Context, editor: &mut Editor, state: &mut GraphState, point: Pos2, text: &str) -> Rect {
+        frame_amid_panels(context, editor, state, vec![egui::Event::PointerMoved(point)]);
+        for _ in 0..120 {
+            let (shapes, _, _) = frame_amid_panels(context, editor, state, Vec::new());
+            let tooltips: Vec<Rect> = context.memory(|memory| {
+                let layers = memory.areas().visible_layer_ids().into_iter().filter(|layer| layer.order == egui::Order::Tooltip);
+                layers.filter_map(|layer| memory.area_rect(layer.id)).collect()
+            });
+            let texts = shapes.iter().filter_map(|clipped| match &clipped.shape {
+                Shape::Text(shape) if shape.galley.text() == text => Some(clipped.shape.visual_bounding_rect()),
+                _ => None,
+            });
+            let shown = texts.into_iter().find_map(|bounds| tooltips.iter().copied().find(|tooltip| tooltip.contains_rect(bounds)));
+            if let Some(tooltip) = shown {
+                return tooltip;
+            }
+        }
+        panic!("no tooltip says {text:?}");
+    }
+
+    #[test]
+    fn tooltips_show_beside_the_pointer() {
+        let mut editor = Editor::new(Document::new());
+        let mut state = GraphState::default();
+        let context = themed_context();
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+
+        // At the closest zoom an Erosion node, a group and an icon note are
+        // each hundreds of points across.
+        state.view_mut().zoom = MAX_ZOOM;
+        let view = state.view();
+        let canvas_at = |x: f32, y: f32| {
+            let point = view.to_canvas(GRAPH.min, Pos2::new(x, y));
+            [point.x, point.y]
+        };
+        let erosion = editor.document.add_node("ErosionPro", canvas_at(220.0, 310.0)).unwrap();
+        let group = editor.document.add_group(&[], canvas_at(720.0, 320.0), [170.0, 100.0], 0);
+        let note = editor.document.add_note(canvas_at(760.0, 560.0), 0);
+        editor.document.toggle_note_type(note);
+        editor.document.set_note_text(note, "Carve the valley first");
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+
+        // Rested on the node's middle, the group header's right end and the
+        // note's lower right, far from their lower left corners.
+        let view = state.view();
+        let node = editor.document.node(erosion).unwrap();
+        let node_box = view.rect_to_screen(GRAPH.min, layout_node(node, editor.user.options.default_node_size()).rect);
+        let group_data = editor.document.group(group).unwrap();
+        let header = view.rect_to_screen(GRAPH.min, group_data.bounds());
+        let note_box = view.rect_to_screen(GRAPH.min, crate::ui::graph_notes::note_rect(&editor, 0, note).unwrap());
+        let rests = [
+            ("the node", node_box.center(), node_tooltip(&editor, erosion)),
+            ("the group", Pos2::new(header.right() - 20.0, header.top() + 20.0), group_data.name.clone()),
+            ("the note", note_box.max - Vec2::splat(10.0), "Carve the valley first".to_string()),
+        ];
+        for (element, point, text) in rests {
+            assert!(GRAPH.contains(point), "{element} rests outside the graph");
+            let tooltip = tooltip_at(&context, &mut editor, &mut state, point, &text);
+            assert!(tooltip.distance_to_pos(point) <= 16.0, "{element}'s tooltip {tooltip:?} is far from the pointer {point:?}");
+        }
     }
 
     #[test]
@@ -2916,5 +3108,76 @@ mod tests {
         state.reset();
         assert_eq!(state.renaming, None);
         assert!(state.rename_text.is_empty());
+    }
+
+    /// The canvas the graph shows.
+    fn shown_canvas(state: &GraphState) -> Rect {
+        let view = state.view();
+        Rect::from_min_size(view.location.to_pos2(), state.rect.size() / view.zoom)
+    }
+
+    fn node_rect(editor: &Editor, id: i32) -> Rect {
+        layout_node(editor.document.node(id).unwrap(), editor.user.options.default_node_size()).rect
+    }
+
+    #[test]
+    fn extents_frames_notes_and_groups_as_well_as_nodes() {
+        let mut document = Document::new();
+        let node = document.add_node("Mountain", [26100.0, 26100.0]).unwrap();
+        let note = document.add_note([26100.0, 29000.0], 0);
+        let group = document.add_group(&[], [22000.0, 26000.0], [400.0, 300.0], 0);
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = shown_canvas(&state);
+        assert!(shown.contains_rect(node_rect(&editor, node)));
+        assert!(shown.contains_rect(crate::ui::graph_notes::note_rect(&editor, 0, note).unwrap()));
+        assert!(shown.contains_rect(editor.document.group(group).unwrap().bounds()));
+    }
+
+    #[test]
+    fn extents_too_wide_for_the_least_zoom_frames_the_bulk() {
+        let mut document = Document::new();
+        let bulk: Vec<i32> = [[26100.0, 26100.0], [26500.0, 26100.0], [26100.0, 26500.0]].into_iter().map(|at| document.add_node("Mountain", at).unwrap()).collect();
+        let stray = document.add_node("Mountain", [1_000_000.0, 1_000_000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = shown_canvas(&state);
+        for node in &bulk {
+            assert!(shown.contains_rect(node_rect(&editor, *node)), "{shown:?}");
+        }
+        assert!(!shown.intersects(node_rect(&editor, stray)));
+        // Selection does the same with selected nodes.
+        editor.selection = vec![bulk[0], stray];
+        state.zoom_request = Some(ZoomRequest::Selection);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = shown_canvas(&state);
+        assert!(shown.contains_rect(node_rect(&editor, bulk[0])));
+        assert!(!shown.intersects(node_rect(&editor, stray)));
+    }
+
+    #[test]
+    fn extents_of_lone_nodes_far_apart_frames_the_nearer() {
+        let mut document = Document::new();
+        let near = document.add_node("Mountain", [-100_000.0, -100_000.0]).unwrap();
+        let far = document.add_node("Mountain", [1_000_000.0, 1_000_000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = shown_canvas(&state);
+        assert!(shown.contains_rect(node_rect(&editor, near)), "{shown:?}");
+        assert!(!shown.intersects(node_rect(&editor, far)));
+        // Asked again, it stays put.
+        let view = state.view();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        assert_eq!(state.view(), view);
     }
 }
