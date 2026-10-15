@@ -17,7 +17,7 @@ use crate::ui::commands::Command;
 use crate::ui::editors::{self, SliderSpec};
 use crate::ui::property_area::group_panel;
 use crate::ui::viewport_2d::Viewport2DState;
-use crate::ui::widgets::{check_item, checked_icon_item, icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator, toolbar_background, toolbar_button, toolbar_separator};
+use crate::ui::widgets::{check_item, checked_icon_item, icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator, toolbar_background, toolbar_button, toolbar_separator, vertical_toolbar};
 use crate::viewport_render::{MaskGradient, MASK_GRADIENTS};
 
 /// The toolbar's margin in its column, clear of the frame's 2. The graph
@@ -81,65 +81,65 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, settings: &mut ViewportSet
     let [padding_across, padding_down] = sizes.toolbar_padding;
     let inner = toolbar_rect.shrink(1.5).shrink2(Vec2::new(padding_across, padding_down));
 
-    let top_builder = UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Center));
-    let mut top = ui.new_child(top_builder);
-    top.spacing_mut().item_spacing.y = 0.0;
-    resolution_menu(&mut top, editor, commands);
-    toolbar_separator(&mut top, 8.0, 2.0);
     let was_open = *sun_open;
-    let sun_button = icon_toggle(&mut top, "sun", "Lighting", *sun_open, theme::ACCENT_PRIMARY);
-    if sun_button.clicked() {
-        *sun_open = !*sun_open;
-    }
-    render_style_menu(&mut top, editor, commands);
-    toolbar_separator(&mut top, 2.0, 2.0);
-    helpers_menu(&mut top, editor, settings, commands);
-    screenshot_menu(&mut top, editor, commands);
-    toolbar_separator(&mut top, 2.0, 2.0);
+    let sun_button = vertical_toolbar(ui, "viewport-toolbar", inner, toolbar_rect, |column, dock| {
+        resolution_menu(column, editor, commands);
+        toolbar_separator(column, 8.0, 2.0);
+        let sun_button = icon_toggle(column, "sun", "Lighting", *sun_open, theme::ACCENT_PRIMARY);
+        if sun_button.clicked() {
+            *sun_open = !*sun_open;
+        }
+        render_style_menu(column, editor, commands);
+        toolbar_separator(column, 2.0, 2.0);
+        helpers_menu(column, editor, settings, commands);
+        screenshot_menu(column, editor, commands);
+        toolbar_separator(column, 2.0, 2.0);
 
-    let bottom_builder = UiBuilder::new().max_rect(inner).layout(Layout::bottom_up(Align::Center));
-    let mut bottom = ui.new_child(bottom_builder);
-    bottom.spacing_mut().item_spacing.y = 0.0;
-    icon_menu(&mut bottom, "menu-deep", "Viewport Options", None, |ui| {
-        menu_caption(ui, "Viewport");
-        // `TglEmbed_OnClick`, `TglFloat_OnClick`.
-        let floating = editor.user.options.viewport_floating();
-        if check_item(ui, !floating, "Embedded", "").clicked() && floating {
-            commands.push(Command::SetViewportFloating(false));
+        // Docked at the bottom, down from the top: the docked 2D view's
+        // toggle, the measuring tools and the viewport options.
+        dock.bottom(column);
+        if icon_toggle(column, "square-half", "Toggle Docked 2D Viewport", view_2d.docked, theme::ACCENT_PRIMARY).clicked() {
+            commands.push(Command::Toggle2DViewport);
         }
-        if check_item(ui, floating, "Floating", "").clicked() && !floating {
-            commands.push(Command::SetViewportFloating(true));
-        }
-        menu_separator(ui);
-        if menu_item(ui, None, None, "Load Camera...", "").clicked() {
-            commands.push(Command::LoadCamera);
-        }
-        if menu_item(ui, None, None, "Save Camera...", "").clicked() {
-            commands.push(Command::SaveCamera);
-        }
-        menu_separator(ui);
-        if menu_item(ui, None, None, "Reset to Loaded...", "").clicked() {
-            commands.push(Command::ResetCameraToLoaded);
-        }
-        if menu_item(ui, None, None, "Reset to Default...", "").clicked() {
-            commands.push(Command::ResetCameraToDefault);
-        }
+        // `btnPickHeight` and `btnMeasure` open the docked 2D view as needed.
+        let picking = view_2d.is_picking();
+        let measuring = view_2d.is_measuring();
+        icon_menu(column, "ruler-measure", "Measure", None, |ui| {
+            if checked_icon_item(ui, picking, Some("color-picker"), Some(theme::ACCENT_MUTED_PURPLE), "Pick Height/Color", "") {
+                commands.push(Command::TogglePickHeight);
+            }
+            if check_item(ui, measuring, "Measurement Tools", "").clicked() {
+                commands.push(Command::ToggleMeasure);
+            }
+        });
+        toolbar_separator(column, 8.0, 8.0);
+        icon_menu(column, "menu-deep", "Viewport Options", None, |ui| {
+            menu_caption(ui, "Viewport");
+            // `TglEmbed_OnClick`, `TglFloat_OnClick`.
+            let floating = editor.user.options.viewport_floating();
+            if check_item(ui, !floating, "Embedded", "").clicked() && floating {
+                commands.push(Command::SetViewportFloating(false));
+            }
+            if check_item(ui, floating, "Floating", "").clicked() && !floating {
+                commands.push(Command::SetViewportFloating(true));
+            }
+            menu_separator(ui);
+            if menu_item(ui, None, None, "Load Camera...", "").clicked() {
+                commands.push(Command::LoadCamera);
+            }
+            if menu_item(ui, None, None, "Save Camera...", "").clicked() {
+                commands.push(Command::SaveCamera);
+            }
+            menu_separator(ui);
+            if menu_item(ui, None, None, "Reset to Loaded...", "").clicked() {
+                commands.push(Command::ResetCameraToLoaded);
+            }
+            if menu_item(ui, None, None, "Reset to Default...", "").clicked() {
+                commands.push(Command::ResetCameraToDefault);
+            }
+        });
+        sun_button
     });
-    toolbar_separator(&mut bottom, 8.0, 8.0);
-    // `btnPickHeight` and `btnMeasure` open the docked 2D view as needed.
-    let picking = view_2d.is_picking();
-    let measuring = view_2d.is_measuring();
-    icon_menu(&mut bottom, "ruler-measure", "Measure", None, |ui| {
-        if checked_icon_item(ui, picking, Some("color-picker"), Some(theme::ACCENT_MUTED_PURPLE), "Pick Height/Color", "") {
-            commands.push(Command::TogglePickHeight);
-        }
-        if check_item(ui, measuring, "Measurement Tools", "").clicked() {
-            commands.push(Command::ToggleMeasure);
-        }
-    });
-    if icon_toggle(&mut bottom, "square-half", "Toggle Docked 2D Viewport", view_2d.docked, theme::ACCENT_PRIMARY).clicked() {
-        commands.push(Command::Toggle2DViewport);
-    }
 
     let area = Rect::from_min_max(rect.min, Pos2::new(toolbar_column.left(), rect.bottom())).shrink(2.0);
     let host = crate::ui::viewport_2d::dock(ui, area, editor, view_2d, commands);
@@ -557,6 +557,7 @@ fn linear_colour(colour: [f32; 3], opacity: f32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Document;
     use crate::viewport_render::ViewportLighting;
 
     #[test]
@@ -573,5 +574,72 @@ mod tests {
     fn lighting_defaults_sit_on_the_panel() {
         let defaults = ViewportLighting::panel_defaults();
         assert_eq!((defaults.sun_azimuth, defaults.sun_elevation), (327.0, 25.0));
+    }
+
+    /// One frame of the viewport area in `rect` on a 1600 by 960 screen,
+    /// with `events`: the commands asked for.
+    fn viewport_frame(context: &egui::Context, rect: Rect, editor: &Editor, view_2d: &mut Viewport2DState, events: Vec<egui::Event>) -> Vec<Command> {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 960.0))), events, ..Default::default() };
+        let mut settings = ViewportSettings::default();
+        let mut sun_open = false;
+        let overlays = ViewOverlays { north_angle: 0.0, navigation_hint: None };
+        let mut commands = Vec::new();
+        let output = context.run_ui(input, |ui| {
+            show(ui, rect, editor, &mut settings, &mut sun_open, view_2d, &overlays, &mut commands);
+        });
+        output.drop_without_applying_deltas();
+        commands
+    }
+
+    /// A click at `at` over three frames: onto it, pressed, released.
+    fn click(context: &egui::Context, rect: Rect, editor: &Editor, view_2d: &mut Viewport2DState, at: Pos2) -> Vec<Command> {
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        viewport_frame(context, rect, editor, view_2d, vec![egui::Event::PointerMoved(at)]);
+        viewport_frame(context, rect, editor, view_2d, vec![button(true)]);
+        viewport_frame(context, rect, editor, view_2d, vec![button(false)])
+    }
+
+    /// A viewport row too short for both toolbar groups (1366 by 768 at
+    /// 120%), with what its toolbar needs: the editor, the 2D view, the
+    /// toolbar's centre line and the top and foot of its buttons.
+    fn short_viewport() -> (egui::Context, Editor, Viewport2DState, Rect, f32, f32, f32) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let rect = Rect::from_min_size(Pos2::new(300.0, 40.0), Vec2::new(700.0, 260.0));
+        let sizes = theme::sizes(&context);
+        let x = rect.right() - toolbar_width(sizes) / 2.0;
+        let top = rect.top() + TOOLBAR_MARGIN + 1.5 + sizes.toolbar_padding[1];
+        let foot = rect.bottom() - TOOLBAR_MARGIN - 1.5 - sizes.toolbar_padding[1];
+        (context, Editor::new(Document::new()), Viewport2DState::default(), rect, x, top, foot)
+    }
+
+    #[test]
+    fn a_short_toolbar_keeps_its_groups_apart() {
+        let (context, editor, mut view_2d, rect, x, top, _) = short_viewport();
+        viewport_frame(&context, rect, &editor, &mut view_2d, Vec::new());
+        // Resolution, a separator (8, 2), Lighting, Render Style, a
+        // separator (2, 2), Helpers and Screenshot: the docked 2D view's
+        // toggle used to lie over it.
+        let button = theme::sizes(&context).toolbar_button;
+        let screenshot = Pos2::new(x, top + 4.5 * button + 11.0 + 5.0);
+        let commands = click(&context, rect, &editor, &mut view_2d, screenshot);
+        assert!(!commands.contains(&Command::Toggle2DViewport), "{commands:?}");
+    }
+
+    #[test]
+    fn a_short_toolbar_scrolls_to_its_bottom_group() {
+        let (context, editor, mut view_2d, rect, x, top, foot) = short_viewport();
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        viewport_frame(&context, rect, &editor, &mut view_2d, vec![egui::Event::PointerMoved(Pos2::new(x, top))]);
+        viewport_frame(&context, rect, &editor, &mut view_2d, vec![wheel]);
+        for _ in 0..60 {
+            viewport_frame(&context, rect, &editor, &mut view_2d, Vec::new());
+        }
+        // Viewport Options at the foot, a separator (8, 8), Measure and
+        // the docked 2D view's toggle.
+        let button = theme::sizes(&context).toolbar_button;
+        let toggle = Pos2::new(x, foot - 2.5 * button - 17.0);
+        let commands = click(&context, rect, &editor, &mut view_2d, toggle);
+        assert!(commands.contains(&Command::Toggle2DViewport), "{commands:?}");
     }
 }
