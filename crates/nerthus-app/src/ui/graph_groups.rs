@@ -10,7 +10,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{drag_origin, drag_pointer, elided_galley, GraphState, SIMPLIFIED_ZOOM};
+use crate::ui::graph_canvas::{drag_origin, drag_pointer, elided_galley, line_height, GraphState, NameEditor, SIMPLIFIED_ZOOM};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::{icon_grid, swatch_grid};
 use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, menu_style, Tooltips};
@@ -225,6 +225,27 @@ fn continue_drag(ui: &Ui, editor: &mut Editor, state: &mut GraphState, origin: P
     }
 }
 
+/// Where `draw` writes a group's name on `screen` at `zoom`, and in what
+/// font: the line it starts on, as wide as it runs before it is cut
+/// short; a collapsed group's below the box (margin 4, 0, 0, -16; 10px;
+/// 60 wide). Zoomed out no name shows: the line is where it would be,
+/// its font no smaller than a simplified node's name.
+fn title_line(ctx: &egui::Context, group: &GroupData, screen: Rect, zoom: f32) -> (Rect, egui::FontId) {
+    let (size, width) = if group.collapsed { (10.0, 60.0) } else { (12.0, 150.0) };
+    let size = if zoom < SIMPLIFIED_ZOOM { (size * zoom).max(6.0) } else { size * zoom };
+    let font = theme::interface(size);
+    let height = line_height(ctx, &font);
+    let top_left = if group.collapsed { Pos2::new(screen.left() + 4.0 * zoom, screen.bottom() + 16.0 * zoom - height) } else { screen.min + Vec2::new(55.0, 6.0) * zoom };
+    (Rect::from_min_size(top_left, Vec2::new(width * zoom, height)), font)
+}
+
+/// The name editor on a group (`RenameGroup`): over its name, in its
+/// font ([`title_line`]).
+pub(crate) fn name_editor(ctx: &egui::Context, group: &GroupData, screen: Rect, zoom: f32) -> NameEditor {
+    let (line, font) = title_line(ctx, group, screen, zoom);
+    NameEditor::new(ctx, line, font, zoom, false)
+}
+
 /// The group's look (`GroupElement` template).
 fn draw(ui: &Ui, painter: &egui::Painter, group: &GroupData, screen: Rect, zoom: f32, selected: bool, group_state: Option<GroupState>) {
     let color = theme::swatch_color(&group.color);
@@ -250,22 +271,16 @@ fn draw(ui: &Ui, painter: &egui::Painter, group: &GroupData, screen: Rect, zoom:
     }
     let icon = if group.icon.is_empty() { "square-rounded" } else { group.icon.as_str() };
     let title_color = if group.locked { color.gamma_multiply(0.5) } else { color };
-    let zoomed_out = zoom < SIMPLIFIED_ZOOM;
-    if group.collapsed {
-        if !zoomed_out {
-            let icon_rect = Rect::from_center_size(screen.center(), Vec2::splat(icons::DEFAULT_SIZE * zoom));
-            icons::paint(ui, icon_rect, icon, color);
-            // The name below the box (margin 4, 0, 0, -16; 10px; 60 wide).
-            let galley = elided_galley(painter, &group.name, theme::interface(10.0 * zoom), title_color, 60.0 * zoom);
-            let position = Pos2::new(screen.left() + 4.0 * zoom, screen.bottom() + 16.0 * zoom - galley.size().y);
-            painter.galley(position, galley, title_color);
-        }
-    } else if !zoomed_out {
-        let icon_rect = Rect::from_min_size(screen.min + Vec2::new(35.0, 7.0) * zoom, Vec2::splat(14.0 * zoom));
+    if zoom >= SIMPLIFIED_ZOOM {
+        let icon_rect = if group.collapsed {
+            Rect::from_center_size(screen.center(), Vec2::splat(icons::DEFAULT_SIZE * zoom))
+        } else {
+            Rect::from_min_size(screen.min + Vec2::new(35.0, 7.0) * zoom, Vec2::splat(14.0 * zoom))
+        };
         icons::paint(ui, icon_rect, icon, color);
-        let galley = elided_galley(painter, &group.name, theme::interface(12.0 * zoom), title_color, 150.0 * zoom);
-        let position = screen.min + Vec2::new(55.0, 6.0) * zoom;
-        painter.galley(position, galley, title_color);
+        let (line, font) = title_line(painter.ctx(), group, screen, zoom);
+        let galley = elided_galley(painter, &group.name, font, title_color, line.width());
+        painter.galley(line.min, galley, title_color);
     }
     // `PART_Lock` (margin 6, bottom left).
     if group.locked {
@@ -318,10 +333,7 @@ pub fn rename_overlay(ui: &mut Ui, editor: &mut Editor, state: &mut GraphState, 
     };
     let view = state.view();
     let screen = view.rect_to_screen(origin, group.bounds());
-    let top_left = if group.collapsed { Pos2::new(screen.left(), screen.bottom() + 2.0) } else { screen.min + Vec2::new(52.0, 4.0) * view.zoom };
-    let rect = Rect::from_min_size(top_left, Vec2::new(160.0, 22.0));
-    let edit = egui::TextEdit::singleline(&mut text).font(theme::interface(12.0)).id(Id::new(("group-rename", id)));
-    let response = ui.put(rect, edit);
+    let response = name_editor(ui.ctx(), group, screen, view.zoom).show(ui, &mut text, Id::new(("group-rename", id)));
     if !response.has_focus() && !response.lost_focus() {
         response.request_focus();
     }

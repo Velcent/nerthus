@@ -310,7 +310,7 @@ pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
         GraphCommand::SetGroupIcon(id, icon) => editor.document.set_group_icon(id, icon),
         GraphCommand::RenameGroup(id) => {
             let name = editor.document.group(id).map(|group| group.name).unwrap_or_default();
-            ui_state.graph.renaming_group = Some((id, name));
+            ui_state.graph.start_renaming_group(id, name);
         }
         GraphCommand::RenameNode { node, name } => {
             if editor.document.rename(node, &name) {
