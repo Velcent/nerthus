@@ -3,12 +3,14 @@
 //! buttons, autosave), the undo history, the version and the window
 //! buttons. Empty space drags the window.
 //!
-//! The version box, `bUpdate` and the window buttons get their width at
-//! the right first; the rest has what is left. As that runs out, the
-//! version box goes, then `bUpdate`, then the file name is elided, then
-//! the menus fold into one from Help back to File, then the brand goes.
-//! Undo and the window buttons always stay. F10 opens the main menu
-//! (`menu_keys`).
+//! `MenuBar` is a `DockPanel`: the brand, the menus, the file box and undo
+//! dock left, each as wide as it asks out of what those before it left;
+//! then the window buttons and the version boxes dock right out of what
+//! is left after that. A part given less room than it asks is laid out
+//! whole from its slot's left and cut off at the slot's right, so as a
+//! window narrows the version boxes go first, then the window buttons
+//! (close first), then undo and the file box. F10 puts the main menu in
+//! menu mode and Alt with an item's access key opens it (`menu_keys`).
 
 use egui::containers::menu::MenuButton;
 use egui::{Align, Color32, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
@@ -17,11 +19,10 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::elided_galley;
 use crate::ui::{menu_keys, menus};
 use crate::ui::tool_commands::ToolCommand;
 use crate::files::{FileCommand, AUTOSAVE_CHOICES};
-use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_rows, menu_separator, menu_style, submenu, toolbar_button, Tooltips};
+use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_rows, menu_separator, menu_style, toolbar_button};
 use crate::ui::UiState;
 
 pub const HEIGHT: f32 = 36.0;
@@ -32,34 +33,25 @@ const BAR_TOP: f32 = 6.0;
 const TOP_LEVEL_MIN_WIDTH: f32 = 64.0;
 const TOP_LEVEL_OVERLAP: f32 = 5.0;
 const TOP_LEVEL_HEIGHT: f32 = 22.0;
-/// The menu holding the menus the bar has no room for: its icon 8 in
-/// from each side.
-const OVERFLOW_WIDTH: f32 = icons::DEFAULT_SIZE + 2.0 * 8.0;
-/// Before the menus once the brand is gone, so they start 16 in as its
-/// name did.
-const LEAD_WITHOUT_BRAND: f32 = 8.0;
-/// `Menu` margin 0, 0, 12, 0 and the file box's own margin 6.
-const MENU_GAP: f32 = 12.0 + 6.0;
-/// The file box's margin 6 and undo's 5.
-const UNDO_GAP: f32 = 6.0 + 5.0;
-/// The file box's `MinWidth`.
+/// The main `Menu`'s margin 0, 0, 12, 0.
+const MENU_MARGIN_RIGHT: f32 = 12.0;
+/// The file box: `MinWidth 180`, margin 6, 0, 6, 0, padding 1.
 const FILE_BOX_MIN_WIDTH: f32 = 180.0;
-/// The file name's room while anything else can still give way, and the
-/// least it is elided to once nothing can.
+const FILE_BOX_MARGIN: f32 = 6.0;
+/// `txbFileName`: `MinWidth 140`, margin 8, 4.
 const NAME_MIN_WIDTH: f32 = 140.0;
-const NAME_LEAST_WIDTH: f32 = 48.0;
-/// The file name's margin 8, 4.
 const NAME_MARGIN: Vec2 = Vec2::new(8.0, 4.0);
 /// `Button-IconOnly`: 14 with padding 6.
 const SAVE_BUTTON: f32 = 14.0 + 2.0 * 6.0;
-/// Before the version boxes (and between them and the window buttons),
-/// and between the two boxes.
-const RIGHT_GAP: f32 = 24.0;
+/// The undo `Menu`'s margin 5, 0, 0, 0.
+const UNDO_MARGIN: f32 = 5.0;
+/// The version boxes' `StackPanel` margin 24, 0, and `bUpdate`'s margin
+/// 0, 0, 8, 0 before `bAbout`.
+const VERSION_MARGIN: f32 = 24.0;
 const BOX_GAP: f32 = 8.0;
-/// `Button-System`, and the window buttons with their margins 2 and the
-/// 4 between them.
+/// `Button-System`, and the window buttons with their margins 2.
 const SYSTEM_BUTTON: f32 = 29.0;
-const WINDOW_BUTTONS_WIDTH: f32 = 2.0 + 3.0 * SYSTEM_BUTTON + 2.0 * 4.0 + 2.0;
+const WINDOW_BUTTONS_WIDTH: f32 = 3.0 * (2.0 + SYSTEM_BUTTON + 2.0);
 const VERSION: &str = concat!("Nerthus ", env!("CARGO_PKG_VERSION"));
 
 pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, ui_state: &UiState, commands: &mut Vec<Command>) {
@@ -76,55 +68,36 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, ui_state: &UiState, comman
 
     let update = update_box(ui_state);
     let widths = measure(ui, editor, update.as_ref());
-    let plan = plan(&widths, rect.width());
     let content = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + BAR_TOP), rect.max);
-    let right_left = rect.right() - widths.right(&plan);
+    let slots = dock(&widths, content.left(), content.right());
 
-    // The brand, the menus and the file box, kept short of undo's place
-    // even when the least the bar shows is too wide for it.
-    let limit = (right_left - widths.undo - UNDO_GAP).max(rect.left());
-    let left_rect = Rect::from_min_max(content.min, Pos2::new(limit, content.bottom()));
-    let mut left = ui.new_child(UiBuilder::new().id_salt("title-left").max_rect(left_rect).layout(Layout::left_to_right(Align::Center)));
-    left.set_clip_rect(ui.clip_rect().intersect(Rect::from_min_max(rect.min, Pos2::new(limit, rect.bottom()))));
-    left.spacing_mut().item_spacing.x = 0.0;
-    if plan.brand {
-        brand(&mut left);
-    } else {
-        left.add_space(LEAD_WITHOUT_BRAND);
+    if let Some(mut part) = part_ui(ui, "title-brand", &slots, Part::Brand, &widths, content, 0.0, 0.0) {
+        brand(&mut part);
     }
-    menu_bar(&mut left, widths.menu_bar(plan.menus), plan.menus, editor, ui_state, commands);
-    left.add_space(MENU_GAP);
-    file_box(&mut left, editor, plan.name_width, commands);
-
-    let undo_left = left.min_rect().right().min(limit) + UNDO_GAP;
-    let undo_rect = Rect::from_min_max(Pos2::new(undo_left, content.top()), Pos2::new(right_left.max(undo_left), content.bottom()));
-    let mut undo = ui.new_child(UiBuilder::new().id_salt("title-undo").max_rect(undo_rect).layout(Layout::left_to_right(Align::Center)));
-    undo_menu(&mut undo, editor, commands);
-
-    let right_rect = Rect::from_min_max(Pos2::new(right_left, content.top()), content.max);
-    let mut right = ui.new_child(UiBuilder::new().id_salt("title-right").max_rect(right_rect).layout(Layout::right_to_left(Align::Center)));
-    right.spacing_mut().item_spacing.x = 0.0;
-    // The gap before the next box.
-    let mut gap = 0.0;
+    if let Some(mut part) = part_ui(ui, "title-menus", &slots, Part::Menus, &widths, content, 0.0, MENU_MARGIN_RIGHT) {
+        menu_bar(&mut part, editor, ui_state, commands);
+    }
+    if let Some(mut part) = part_ui(ui, "title-file-box", &slots, Part::FileBox, &widths, content, FILE_BOX_MARGIN, FILE_BOX_MARGIN) {
+        file_box(&mut part, editor, commands);
+    }
+    if let Some(mut part) = part_ui(ui, "title-undo", &slots, Part::Undo, &widths, content, UNDO_MARGIN, 0.0) {
+        undo_menu(&mut part, editor, commands);
+    }
     // The browser's tab is the web build's window.
-    if !cfg!(target_arch = "wasm32") {
-        window_buttons(&mut right, commands);
-        gap = RIGHT_GAP;
+    if let Some(mut part) = part_ui(ui, "title-window-buttons", &slots, Part::WindowButtons, &widths, content, 0.0, 0.0) {
+        window_buttons(&mut part, commands);
     }
-    // `bAbout` (About Nerthus).
-    if plan.version {
-        right.add_space(gap);
-        if version_button(&mut right, VERSION, theme::LABEL_DEFAULT, true).clicked() {
-            commands.push(Command::Tools(ToolCommand::ShowAbout));
+    if let Some(mut part) = part_ui(ui, "title-versions", &slots, Part::Versions, &widths, content, VERSION_MARGIN, VERSION_MARGIN) {
+        // `bUpdate` once a newer version is known, then `bAbout` (About
+        // Nerthus).
+        if let Some(update) = &update {
+            if version_button(&mut part, &update.text, update.color, update.enabled).clicked() {
+                commands.push(Command::Tools(ToolCommand::CheckForUpdates));
+            }
+            part.add_space(BOX_GAP);
         }
-        gap = BOX_GAP;
-    }
-    if plan.update
-        && let Some(update) = &update
-    {
-        right.add_space(gap);
-        if version_button(&mut right, &update.text, update.color, update.enabled).clicked() {
-            commands.push(Command::Tools(ToolCommand::CheckForUpdates));
+        if version_button(&mut part, VERSION, theme::LABEL_DEFAULT, true).clicked() {
+            commands.push(Command::Tools(ToolCommand::ShowAbout));
         }
     }
 }
@@ -145,51 +118,61 @@ fn update_box(ui_state: &UiState) -> Option<UpdateBox> {
     available.then(|| UpdateBox { text: "Update".to_string(), color: theme::ACCENT_PRIMARY, enabled: true })
 }
 
-/// How wide each part of the bar is, but for the file name's room.
+/// The bar's parts in `MenuBar`'s order: those docked left, then those
+/// docked right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Part {
+    Brand,
+    Menus,
+    FileBox,
+    Undo,
+    WindowButtons,
+    Versions,
+}
+
+const LEFT_PARTS: [Part; 4] = [Part::Brand, Part::Menus, Part::FileBox, Part::Undo];
+const RIGHT_PARTS: [Part; 2] = [Part::WindowButtons, Part::Versions];
+
+/// How wide each part asks to be, its margins included; None for a part
+/// the bar doesn't have.
 #[derive(Clone, Debug)]
 struct Widths {
     brand: f32,
-    menus: [f32; MENU_NAMES.len()],
-    /// The file box less the file name's room.
-    file_box_rest: f32,
-    /// The file name, not elided.
-    name: f32,
+    menus: f32,
+    file_box: f32,
     undo: f32,
-    version: f32,
-    update: Option<f32>,
     /// None in the web build.
     window_buttons: Option<f32>,
+    versions: f32,
 }
 
-/// What the bar shows.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Plan {
-    brand: bool,
-    /// How many menus, from File on, stay in the bar; the overflow menu
-    /// holds the rest.
-    menus: usize,
-    version: bool,
-    update: bool,
-    /// The file name's room: the name is elided when wider.
-    name_width: f32,
+impl Widths {
+    fn of(&self, part: Part) -> Option<f32> {
+        match part {
+            Part::Brand => Some(self.brand),
+            Part::Menus => Some(self.menus),
+            Part::FileBox => Some(self.file_box),
+            Part::Undo => Some(self.undo),
+            Part::WindowButtons => self.window_buttons,
+            Part::Versions => Some(self.versions),
+        }
+    }
 }
 
 fn measure(ui: &Ui, editor: &Editor, update: Option<&UpdateBox>) -> Widths {
-    let icon_menu = icon_menu_width(ui);
-    let regions = if crate::ui::regions::menus_visible(editor) { icon_menu } else { 0.0 };
-    // The resolution and region menus, the name's margins, save, save
-    // incremental and the autosave menu, in the box's padding 1.
-    let file_box_rest = 1.0 + icon_menu + regions + 2.0 * NAME_MARGIN.x + SAVE_BUTTON + 2.0 + SAVE_BUTTON + 2.0 + icon_menu + 1.0;
-    let name = ui.painter().layout_no_wrap(editor.document.file_name(), theme::monospace_bold(11.0), Color32::WHITE);
+    let menus: f32 = MENU_NAMES.iter().map(|name| menu_slot(ui, name).x).sum();
+    let version = version_size(ui, VERSION).x;
+    let boxes = match update {
+        Some(update) => version_size(ui, &update.text).x + BOX_GAP + version,
+        None => version,
+    };
     Widths {
         brand: brand_size(ui).x,
-        menus: MENU_NAMES.map(|name| menu_slot(ui, name).x),
-        file_box_rest,
-        name: name.size().x,
-        undo: icon_menu,
-        version: version_size(ui, VERSION).x,
-        update: update.map(|update| version_size(ui, &update.text).x),
+        menus: menus + MENU_MARGIN_RIGHT,
+        file_box: file_box_width(ui, editor) + 2.0 * FILE_BOX_MARGIN,
+        undo: UNDO_MARGIN + icon_menu_width(ui),
         window_buttons: (!cfg!(target_arch = "wasm32")).then_some(WINDOW_BUTTONS_WIDTH),
+        versions: VERSION_MARGIN + boxes + VERSION_MARGIN,
     }
 }
 
@@ -199,69 +182,46 @@ fn icon_menu_width(ui: &Ui) -> f32 {
     toolbar_button(ui).max(icons::DEFAULT_SIZE + 2.0 * ui.spacing().button_padding.x)
 }
 
-impl Widths {
-    /// The menus that stay, and the overflow menu when any don't.
-    fn menu_bar(&self, shown: usize) -> f32 {
-        let overflow = if shown < MENU_NAMES.len() { OVERFLOW_WIDTH } else { 0.0 };
-        self.menus[..shown].iter().sum::<f32>() + overflow
+/// Each part's slot (left and right edges) in a bar from `left` to
+/// `right`, as `DockPanel` measures and arranges them: each part docked
+/// left gets as much as it asks of what those before it left, then each
+/// docked right likewise from the right.
+fn dock(widths: &Widths, left: f32, right: f32) -> Vec<(Part, f32, f32)> {
+    let mut slots = Vec::new();
+    let mut taken_left = left;
+    for part in LEFT_PARTS {
+        let Some(asked) = widths.of(part) else { continue };
+        let width = asked.min((right - taken_left).max(0.0));
+        slots.push((part, taken_left, taken_left + width));
+        taken_left += width;
     }
-
-    fn file_box(&self, name_width: f32) -> f32 {
-        (self.file_box_rest + name_width).max(FILE_BOX_MIN_WIDTH)
+    let mut taken_right = right;
+    for part in RIGHT_PARTS {
+        let Some(asked) = widths.of(part) else { continue };
+        let width = asked.min((taken_right - taken_left).max(0.0));
+        slots.push((part, taken_right - width, taken_right));
+        taken_right -= width;
     }
-
-    /// Everything but the file box: the brand, the menus, undo, the
-    /// version boxes and window buttons, and the gaps.
-    fn others(&self, plan: &Plan) -> f32 {
-        let lead = if plan.brand { self.brand } else { LEAD_WITHOUT_BRAND };
-        lead + self.menu_bar(plan.menus) + MENU_GAP + UNDO_GAP + self.undo + self.right(plan)
-    }
-
-    /// The version boxes and window buttons with the gap before them.
-    fn right(&self, plan: &Plan) -> f32 {
-        let version = plan.version.then_some(self.version);
-        let update = self.update.filter(|_| plan.update);
-        let boxes = match (version, update) {
-            (Some(version), Some(update)) => version + BOX_GAP + update,
-            (version, update) => version.or(update).unwrap_or(0.0),
-        };
-        let window_buttons = match self.window_buttons {
-            Some(buttons) if boxes > 0.0 => buttons + RIGHT_GAP,
-            Some(buttons) => buttons,
-            None => 0.0,
-        };
-        RIGHT_GAP + boxes + window_buttons
-    }
+    slots
 }
 
-/// The most the bar can show in `width`: each step gives up one more
-/// thing until the rest fits, the file name taking what room is left up
-/// to its full width. Past the last step the bar is clipped short of undo.
-fn plan(widths: &Widths, width: f32) -> Plan {
-    let full_name = widths.name.max(NAME_MIN_WIDTH);
-    // Each step, with the least room its file name may have.
-    let mut step = Plan { brand: true, menus: MENU_NAMES.len(), version: true, update: widths.update.is_some(), name_width: full_name };
-    let mut steps = vec![(step, full_name)];
-    step.version = false;
-    steps.push((step, full_name));
-    step.update = false;
-    steps.push((step, full_name));
-    steps.push((step, NAME_MIN_WIDTH));
-    for menus in (0..MENU_NAMES.len()).rev() {
-        step.menus = menus;
-        steps.push((step, NAME_MIN_WIDTH));
+/// A `Ui` for `part`: laid out whole from its slot's left past
+/// `margin_left`, cut off at its slot less its margins. None when the bar
+/// has no room (or no such part) for any of it.
+#[allow(clippy::too_many_arguments)]
+fn part_ui(ui: &mut Ui, salt: &str, slots: &[(Part, f32, f32)], part: Part, widths: &Widths, content: Rect, margin_left: f32, margin_right: f32) -> Option<Ui> {
+    let &(_, left, right) = slots.iter().find(|(slotted, _, _)| *slotted == part)?;
+    let asked = widths.of(part)?;
+    let visible = Rect::from_x_y_ranges(left + margin_left..=right - margin_right, content.y_range());
+    if visible.width() <= 0.0 {
+        return None;
     }
-    step.brand = false;
-    steps.push((step, NAME_MIN_WIDTH));
-    steps.push((step, NAME_LEAST_WIDTH));
-    for (candidate, least) in steps {
-        let others = widths.others(&candidate);
-        let name_width = (width - others - widths.file_box_rest).min(full_name);
-        if name_width >= least && others + widths.file_box(name_width) <= width {
-            return Plan { name_width, ..candidate };
-        }
-    }
-    Plan { name_width: NAME_LEAST_WIDTH, ..step }
+    let whole = Rect::from_x_y_ranges(left + margin_left..=left + asked - margin_right, content.y_range());
+    let builder = UiBuilder::new().id_salt(salt).max_rect(whole).layout(Layout::left_to_right(Align::Center));
+    let mut part_ui = ui.new_child(builder);
+    part_ui.set_clip_rect(ui.clip_rect().intersect(visible));
+    part_ui.spacing_mut().item_spacing.x = 0.0;
+    Some(part_ui)
 }
 
 /// The name button (`Button-Link`, padding 16, 6): the name in the header font.
@@ -282,6 +242,8 @@ fn brand_size(ui: &Ui) -> Vec2 {
 }
 
 const MENU_NAMES: [&str; 8] = ["File", "Edit", "Graph", "Node", "Preview", "Project", "Tools", "Help"];
+/// Their access keys ("_File", ..., "P_review", ...).
+const MENU_ACCESS_KEYS: [egui::Key; 8] = [egui::Key::F, egui::Key::E, egui::Key::G, egui::Key::N, egui::Key::R, egui::Key::P, egui::Key::T, egui::Key::H];
 
 /// A top-level item's slot: at least 64 wide less its overlaps, its text
 /// 8 + 5 in from each side.
@@ -292,15 +254,15 @@ fn menu_slot(ui: &Ui, name: &str) -> Vec2 {
 }
 
 /// The main menu: each top-level item takes its slot, its text centred,
-/// `Menu-TopLevel` under the pointer; past the first `shown`, the menus
-/// are submenus of the overflow menu. `MenuBar` fills what it is given,
-/// so it gets just its items' `width`.
-fn menu_bar(ui: &mut Ui, width: f32, shown: usize, editor: &Editor, ui_state: &UiState, commands: &mut Vec<Command>) {
+/// `Menu-TopLevel` under the pointer. `MenuBar` fills what it is given, so
+/// it gets just its items' width.
+fn menu_bar(ui: &mut Ui, editor: &Editor, ui_state: &UiState, commands: &mut Vec<Command>) {
+    let width: f32 = MENU_NAMES.iter().map(|name| menu_slot(ui, name).x).sum();
     let size = Vec2::new(width, TOP_LEVEL_HEIGHT);
-    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| menu_items(ui, shown, editor, ui_state, commands));
+    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| menu_items(ui, editor, ui_state, commands));
 }
 
-fn menu_items(ui: &mut Ui, shown: usize, editor: &Editor, ui_state: &UiState, commands: &mut Vec<Command>) {
+fn menu_items(ui: &mut Ui, editor: &Editor, ui_state: &UiState, commands: &mut Vec<Command>) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.spacing_mut().button_padding = Vec2::ZERO;
@@ -309,34 +271,26 @@ fn menu_items(ui: &mut Ui, shown: usize, editor: &Editor, ui_state: &UiState, co
         ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::NONE;
         ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(4);
         ui.visuals_mut().widgets.open.corner_radius = egui::CornerRadius::same(4);
-        // Each menu's popup, for the keys to go between them.
+        // Each menu's popup and access key, for the keys to go between
+        // them; in menu mode the item the keys are on looks as under the
+        // pointer.
+        let highlighted = menu_keys::bar_focus(ui.ctx());
         let mut popups = Vec::new();
-        for name in &MENU_NAMES[..shown] {
-            let text = RichText::new(*name).font(theme::interface(11.0)).color(theme::MENU_FOREGROUND);
+        for (index, (name, access_key)) in MENU_NAMES.into_iter().zip(MENU_ACCESS_KEYS).enumerate() {
+            let text = RichText::new(name).font(theme::interface(11.0)).color(theme::MENU_FOREGROUND);
             let slot = menu_slot(ui, name);
+            let lit = highlighted == Some(index);
             let mut button = egui::Button::new(text);
             button = button.min_size(slot);
-            button = button.frame_when_inactive(false);
+            button = button.frame_when_inactive(lit);
+            let inactive = ui.visuals().widgets.inactive;
+            if lit {
+                ui.visuals_mut().widgets.inactive = ui.visuals().widgets.hovered;
+            }
             let menu = MenuButton::from_button(button);
             let (response, _) = menu.ui(ui, |ui| menu_rows(ui, |ui| menu_contents(ui, name, editor, ui_state, commands)));
-            popups.push(egui::Popup::default_response_id(&response));
-        }
-        if shown < MENU_NAMES.len() {
-            let mut button = match icons::image("menu", icons::DEFAULT_SIZE, theme::MENU_FOREGROUND) {
-                Some(image) => egui::Button::image(image),
-                None => egui::Button::new(RichText::new("Menu").font(theme::interface(11.0)).color(theme::MENU_FOREGROUND)),
-            };
-            button = button.min_size(Vec2::new(OVERFLOW_WIDTH, TOP_LEVEL_HEIGHT));
-            button = button.frame_when_inactive(false);
-            let (response, _) = MenuButton::from_button(button).ui(ui, |ui| {
-                menu_rows(ui, |ui| {
-                    for name in &MENU_NAMES[shown..] {
-                        submenu(ui, None, None, name, |ui| menu_contents(ui, name, editor, ui_state, commands));
-                    }
-                });
-            });
-            popups.push(egui::Popup::default_response_id(&response));
-            response.tooltip("Menu");
+            ui.visuals_mut().widgets.inactive = inactive;
+            popups.push((egui::Popup::default_response_id(&response), access_key));
         }
         menu_keys::bar(ui.ctx(), &popups);
     });
@@ -355,11 +309,29 @@ fn menu_contents(ui: &mut Ui, name: &str, editor: &Editor, ui_state: &UiState, c
     }
 }
 
+/// The file name (monospace 11 bold) and the room it takes, at least 140.
+fn file_name_galley(ui: &Ui, editor: &Editor, color: Color32) -> (std::sync::Arc<egui::Galley>, f32) {
+    let galley = ui.painter().layout_no_wrap(editor.document.file_name(), theme::monospace_bold(11.0), color);
+    let width = galley.size().x.max(NAME_MIN_WIDTH);
+    (galley, width)
+}
+
+/// The file box's width, its padding included: the resolution and region
+/// menus, the name with its margins, save, save incremental and the
+/// autosave menu, at least 180.
+fn file_box_width(ui: &Ui, editor: &Editor) -> f32 {
+    let icon_menu = icon_menu_width(ui);
+    let regions = if crate::ui::regions::menus_visible(editor) { icon_menu } else { 0.0 };
+    let (_, name_width) = file_name_galley(ui, editor, theme::LABEL_DEFAULT);
+    let content = icon_menu + regions + name_width + 2.0 * NAME_MARGIN.x + SAVE_BUTTON + 2.0 + SAVE_BUTTON + 2.0 + icon_menu;
+    (1.0 + content + 1.0).max(FILE_BOX_MIN_WIDTH)
+}
+
 /// The file box (`MinWidth 180`, padding 1, `Panel-Background`, corners
 /// 3): the resolution and region menus, the file name (monospace 11 bold,
-/// margin 8, 4) in `name_width`, elided with the whole name under the
-/// pointer when longer, save, save incremental and the autosave menu.
-fn file_box(ui: &mut Ui, editor: &Editor, name_width: f32, commands: &mut Vec<Command>) {
+/// margin 8, 4, at least 140), save, save incremental and the autosave
+/// menu.
+fn file_box(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     let mut frame = egui::Frame::new();
     frame.fill = theme::PANEL_BACKGROUND;
     frame.corner_radius = egui::CornerRadius::same(3);
@@ -376,22 +348,13 @@ fn file_box(ui: &mut Ui, editor: &Editor, name_width: f32, commands: &mut Vec<Co
                     crate::ui::regions::regions_menu(ui, editor, commands, true);
                 });
             }
-            let name = editor.document.file_name();
             // `TryAutosave` turns the name red once the autosave interval
             // passed with unsaved changes; a save turns it back.
             let name_color = if editor.files.autosave.reminder { theme::ACCENT_MUTED_RED } else { theme::LABEL_DEFAULT };
-            let font = theme::monospace_bold(11.0);
-            let mut galley = ui.painter().layout_no_wrap(name.clone(), font.clone(), name_color);
-            let elided = galley.size().x > name_width;
-            if elided {
-                galley = elided_galley(ui.painter(), &name, font, name_color, name_width);
-            }
+            let (galley, name_width) = file_name_galley(ui, editor, name_color);
             let size = Vec2::new(name_width, galley.size().y) + 2.0 * NAME_MARGIN;
-            let (name_rect, response) = ui.allocate_exact_size(size, Sense::hover());
+            let (name_rect, _) = ui.allocate_exact_size(size, Sense::hover());
             ui.painter().galley(Pos2::new(name_rect.left() + NAME_MARGIN.x, name_rect.center().y - galley.size().y / 2.0), galley, name_color);
-            if elided {
-                response.tooltip(name);
-            }
             // `Button-IconOnly` (14 + padding 6), margin 0, 0, 2, 0.
             let button_size = Vec2::splat(SAVE_BUTTON);
             if icon_button_sized(ui, "floppy", "Save", None, button_size, 14.0).clicked() {
@@ -498,20 +461,21 @@ fn version_size(ui: &Ui, text: &str) -> Vec2 {
     Vec2::new((text_size.x + 48.0).max(87.0), text_size.y + 12.0)
 }
 
-/// Minimize, maximize and close (`Button-System`: Marlett's `0`, `1` and
-/// `r` with padding 10 and margins 2, at 40% until hovered; close red).
+/// Minimize, maximize and close, left to right (`Button-System`:
+/// Marlett's `0`, `1` and `r` with padding 10 and margins 2, at 40% until
+/// hovered; close red).
 fn window_buttons(ui: &mut Ui, commands: &mut Vec<Command>) {
     ui.add_space(2.0);
-    if system_button(ui, SystemGlyph::Close).clicked() {
-        commands.push(Command::Exit);
+    if system_button(ui, SystemGlyph::Minimize).clicked() {
+        commands.push(Command::WindowMinimize);
     }
     ui.add_space(4.0);
     if system_button(ui, SystemGlyph::Maximize).clicked() {
         commands.push(Command::WindowMaximize);
     }
     ui.add_space(4.0);
-    if system_button(ui, SystemGlyph::Minimize).clicked() {
-        commands.push(Command::WindowMinimize);
+    if system_button(ui, SystemGlyph::Close).clicked() {
+        commands.push(Command::Exit);
     }
     ui.add_space(2.0);
 }
@@ -606,76 +570,76 @@ mod tests {
         UpdateBox { text: "Downloading 42.0%...".to_string(), color: theme::LABEL_DEFAULT, enabled: false }
     }
 
-    /// The bar's width for `plan`.
-    fn total(widths: &Widths, plan: &Plan) -> f32 {
-        widths.others(plan) + widths.file_box(plan.name_width)
+    fn slot(slots: &[(Part, f32, f32)], part: Part) -> (f32, f32) {
+        let &(_, left, right) = slots.iter().find(|(slotted, _, _)| *slotted == part).expect("the part has a slot");
+        (left, right)
     }
 
     #[test]
-    fn the_bar_fits_from_the_least_it_can_show() {
+    fn the_parts_dock_left_then_right_as_a_dock_panel_does() {
         let update = update();
         for name in NAMES {
             for update in [None, Some(&update)] {
                 let widths = measured(&editor_named(name), update);
-                let least = Plan { brand: false, menus: 0, version: false, update: false, name_width: NAME_LEAST_WIDTH };
-                let mut last: Option<Plan> = None;
-                for tenth in 2000..=40000 {
+                let asked: f32 = LEFT_PARTS.iter().chain(&RIGHT_PARTS).filter_map(|part| widths.of(*part)).sum();
+                for tenth in 1000..=40000 {
                     let width = tenth as f32 / 10.0;
-                    let plan = plan(&widths, width);
-                    if width >= total(&widths, &least) {
-                        assert!(total(&widths, &plan) <= width + 0.001, "{name}: {plan:?} is wider than {width}");
-                        assert!(plan.name_width >= NAME_LEAST_WIDTH, "{name}: {plan:?} at {width}");
-                    } else {
-                        assert_eq!(plan, least, "{name}: at {width}");
+                    let slots = dock(&widths, 0.0, width);
+                    // Docked left: one after another from the left edge,
+                    // each as wide as it asks or what is left.
+                    let mut left = 0.0;
+                    for part in LEFT_PARTS {
+                        let (start, end) = slot(&slots, part);
+                        assert_eq!(start, left, "{name}: {part:?} at {width}");
+                        let room = (width - left).max(0.0);
+                        assert_eq!(end - start, widths.of(part).unwrap().min(room), "{name}: {part:?} at {width}");
+                        left = end;
                     }
-                    assert!(plan.name_width <= widths.name.max(NAME_MIN_WIDTH));
-                    // Wider, nothing goes, and the name only shrinks back
-                    // to make room for what comes back.
-                    if let Some(last) = last {
-                        assert!(plan.brand >= last.brand && plan.menus >= last.menus, "{name}: {last:?} then {plan:?} at {width}");
-                        assert!(plan.version >= last.version && plan.update >= last.update, "{name}: {last:?} then {plan:?} at {width}");
-                        if (Plan { name_width: 0.0, ..plan }) == (Plan { name_width: 0.0, ..last }) {
-                            assert!(plan.name_width >= last.name_width, "{name}: {last:?} then {plan:?} at {width}");
-                        } else {
-                            assert!(plan.name_width >= NAME_MIN_WIDTH, "{name}: {last:?} then {plan:?} at {width}");
+                    // Docked right: one before another from the right edge,
+                    // out of what the left left them.
+                    let mut right = width;
+                    for part in RIGHT_PARTS {
+                        let (start, end) = slot(&slots, part);
+                        assert_eq!(end, right, "{name}: {part:?} at {width}");
+                        let room = (right - left).max(0.0);
+                        assert_eq!(end - start, widths.of(part).unwrap().min(room), "{name}: {part:?} at {width}");
+                        right = start;
+                    }
+                    assert!(right >= left - 0.001, "{name}: the parts overlap at {width}");
+                    if width >= asked {
+                        for (part, start, end) in &slots {
+                            assert_eq!(end - start, widths.of(*part).unwrap(), "{name}: {part:?} is cut at {width}");
                         }
                     }
-                    last = Some(plan);
                 }
-                let wide = plan(&widths, 4000.0);
-                assert_eq!(wide, Plan { brand: true, menus: MENU_NAMES.len(), version: true, update: update.is_some(), name_width: widths.name.max(NAME_MIN_WIDTH) });
             }
         }
     }
 
     #[test]
-    fn the_version_goes_first_then_the_name_then_the_menus_then_the_brand() {
-        let update = update();
-        for name in NAMES {
-            for update in [None, Some(&update)] {
-                let widths = measured(&editor_named(name), update);
-                let full_name = widths.name.max(NAME_MIN_WIDTH);
-                for width in 200..=4000 {
-                    let plan = plan(&widths, width as f32);
-                    if plan.version || plan.update {
-                        assert_eq!(plan.name_width, full_name, "{name}: {plan:?} at {width}");
-                        assert_eq!(plan.menus, MENU_NAMES.len(), "{name}: {plan:?} at {width}");
-                    }
-                    if plan.version {
-                        assert_eq!(plan.update, update.is_some(), "{name}: {plan:?} at {width}");
-                    }
-                    if plan.brand {
-                        assert!(plan.name_width >= NAME_MIN_WIDTH, "{name}: {plan:?} at {width}");
-                    }
-                    if !plan.brand {
-                        assert_eq!(plan.menus, 0, "{name}: {plan:?} at {width}");
-                    }
-                    if plan.name_width < NAME_MIN_WIDTH {
-                        assert!(!plan.brand, "{name}: {plan:?} at {width}");
-                    }
-                }
-            }
-        }
+    fn the_version_boxes_give_way_first_then_the_window_buttons() {
+        let widths = measured(&editor_named(NAMES[0]), None);
+        let left: f32 = LEFT_PARTS.iter().filter_map(|part| widths.of(*part)).sum();
+        let buttons = widths.window_buttons.unwrap();
+        // Room for all but half the version boxes: they are cut, the rest
+        // whole.
+        let slots = dock(&widths, 0.0, left + buttons + widths.versions / 2.0);
+        let (start, end) = slot(&slots, Part::Versions);
+        assert!((end - start - widths.versions / 2.0).abs() < 0.001);
+        let (start, end) = slot(&slots, Part::WindowButtons);
+        assert_eq!(end - start, buttons);
+        // Room for half the window buttons: the version boxes have none.
+        let slots = dock(&widths, 0.0, left + buttons / 2.0);
+        let (start, end) = slot(&slots, Part::Versions);
+        assert_eq!(end - start, 0.0);
+        let (start, end) = slot(&slots, Part::WindowButtons);
+        assert!((end - start - buttons / 2.0).abs() < 0.001);
+        // Narrower than the left parts: undo and then the file box are cut.
+        let slots = dock(&widths, 0.0, left - widths.undo - 50.0);
+        let (start, end) = slot(&slots, Part::Undo);
+        assert_eq!(end - start, 0.0);
+        let (start, end) = slot(&slots, Part::FileBox);
+        assert!((end - start - (widths.file_box - 50.0)).abs() < 0.001);
     }
 
     #[test]
@@ -694,19 +658,13 @@ mod tests {
                 row.cursor().min.x - start
             };
             assert_eq!(drawn(&mut |ui| brand(ui)), widths.brand);
-            for shown in 0..=MENU_NAMES.len() {
-                let width = widths.menu_bar(shown);
-                assert_eq!(drawn(&mut |ui| menu_bar(ui, width, shown, &editor, &ui_state, &mut commands)), width, "{shown} menus");
-            }
-            for name_width in [NAME_LEAST_WIDTH, NAME_MIN_WIDTH, widths.name, 400.0] {
-                let box_width = drawn(&mut |ui| file_box(ui, &editor, name_width, &mut commands));
-                assert_eq!(box_width, widths.file_box(name_width), "the name in {name_width}");
-            }
-            assert_eq!(drawn(&mut |ui| undo_menu(ui, &editor, &mut commands)), widths.undo);
+            assert_eq!(drawn(&mut |ui| menu_bar(ui, &editor, &ui_state, &mut commands)), widths.menus - MENU_MARGIN_RIGHT);
+            assert_eq!(drawn(&mut |ui| file_box(ui, &editor, &mut commands)), widths.file_box - 2.0 * FILE_BOX_MARGIN);
+            assert_eq!(drawn(&mut |ui| undo_menu(ui, &editor, &mut commands)), widths.undo - UNDO_MARGIN);
             let version = drawn(&mut |ui| {
                 version_button(ui, VERSION, theme::LABEL_DEFAULT, true);
             });
-            assert_eq!(version, widths.version);
+            assert_eq!(version, widths.versions - 2.0 * VERSION_MARGIN);
             assert_eq!(drawn(&mut |ui| window_buttons(ui, &mut commands)), WINDOW_BUTTONS_WIDTH);
         });
         output.drop_without_applying_deltas();
@@ -755,117 +713,59 @@ mod tests {
         })
     }
 
-    /// The middle of the `index`th menu's title in the bar `plan` lays
-    /// out or, once it is folded, of the menu of menus' button.
-    fn title_at(widths: &Widths, plan: &Plan, index: usize) -> Pos2 {
-        let lead = if plan.brand { widths.brand } else { LEAD_WITHOUT_BRAND };
-        let x = if index < plan.menus {
-            lead + widths.menus[..index].iter().sum::<f32>() + widths.menus[index] / 2.0
-        } else {
-            lead + widths.menu_bar(plan.menus) - OVERFLOW_WIDTH / 2.0
-        };
+    /// The middle of the `index`th menu's title in the bar.
+    fn title_at(widths: &Widths, ui: &Ui, index: usize) -> Pos2 {
+        let before: f32 = MENU_NAMES[..index].iter().map(|name| menu_slot(ui, name).x).sum();
+        let x = widths.brand + before + menu_slot(ui, MENU_NAMES[index]).x / 2.0;
         Pos2::new(x, BAR_TOP + (HEIGHT - BAR_TOP) / 2.0)
     }
 
-    /// Windows 400 high (480 pixels at the default 120%), where the
-    /// Preview menu is taller than the room under the bar: 1000 wide, the
-    /// bar has all its menus; 640 pixels wide, Preview is folded into the
-    /// menu of menus.
-    const SHORT_WIDE: Vec2 = Vec2::new(1000.0, 400.0);
-    const SHORT_NARROW: Vec2 = Vec2::new(533.3, 400.0);
-
-    /// Opens Preview from the bar on a window of `screen` (from the menu
-    /// of menus when it is folded there) and lets it settle: the context,
-    /// the title clicked and the menus open, Preview's last.
-    fn open_preview(editor: &Editor, ui_state: &UiState, screen: Vec2) -> (egui::Context, Pos2, Vec<Rect>) {
-        let widths = measured(editor, None);
-        let plan = plan(&widths, screen.x);
-        let preview = MENU_NAMES.iter().position(|name| *name == "Preview").unwrap();
-        let title = title_at(&widths, &plan, preview);
-        let context = themed_context(screen.x);
-        let commands = click_in(&context, screen, editor, ui_state, title);
-        assert!(commands.is_empty(), "opening Preview gave {commands:?}");
-        settle(&context, screen, editor, ui_state, Vec::new());
-        if plan.menus <= preview {
-            // Its row in the menu of menus, which has a row a menu.
-            let [menus] = open_menus(&context)[..] else { panic!("the menu of menus does not open at {screen:?}") };
-            let rows = (MENU_NAMES.len() - plan.menus) as f32;
-            let row = (preview - plan.menus) as f32 + 0.5;
-            let at = Pos2::new(menus.center().x, menus.top() + menus.height() * row / rows);
-            settle(&context, screen, editor, ui_state, vec![egui::Event::PointerMoved(at)]);
-        }
-        let menus = open_menus(&context);
-        (context, title, menus)
-    }
-
-    /// On `screen`, Preview opens under the bar it drops from, in the
-    /// window (beside the menu of menus when it is folded there), the
-    /// wheel scrolls it to its last row, and its title only closes it.
-    fn preview_fits_under_the_bar(screen: Vec2, folded: bool) {
+    #[test]
+    fn a_menu_taller_than_the_window_opens_under_the_bar_and_scrolls() {
+        // 400 high (480 pixels at the default 120%): Preview is taller
+        // than the room under the bar.
+        let screen = Vec2::new(1000.0, 400.0);
         let editor = editor_named(NAMES[0]);
         let ui_state = UiState::default();
-        let (context, title, menus) = open_preview(&editor, &ui_state, screen);
-        assert_eq!(menus.len(), if folded { 2 } else { 1 }, "the menus open at {screen:?}: {menus:?}");
+        let widths = measured(&editor, None);
+        let preview = MENU_NAMES.iter().position(|name| *name == "Preview").unwrap();
+        let context = themed_context(screen.x);
+        let mut title = Pos2::ZERO;
+        context.run_ui(input(screen.x, Vec::new()), |ui| title = title_at(&widths, ui, preview)).drop_without_applying_deltas();
+        let commands = click_in(&context, screen, &editor, &ui_state, title);
+        assert!(commands.is_empty(), "opening Preview gave {commands:?}");
+        settle(&context, screen, &editor, &ui_state, Vec::new());
+        let menus = open_menus(&context);
+        let [menu] = menus[..] else { panic!("Preview does not open alone: {menus:?}") };
         let title_bottom = title.y + TOP_LEVEL_HEIGHT / 2.0;
-        for menu in &menus {
-            assert!(menu.top() >= title_bottom - 0.5, "the menu at {menu:?} covers the bar, its title ending at {title_bottom}, at {screen:?}");
-            assert!(menu.bottom() <= screen.y + 0.5, "the menu at {menu:?} runs past the window's bottom at {screen:?}");
-        }
-        let preview = *menus.last().unwrap();
-        if let [folded, _] = menus[..] {
-            let beside = preview.left() >= folded.right() - 0.5 || preview.right() <= folded.left() + 0.5;
-            assert!(beside, "Preview at {preview:?} covers the menu of menus at {folded:?}");
-        }
-        let over = Pos2::new(preview.left() + 40.0, preview.center().y);
+        assert!(menu.top() >= title_bottom - 0.5, "the menu at {menu:?} covers the bar, its title ending at {title_bottom}");
+        assert!(menu.bottom() <= screen.y + 0.5, "the menu at {menu:?} runs past the window's bottom");
+        let over = Pos2::new(menu.left() + 40.0, menu.center().y);
         let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
         bar_frame(&context, screen, &editor, &ui_state, vec![egui::Event::PointerMoved(over)]);
         bar_frame(&context, screen, &editor, &ui_state, vec![wheel]);
         for _ in 0..60 {
             bar_frame(&context, screen, &editor, &ui_state, Vec::new());
         }
-        let last = Pos2::new(preview.left() + 40.0, preview.bottom() - 6.0);
+        let last = Pos2::new(menu.left() + 40.0, menu.bottom() - 6.0);
         let commands = click_in(&context, screen, &editor, &ui_state, last);
-        assert_eq!(commands, [Command::SetRenderMode(crate::editor::RenderMode::Realistic)], "at {screen:?}");
-
-        let (context, title, _) = open_preview(&editor, &ui_state, screen);
-        let commands = click_in(&context, screen, &editor, &ui_state, title);
-        assert!(commands.is_empty(), "clicking Preview's title again gave {commands:?} at {screen:?}");
-        assert!(!egui::Popup::is_any_open(&context), "clicking Preview's title again leaves it open at {screen:?}");
+        assert_eq!(commands, [Command::SetRenderMode(crate::editor::RenderMode::Realistic)]);
     }
 
     #[test]
-    fn a_menu_taller_than_the_window_opens_under_the_bar_and_scrolls() {
-        let widths = measured(&editor_named(NAMES[0]), None);
-        assert_eq!(plan(&widths, SHORT_WIDE.x).menus, MENU_NAMES.len());
-        preview_fits_under_the_bar(SHORT_WIDE, false);
-    }
-
-    #[test]
-    fn a_folded_menu_taller_than_the_window_opens_under_the_bar_and_scrolls() {
-        let widths = measured(&editor_named(NAMES[0]), None);
-        assert!(plan(&widths, SHORT_NARROW.x).menus <= 4, "Preview is in the bar at {SHORT_NARROW:?}");
-        preview_fits_under_the_bar(SHORT_NARROW, true);
-    }
-
-    #[test]
-    fn undo_and_close_answer_clicks_at_any_width() {
+    fn undo_and_close_answer_clicks_while_they_show() {
         let ui_state = UiState::default();
-        // 3800, 1920, 1600, 1366, 1340, 1320, 1280, 1024, 901, 800 and
-        // 640 pixels wide at the default 120%, and narrower.
-        let widths_in_points = [3166.7, 1600.0, 1333.3, 1138.3, 1116.7, 1100.0, 1066.7, 853.3, 750.8, 666.7, 533.3, 450.0];
+        let y = BAR_TOP + (HEIGHT - BAR_TOP) / 2.0;
         for name in NAMES {
             let editor = editor_named(name);
             let widths = measured(&editor, None);
-            for width in widths_in_points {
-                let plan = plan(&widths, width);
-                let lead = if plan.brand { widths.brand } else { LEAD_WITHOUT_BRAND };
-                let left_end = lead + widths.menu_bar(plan.menus) + MENU_GAP + widths.file_box(plan.name_width);
-                let undo_left = left_end + UNDO_GAP;
-                assert!(undo_left + widths.undo + widths.right(&plan) <= width + 0.001, "{name}: undo at {undo_left} is under the version box at {width}");
-                let y = BAR_TOP + (HEIGHT - BAR_TOP) / 2.0;
-
+            let left: f32 = LEFT_PARTS.iter().filter_map(|part| widths.of(*part)).sum();
+            let whole = left + widths.window_buttons.unwrap() + widths.versions;
+            for width in [whole + 400.0, whole, left + widths.window_buttons.unwrap()] {
+                let slots = dock(&widths, 0.0, width);
+                let (undo_left, _) = slot(&slots, Part::Undo);
                 let context = themed_context(width);
-                let commands = click(&context, width, &editor, &ui_state, Pos2::new(undo_left + widths.undo / 2.0, y));
+                let commands = click(&context, width, &editor, &ui_state, Pos2::new(undo_left + UNDO_MARGIN + 10.0, y));
                 assert!(egui::Popup::is_any_open(&context), "{name}: undo's menu did not open at {width}");
                 assert!(commands.is_empty(), "{name}: clicking undo at {width} gave {commands:?}");
 
@@ -877,12 +777,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_window_buttons_slot_too_narrow_cuts_off_close() {
+        // The buttons go left to right, minimize first, so a slot short of
+        // them loses close: a click where it would be does nothing.
+        let ui_state = UiState::default();
+        let editor = editor_named(NAMES[0]);
+        let widths = measured(&editor, None);
+        let left: f32 = LEFT_PARTS.iter().filter_map(|part| widths.of(*part)).sum();
+        let width = left + 2.0 + SYSTEM_BUTTON + 2.0 + 10.0;
+        let y = BAR_TOP + (HEIGHT - BAR_TOP) / 2.0;
+        let context = themed_context(width);
+        let commands = click(&context, width, &editor, &ui_state, Pos2::new(width - 4.0, y));
+        assert!(!commands.contains(&Command::Exit), "close took a click at {width}: {commands:?}");
+        let context = themed_context(width);
+        let minimize = Pos2::new(left + 2.0 + SYSTEM_BUTTON / 2.0, y);
+        let commands = click(&context, width, &editor, &ui_state, minimize);
+        assert_eq!(commands, [Command::WindowMinimize]);
+    }
+
     /// Frames of the bar as the app draws it, the menus taking their keys
-    /// first: one for each of `keys`, each followed by two without.
-    fn keyed(context: &egui::Context, width: f32, editor: &Editor, keys: &[egui::Key]) -> Vec<Command> {
+    /// first: one for each of `keys` (held with `modifiers`), each
+    /// followed by two without.
+    fn keyed_with(context: &egui::Context, width: f32, editor: &Editor, keys: &[egui::Key], modifiers: egui::Modifiers) -> Vec<Command> {
         let ui_state = UiState::default();
         let mut commands = Vec::new();
-        let pressed = |key: egui::Key| vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }];
+        let pressed = |key: egui::Key| vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }];
         for events in keys.iter().flat_map(|key| [pressed(*key), Vec::new(), Vec::new()]) {
             let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, HEIGHT));
             let output = context.run_ui(input(width, events), |ui| {
@@ -894,53 +814,56 @@ mod tests {
         commands
     }
 
+    fn keyed(context: &egui::Context, width: f32, editor: &Editor, keys: &[egui::Key]) -> Vec<Command> {
+        keyed_with(context, width, editor, keys, egui::Modifiers::NONE)
+    }
+
     #[test]
-    fn f10_opens_file_and_the_arrows_go_between_the_menus() {
-        use egui::Key::{ArrowLeft, ArrowRight, Enter, F10};
+    fn f10_highlights_file_and_the_keys_step_between_and_open_the_menus() {
+        use egui::Key::{ArrowDown, ArrowLeft, ArrowRight, Enter, Escape, F10};
         let editor = editor_named(NAMES[0]);
         let width = 1600.0;
         let context = themed_context(width);
-        assert_eq!(keyed(&context, width, &editor, &[F10, Enter]), [Command::NewProject]);
+        // F10 puts the bar in menu mode, File highlighted but not open;
+        // Enter opens it on its first row, and Enter again chooses that.
+        assert!(keyed(&context, width, &editor, &[F10]).is_empty());
         assert!(!egui::Popup::is_any_open(&context));
-        // Edit has nothing to choose with nothing selected; Graph's first
-        // row is New Graph Tab.
-        assert_eq!(keyed(&context, width, &editor, &[F10, ArrowRight, ArrowRight, Enter]), [Command::NewGraphTab]);
+        assert_eq!(menu_keys::bar_focus(&context), Some(0));
+        assert_eq!(keyed(&context, width, &editor, &[Enter, Enter]), [Command::NewProject]);
+        assert!(!egui::Popup::is_any_open(&context));
+        assert_eq!(menu_keys::bar_focus(&context), None);
+        // Right twice highlights Graph; Down opens it on New Graph Tab.
+        assert_eq!(keyed(&context, width, &editor, &[F10, ArrowRight, ArrowRight, ArrowDown, Enter]), [Command::NewGraphTab]);
         // Left from File goes round to Help.
         let help = Command::Tools(ToolCommand::ShowDocs(crate::docs::HOME.to_string()));
-        assert_eq!(keyed(&context, width, &editor, &[F10, ArrowLeft, Enter]), [help]);
-        // F10 again closes the menu.
-        assert!(keyed(&context, width, &editor, &[F10]).is_empty());
+        assert_eq!(keyed(&context, width, &editor, &[F10, ArrowLeft, Enter, Enter]), [help]);
+        // Escape out of an open menu comes back to its item, and again
+        // leaves menu mode.
+        keyed(&context, width, &editor, &[F10, Enter]);
         assert!(egui::Popup::is_any_open(&context));
-        assert!(keyed(&context, width, &editor, &[F10]).is_empty());
+        keyed(&context, width, &editor, &[Escape]);
         assert!(!egui::Popup::is_any_open(&context));
+        assert_eq!(menu_keys::bar_focus(&context), Some(0));
+        keyed(&context, width, &editor, &[Escape]);
+        assert_eq!(menu_keys::bar_focus(&context), None);
+        // F10 with a menu open closes it and leaves menu mode.
+        keyed(&context, width, &editor, &[F10, Enter, F10]);
+        assert!(!egui::Popup::is_any_open(&context));
+        assert_eq!(menu_keys::bar_focus(&context), None);
     }
 
     #[test]
-    fn f10_opens_the_folded_menus_when_the_bar_has_no_room() {
-        use egui::Key::{ArrowRight, Enter, F10};
-        let editor = editor_named(NAMES[2]);
-        let widths = measured(&editor, None);
-        let least = Plan { brand: false, menus: 0, version: false, update: false, name_width: NAME_LEAST_WIDTH };
-        let width = total(&widths, &least);
-        assert_eq!(plan(&widths, width).menus, 0);
+    fn alt_and_an_access_key_open_its_menu() {
+        use egui::Key::{Enter, F, H};
+        let editor = editor_named(NAMES[0]);
+        let width = 1600.0;
         let context = themed_context(width);
-        // The menu of menus opens on File, whose first row Right opens.
-        assert_eq!(keyed(&context, width, &editor, &[F10, ArrowRight, Enter]), [Command::NewProject]);
-    }
-
-    #[test]
-    fn the_least_bar_keeps_undo_clear_of_the_window_buttons() {
-        let editor = editor_named(NAMES[2]);
-        let ui_state = UiState::default();
-        let widths = measured(&editor, None);
-        let least = Plan { brand: false, menus: 0, version: false, update: false, name_width: NAME_LEAST_WIDTH };
-        // Too narrow for the least the bar shows: the file box is cut short.
-        let width = total(&widths, &least) - 60.0;
-        let y = BAR_TOP + (HEIGHT - BAR_TOP) / 2.0;
-        let undo_left = width - widths.right(&least) - widths.undo;
-        let context = themed_context(width);
-        let commands = click(&context, width, &editor, &ui_state, Pos2::new(undo_left + widths.undo / 2.0, y));
-        assert!(egui::Popup::is_any_open(&context), "undo's menu did not open at {width}");
-        assert!(commands.is_empty(), "clicking undo at {width} gave {commands:?}");
+        // Alt+F opens File on its first row; Alt+H, Help.
+        keyed_with(&context, width, &editor, &[F], egui::Modifiers::ALT);
+        assert!(egui::Popup::is_any_open(&context));
+        assert_eq!(keyed(&context, width, &editor, &[Enter]), [Command::NewProject]);
+        keyed_with(&context, width, &editor, &[H], egui::Modifiers::ALT);
+        let help = Command::Tools(ToolCommand::ShowDocs(crate::docs::HOME.to_string()));
+        assert_eq!(keyed(&context, width, &editor, &[Enter]), [help]);
     }
 }

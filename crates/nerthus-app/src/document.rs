@@ -1637,9 +1637,8 @@ impl Document {
     }
 
     /// `RegionManager.AddNewRegion`: a region a quarter of the terrain
-    /// wide with its corner at `corner`, moved in as far as it takes to lie
-    /// wholly on the terrain (a click near the edge would otherwise leave
-    /// most of it off), in a random swatch's colour
+    /// wide with its corner at `corner` (where the menu was opened, however
+    /// near the edge), in a random swatch's colour
     /// (`ElementHelper.GetRandomSwatch`, kept as scRGB), named "Region 001"
     /// or, while that is taken, the next number (at most 100 tries).
     /// Returns its name.
@@ -1654,8 +1653,7 @@ impl Document {
         let swatch = SWATCHES[self.random.below(SWATCHES.len() as u64) as usize];
         let mut added = Region::new(&name);
         added.width = 0.25;
-        let last = last_region_position(added.width);
-        added.position = corner.map(|value| value.clamp(0.0, last));
+        added.position = corner;
         added.color = crate::theme::sc_rgb(crate::theme::swatch_color(swatch));
         regions.push(added);
         self.checkpoint("New region added");
@@ -2278,16 +2276,14 @@ mod tests {
     }
 
     #[test]
-    fn regions_added_near_the_edge_lie_wholly_on_the_terrain() {
+    fn regions_are_added_where_the_menu_was_opened() {
         let mut document = Document::new();
         let position = |document: &Document, name: &str| document.regions().into_iter().find(|region| region.name == name).map(|region| (region.position, region.width));
         let middle = document.add_region([0.3, 0.4]);
         assert_eq!(position(&document, &middle), Some(([0.3, 0.4], 0.25)));
-        // Near the bottom-right corner it moves in to end at the edge.
+        // Near the bottom-right corner too, most of it then off the
+        // terrain, as `AddNewRegion` places it.
         let corner = document.add_region([0.97, 0.971]);
-        assert_eq!(position(&document, &corner), Some(([0.75, 0.75], 0.25)));
-        // Just outside the canvas (on its border) it starts at the edge.
-        let border = document.add_region([-0.001, 0.9]);
-        assert_eq!(position(&document, &border), Some(([0.0, 0.75], 0.25)));
+        assert_eq!(position(&document, &corner), Some(([0.97, 0.971], 0.25)));
     }
 }

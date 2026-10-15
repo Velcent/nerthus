@@ -5,6 +5,7 @@
 //! algorithms so the nodes behave the same way.
 
 pub mod colorspace;
+pub mod colorspace_transform;
 pub mod composite;
 pub mod convolve;
 pub mod distort;
@@ -18,6 +19,7 @@ pub mod octree;
 pub mod quanta;
 pub mod resize;
 pub mod threshold_maps;
+mod ycc_map;
 
 pub use colorspace::Colorspace;
 pub use composite::CompositeOp;

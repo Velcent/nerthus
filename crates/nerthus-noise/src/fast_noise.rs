@@ -412,42 +412,42 @@ impl FastNoise {
     }
 
     #[inline(always)]
-    fn apply_perturb_with<const AVX2: bool>(&self, values: &PerturbValues, x: &mut f32, y: &mut f32, z: &mut f32) {
+    fn apply_perturb_with<const AVX2: bool, const X86_NANS: bool>(&self, values: &PerturbValues, x: &mut f32, y: &mut f32, z: &mut f32) {
         let seed_base = self.seed.wrapping_sub(1);
         match self.perturb_type {
             PerturbType::None => {}
             PerturbType::Gradient => {
-                gradient_perturb_single::<AVX2>(seed_base, values.amp, values.frequency, x, y, z);
+                gradient_perturb_single::<AVX2, X86_NANS>(seed_base, values.amp, values.frequency, x, y, z);
             }
             PerturbType::GradientFractal => {
-                self.gradient_perturb_fractal::<AVX2>(values, x, y, z);
+                self.gradient_perturb_fractal::<AVX2, X86_NANS>(values, x, y, z);
             }
             PerturbType::Normalise => {
-                normalise_position::<AVX2>(values.normalise_length, x, y, z);
+                normalise_position::<AVX2, X86_NANS>(values.normalise_length, x, y, z);
             }
             PerturbType::GradientNormalise => {
-                gradient_perturb_single::<AVX2>(seed_base, values.amp, values.frequency, x, y, z);
-                normalise_position::<AVX2>(values.normalise_length, x, y, z);
+                gradient_perturb_single::<AVX2, X86_NANS>(seed_base, values.amp, values.frequency, x, y, z);
+                normalise_position::<AVX2, X86_NANS>(values.normalise_length, x, y, z);
             }
             PerturbType::GradientFractalNormalise => {
-                self.gradient_perturb_fractal::<AVX2>(values, x, y, z);
-                normalise_position::<AVX2>(values.normalise_length, x, y, z);
+                self.gradient_perturb_fractal::<AVX2, X86_NANS>(values, x, y, z);
+                normalise_position::<AVX2, X86_NANS>(values.normalise_length, x, y, z);
             }
         }
     }
 
     #[inline(always)]
-    fn gradient_perturb_fractal<const AVX2: bool>(&self, values: &PerturbValues, x: &mut f32, y: &mut f32, z: &mut f32) {
+    fn gradient_perturb_fractal<const AVX2: bool, const X86_NANS: bool>(&self, values: &PerturbValues, x: &mut f32, y: &mut f32, z: &mut f32) {
         let mut seed = self.seed.wrapping_sub(1);
         let mut frequency = values.frequency;
         let mut amp = values.amp;
-        gradient_perturb_single::<AVX2>(seed, amp, frequency, x, y, z);
+        gradient_perturb_single::<AVX2, X86_NANS>(seed, amp, frequency, x, y, z);
         let mut octave = 1;
         while octave < self.perturb_octaves {
             frequency *= values.lacunarity;
             seed = seed.wrapping_sub(1);
             amp *= values.gain;
-            gradient_perturb_single::<AVX2>(seed, amp, frequency, x, y, z);
+            gradient_perturb_single::<AVX2, X86_NANS>(seed, amp, frequency, x, y, z);
             octave += 1;
         }
     }
@@ -704,7 +704,7 @@ impl FillContext {
         let mut xf = x as f32 * self.x_frequency;
         let mut yf = y as f32 * self.y_frequency;
         let mut zf = z as f32 * self.z_frequency;
-        noise.apply_perturb_with::<AVX2>(&self.perturb, &mut xf, &mut yf, &mut zf);
+        noise.apply_perturb_with::<AVX2, false>(&self.perturb, &mut xf, &mut yf, &mut zf);
         noise.evaluate_with::<AVX2>(&self.fractal, &self.lookup, xf, yf, zf)
     }
 
@@ -733,14 +733,25 @@ impl FillContext {
 
     #[inline(always)]
     fn fill_positions_with<const AVX2: bool>(&self, noise: &FastNoise, scaling: &PositionScaling, positions: &[[f32; 3]], values: &mut [f32]) {
+        if EMULATE_X86_NANS && noise.noise_type == NoiseType::WhiteNoise {
+            self.fill_positions_nans::<AVX2, true>(noise, scaling, positions, values);
+        } else {
+            self.fill_positions_nans::<AVX2, false>(noise, scaling, positions, values);
+        }
+    }
+
+    /// The position loop, with x86's NaN rules where a NaN can arise when
+    /// `X86_NANS` (see [`EMULATE_X86_NANS`]).
+    #[inline(always)]
+    fn fill_positions_nans<const AVX2: bool, const X86_NANS: bool>(&self, noise: &FastNoise, scaling: &PositionScaling, positions: &[[f32; 3]], values: &mut [f32]) {
         for (position, out) in positions.iter().zip(values.iter_mut()) {
             let [mut xf, mut yf, mut zf] = *position;
             if scaling.scaled {
-                xf = mul_add::<AVX2>(xf, scaling.frequency[0], scaling.offset[0]);
-                yf = mul_add::<AVX2>(yf, scaling.frequency[1], scaling.offset[1]);
-                zf = mul_add::<AVX2>(zf, scaling.frequency[2], scaling.offset[2]);
+                xf = nan_mul_add::<AVX2, X86_NANS>(xf, scaling.frequency[0], scaling.offset[0]);
+                yf = nan_mul_add::<AVX2, X86_NANS>(yf, scaling.frequency[1], scaling.offset[1]);
+                zf = nan_mul_add::<AVX2, X86_NANS>(zf, scaling.frequency[2], scaling.offset[2]);
             }
-            noise.apply_perturb_with::<AVX2>(&self.perturb, &mut xf, &mut yf, &mut zf);
+            noise.apply_perturb_with::<AVX2, X86_NANS>(&self.perturb, &mut xf, &mut yf, &mut zf);
             *out = noise.evaluate_with::<AVX2>(&self.fractal, &self.lookup, xf, yf, zf);
         }
     }
@@ -801,6 +812,40 @@ fn mul_sub<const AVX2: bool>(a: f32, b: f32, c: f32) -> f32 {
 #[inline(always)]
 fn nmul_add<const AVX2: bool>(a: f32, b: f32, c: f32) -> f32 {
     if AVX2 { (-a).mul_add(b, c) } else { c - a * b }
+}
+
+/// Whether white noise at arbitrary positions follows x86's NaN rules
+/// in software. White noise hashes a position's bits, and a NaN that an
+/// operation creates is `0xFFC00000` on x86 but `0x7FC00000` on ARM, so
+/// positions that become NaN while they are scaled or perturbed (an
+/// infinity times zero, an infinity minus itself) would hash differently.
+/// x86 hardware already behaves that way.
+const EMULATE_X86_NANS: bool = !cfg!(target_arch = "x86_64");
+
+/// `a * b`, with x86's NaN rules when `X86_NANS`.
+#[inline(always)]
+fn nan_mul<const X86_NANS: bool>(a: f32, b: f32) -> f32 {
+    if X86_NANS { crate::x86::mulss(a, b) } else { a * b }
+}
+
+/// `a - b`, with x86's NaN rules when `X86_NANS`.
+#[inline(always)]
+fn nan_sub<const X86_NANS: bool>(a: f32, b: f32) -> f32 {
+    if X86_NANS { crate::x86::subss(a, b) } else { a - b }
+}
+
+/// [`mul_add`], with x86's NaN rules when `X86_NANS`.
+#[inline(always)]
+fn nan_mul_add<const AVX2: bool, const X86_NANS: bool>(a: f32, b: f32, c: f32) -> f32 {
+    if !X86_NANS {
+        return mul_add::<AVX2>(a, b, c);
+    }
+    if AVX2 {
+        crate::x86::fmadd(a, b, c)
+    } else {
+        let product = crate::x86::mulss(a, b);
+        crate::x86::addss(product, c)
+    }
 }
 
 /// `1 / sqrt(x)` (`SIMDf_INV_SQRT`): the AVX2 build's `RSQRTPS`
@@ -1340,10 +1385,10 @@ fn cellular_lookup_single<const AVX2: bool>(
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn gradient_perturb_single<const AVX2: bool>(seed: i32, amp: f32, frequency: f32, x: &mut f32, y: &mut f32, z: &mut f32) {
-    let xf = *x * frequency;
-    let yf = *y * frequency;
-    let zf = *z * frequency;
+fn gradient_perturb_single<const AVX2: bool, const X86_NANS: bool>(seed: i32, amp: f32, frequency: f32, x: &mut f32, y: &mut f32, z: &mut f32) {
+    let xf = nan_mul::<X86_NANS>(*x, frequency);
+    let yf = nan_mul::<X86_NANS>(*y, frequency);
+    let zf = nan_mul::<X86_NANS>(*z, frequency);
 
     let xs = xf.floor();
     let ys = yf.floor();
@@ -1356,9 +1401,9 @@ fn gradient_perturb_single<const AVX2: bool>(seed: i32, amp: f32, frequency: f32
     let y1 = y0.wrapping_add(Y_PRIME);
     let z1 = z0.wrapping_add(Z_PRIME);
 
-    let tx = interp_quintic::<AVX2>(xf - xs);
-    let ty = interp_quintic::<AVX2>(yf - ys);
-    let tz = interp_quintic::<AVX2>(zf - zs);
+    let tx = interp_quintic::<AVX2>(nan_sub::<X86_NANS>(xf, xs));
+    let ty = interp_quintic::<AVX2>(nan_sub::<X86_NANS>(yf, ys));
+    let tz = interp_quintic::<AVX2>(nan_sub::<X86_NANS>(zf, zs));
 
     let corners = [
         hash_hb(seed, x0, y0, z0),
@@ -1388,18 +1433,18 @@ fn gradient_perturb_single<const AVX2: bool>(seed: i32, amp: f32, frequency: f32
         *offset = lerp::<AVX2>(near, far, tz);
     }
 
-    *x = mul_add::<AVX2>(offsets[0], amp, *x);
-    *y = mul_add::<AVX2>(offsets[1], amp, *y);
-    *z = mul_add::<AVX2>(offsets[2], amp, *z);
+    *x = nan_mul_add::<AVX2, X86_NANS>(offsets[0], amp, *x);
+    *y = nan_mul_add::<AVX2, X86_NANS>(offsets[1], amp, *y);
+    *z = nan_mul_add::<AVX2, X86_NANS>(offsets[2], amp, *z);
 }
 
 #[inline(always)]
-fn normalise_position<const AVX2: bool>(length: f32, x: &mut f32, y: &mut f32, z: &mut f32) {
+fn normalise_position<const AVX2: bool, const X86_NANS: bool>(length: f32, x: &mut f32, y: &mut f32, z: &mut f32) {
     let length_sq = length_squared::<AVX2>(*x, *y, *z);
-    let inv_mag = length * inv_sqrt::<AVX2>(length_sq);
-    *x *= inv_mag;
-    *y *= inv_mag;
-    *z *= inv_mag;
+    let inv_mag = nan_mul::<X86_NANS>(length, inv_sqrt::<AVX2>(length_sq));
+    *x = nan_mul::<X86_NANS>(*x, inv_mag);
+    *y = nan_mul::<X86_NANS>(*y, inv_mag);
+    *z = nan_mul::<X86_NANS>(*z, inv_mag);
 }
 
 #[cfg(test)]
@@ -1416,6 +1461,19 @@ mod tests {
     fn perlin_is_zero_on_lattice() {
         let value = perlin_single::<false>(1337, 3.0, 4.0, 5.0);
         assert_eq!(value, 0.0);
+    }
+
+    #[test]
+    fn white_noise_hashes_x86_nans() {
+        // At frequency zero an infinite position scales to a NaN, which
+        // x86 makes negative on every platform.
+        let mut noise = FastNoise::new(7);
+        noise.set_noise_type(NoiseType::WhiteNoise);
+        noise.set_frequency(0.0);
+        let positions = [[f32::INFINITY, 1.0, 2.0]];
+        let values = noise.fill_vector_set(&positions, [0.0, 0.0, 0.0]);
+        let expected = white_noise_single(7, f32::from_bits(0xFFC0_0000), 0.0, 0.0);
+        assert_eq!(values[0].to_bits(), expected.to_bits());
     }
 
     #[test]

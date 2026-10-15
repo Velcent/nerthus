@@ -29,6 +29,7 @@ pub const ACCENT_BLUE: Color32 = rgb(0x38a6ff);
 pub const ACCENT_GREEN: Color32 = rgb(0x6d9258);
 pub const ACCENT_YELLOW: Color32 = rgb(0xcacd46);
 pub const ACCENT_RED: Color32 = rgb(0xdc4a4a);
+pub const ACCENT_ORANGE: Color32 = rgb(0xdc704a);
 pub const ACCENT_MAGENTA: Color32 = rgb(0xd94f91);
 pub const ACCENT_PURPLE: Color32 = rgb(0x6f459e);
 pub const ACCENT_TEAL: Color32 = rgb(0x47b4b3);

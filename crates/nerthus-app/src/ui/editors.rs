@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 
 use crate::icons;
 use crate::theme;
-use crate::ui::colour_picker::{colour_button, linear_to_srgb, picked_linear};
+use crate::ui::colour_button::{self, colour_button};
+use crate::ui::colour_picker::{linear_to_srgb, srgb_to_linear};
 use crate::ui::slider_popups::{self, BoxWidth, Nudge, NudgeLook, RangeEnd, TypingLook};
 use crate::ui::widgets::Tooltips;
 
@@ -187,7 +188,7 @@ pub fn parameter(ui: &mut Ui, id: Id, spec: &ParameterSpec, value: &Value, conte
             "TextBox" => text_box(ui, id, label, value.as_str().unwrap_or_default()),
             _ => file_browser(ui, id, label, value.as_str().unwrap_or_default()),
         },
-        ValueType::Color => color_editor(ui, label, value),
+        ValueType::Color => color_editor(ui, id, label, value),
         ValueType::Float4List => crate::ui::gradient_editor::gradient_editor(ui, id, value),
         _ => {
             caption(ui, label, "(edited in a later version)");
@@ -565,24 +566,21 @@ pub fn slider(ui: &mut Ui, id: Id, label: &str, value: f64, spec: &SliderSpec, c
     // `_displayName` (margin 10, -1, 8, 0) and `_valueDisplay` (18 high,
     // margin 0, 3, 10, 1, monospace 13).
     // The value keeps its room; the name gets what is left, trimmed, and
-    // nothing leaves the bar. Both hide while the nudge bar shows
-    // (`NudgePopup_Opened`): its box holds the value.
+    // nothing leaves the bar. The name hides while the nudge bar shows
+    // (`NudgePopup_Opened`).
     let text_painter = painter.with_clip_rect(content);
     let shown = spec.format(value, settings.precise_values);
     let shown_color = color.gamma_multiply(value_opacity);
     let value_galley = painter.layout_no_wrap(shown, theme::monospace(13.0), shown_color);
     let value_box_top = content.top() + 3.0 + (content.height() - 4.0 - 18.0) / 2.0;
     let value_rect = Rect::from_min_size(Pos2::new(content.right() - 10.0 - value_galley.size().x, value_box_top), Vec2::new(value_galley.size().x, 18.0));
+    text_painter.galley(value_rect.min, value_galley, shown_color);
     let nudging = slider_popups::nudge_open(ui.ctx(), nudge_id).is_some();
     if !nudging {
-        text_painter.galley(value_rect.min, value_galley, shown_color);
         let label_color = color.gamma_multiply(control_opacity);
         let label_left = content.left() + 10.0;
         let label_room = value_rect.left() - 8.0 - label_left;
         let label_galley = fitted_line(ui, label, theme::interface(12.0), label_color, label_room);
-        if label_galley.elided {
-            note_cut_name(ui, label);
-        }
         let label_top = content.top() - 1.0 + (content.height() + 1.0 - label_galley.size().y) / 2.0;
         text_painter.galley(Pos2::new(label_left, label_top), label_galley, label_color);
     }
@@ -618,13 +616,11 @@ pub fn slider(ui: &mut Ui, id: Id, label: &str, value: f64, spec: &SliderSpec, c
         }
         return typed_value(ui.ctx(), &text, spec).filter(|new_value| (new_value - value).abs() > f64::EPSILON);
     }
-    // The bar: 2 left of and above the slider's bar, and 2 past its right,
-    // short of the parameter menu beside the control.
-    let nudge_top_left = track.min - Vec2::splat(2.0 * popup_scale);
-    let nudge_right = (track.right() + 2.0 * popup_scale).min(content.right());
+    // The bar: 2 left of and above the slider's bar (`_slider`), as wide
+    // as the control (`ActualWidth · UiScale` in its own units).
     let nudge_look = NudgeLook {
-        top_left: nudge_top_left,
-        width: nudge_right - nudge_top_left.x,
+        top_left: track.min - Vec2::splat(2.0 * popup_scale),
+        width: content.width(),
         color,
         has_default: spec.default.is_some(),
     };
@@ -787,9 +783,8 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
 
     // The two values keep their room; the name sits between them,
     // trimmed, and nothing leaves the bar. The range (`Panel.ZIndex` 50)
-    // and the thumbs (100) lie over them. The name and the values hide
-    // while the nudge bar shows (`NudgePopup_Opened`): its box holds the
-    // value it steps.
+    // and the thumbs (100) lie over them. The name hides while the nudge
+    // bar shows (`NudgePopup_Opened`).
     let text_painter = painter.with_clip_rect(content);
     let text_color = accent.gamma_multiply(opacity);
     let precise = theme::settings(ui.ctx()).precise_values;
@@ -801,20 +796,15 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
     let value_top = content.top() + 2.0 + (content.height() - 3.0 - 15.0) / 2.0;
     let low_rect = Rect::from_min_size(Pos2::new(content.left() + 8.0, value_top), Vec2::new(low_galley.size().x, 15.0));
     let high_rect = Rect::from_min_size(Pos2::new(content.right() - 8.0 - high_galley.size().x, value_top), Vec2::new(high_galley.size().x, 15.0));
+    text_painter.galley(low_rect.min, low_galley, text_color);
+    text_painter.galley(high_rect.min, high_galley, text_color);
     let nudge_end = slider_popups::nudge_open(ui.ctx(), nudge_id).flatten();
     let nudging = nudge_end.is_some();
-    if !nudging {
-        text_painter.galley(low_rect.min, low_galley, text_color);
-        text_painter.galley(high_rect.min, high_galley, text_color);
-    }
     if let RangeLook::Accent { label, .. } = look
         && !nudging
     {
         let name_room = (high_rect.left() - low_rect.right() - 16.0).min(content.width());
         let name_galley = fitted_line(ui, label, theme::interface(12.0), text_color, name_room);
-        if name_galley.elided {
-            note_cut_name(ui, label);
-        }
         text_painter.galley(content.center() - name_galley.size() / 2.0, name_galley, text_color);
     }
     // Each value's `ToolTip` is its text.
@@ -894,17 +884,15 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
         return changed(typed.0, typed.1);
     }
     // The bar covers the control from 2 before the sliders' corner (they
-    // sit 2 in) to 2 past their right, short of the parameter menu beside
-    // it; its buttons take the style's accent.
+    // sit 2 in), as wide as the control; its buttons take the style's
+    // accent.
     let button_color = match look {
         RangeLook::Accent { color, .. } => *color,
         RangeLook::Palette(_) => theme::ACCENT_PRIMARY,
     };
-    let nudge_top_left = track.min - Vec2::splat(2.0 * popup_scale);
-    let nudge_right = (track.right() + 2.0 * popup_scale).min(content.right());
     let nudge_look = NudgeLook {
-        top_left: nudge_top_left,
-        width: nudge_right - nudge_top_left.x,
+        top_left: content.min + Vec2::splat(2.0 - 2.0 * popup_scale),
+        width: content.width(),
         color: button_color,
         has_default: spec.default.is_some(),
     };
@@ -1086,20 +1074,13 @@ pub fn fitted_line(ui: &Ui, text: &str, font: egui::FontId, color: Color32, max_
     ui.painter().layout_job(job)
 }
 
-/// Where an editor notes the name it cut short or left out, for its row's
-/// tooltip to show whole.
-fn cut_name_id() -> Id {
-    Id::new("cut-editor-name")
-}
-
-/// Notes `name` as cut short in the row being drawn.
-fn note_cut_name(ui: &Ui, name: &str) {
-    ui.data_mut(|data| data.insert_temp(cut_name_id(), name.to_string()));
-}
-
-/// The name an editor cut short or left out since this was last asked.
-pub fn take_cut_name(ctx: &egui::Context) -> Option<String> {
-    ctx.data_mut(|data| data.remove_temp::<String>(cut_name_id()))
+/// A header that wraps (`TextWrapping="Wrap"`), right-aligned in a
+/// column `column_width` wide less its margin of 8: drawn with its right
+/// edge where the text ends.
+fn wrapped_header(ui: &Ui, column_width: f32, text: &str, color: Color32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), theme::interface(12.0), color, (column_width - 8.0).max(0.0));
+    job.halign = egui::Align::RIGHT;
+    ui.painter().layout_job(job)
 }
 
 /// A right-aligned header label in its column, vertically centred
@@ -1107,24 +1088,13 @@ pub fn take_cut_name(ctx: &egui::Context) -> Option<String> {
 fn header_label(ui: &Ui, column: Rect, text: &str, color: Color32) {
     let available = (column.width() - 8.0).max(0.0);
     let galley = fitted_line(ui, text, theme::interface(12.0), color, available);
-    if galley.elided {
-        note_cut_name(ui, text);
-    }
     let position = Pos2::new(column.right() - 8.0 - galley.size().x, column.center().y - galley.size().y / 2.0);
     ui.painter().galley(position, galley, color);
 }
 
-/// The seed box's header column (the name's 80 and its margin 8).
-const SEED_COLUMN: f32 = 88.0;
-
-/// From the seed button's left to its seed: padding 4, then the dice (18,
-/// margin 4) and the seed's margin 6.
-const SEED_TEXT_INSET: f32 = 4.0 + 4.0 + 18.0 + 6.0;
-
 /// `RandomBox`: the name (80 wide), a button showing the seed that draws a
 /// new one (`Button-Random`, tagged `dice`) or, right-clicked, lets the
-/// seed be typed, and the seed menu. A seed too long for the button is
-/// trimmed, and shown whole in the button's tooltip.
+/// seed be typed, and the seed menu.
 fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     let mut edit = Edit::None;
     let width = ui.available_width();
@@ -1132,16 +1102,12 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     // `dock` keeps 8 clear on the right.
     let dock = Rect::from_min_max(rect.min, Pos2::new(rect.right() - 8.0, rect.bottom()));
 
-    // `PART_MenuButton` (`Button-IconOnly`, 18 + 6 a side, margin 4).
-    let menu_rect = Rect::from_min_size(Pos2::new(dock.right() - 4.0 - 30.0, dock.top()), Vec2::new(30.0, dock.height()));
-    let button_right = menu_rect.left() - 4.0;
-
-    let shown = seed.to_string();
-    let column = seed_column(ui, label, &shown, button_right - dock.left());
-    let header = Rect::from_min_size(dock.min, Vec2::new(column, dock.height()));
+    let header = Rect::from_min_size(dock.min, Vec2::new(88.0, dock.height()));
     header_label(ui, header, label, theme::LABEL_DEFAULT);
 
-    let button_rect = Rect::from_min_max(Pos2::new(header.right() + 8.0, dock.top()), Pos2::new(button_right, dock.bottom()));
+    // `PART_MenuButton` (`Button-IconOnly`, 18 + 6 a side, margin 4).
+    let menu_rect = Rect::from_min_size(Pos2::new(dock.right() - 4.0 - 30.0, dock.top()), Vec2::new(30.0, dock.height()));
+    let button_rect = Rect::from_min_max(Pos2::new(header.right() + 8.0, dock.top()), Pos2::new(menu_rect.left() - 4.0, dock.bottom()));
     let button = ui.interact(button_rect, id.with("seed-button"), Sense::click());
     let hovered = button.hovered();
     let fill = if hovered { theme::BUTTON_HOVER } else { theme::ICON_DARK };
@@ -1151,10 +1117,8 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     let icon_rect = Rect::from_min_size(Pos2::new(button_rect.left() + 4.0 + 4.0, button_rect.center().y - 9.0), Vec2::splat(18.0));
     icons::paint(ui, icon_rect, "dice", theme::ACCENT_MUTED_GRAY);
     let text_color = if hovered { theme::ACCENT_MUTED_GREEN } else { theme::LABEL_DEFAULT };
-    let seed_left = button_rect.left() + SEED_TEXT_INSET;
-    let seed_galley = fitted_line(ui, &shown, theme::monospace(12.0), text_color, button_rect.right() - 4.0 - seed_left);
-    let trimmed = seed_galley.elided;
-    let seed_position = Pos2::new(seed_left, button_rect.center().y - seed_galley.size().y / 2.0 + 0.5);
+    let seed_galley = ui.painter().layout_no_wrap(seed.to_string(), theme::monospace(12.0), text_color);
+    let seed_position = Pos2::new(icon_rect.right() + 6.0, button_rect.center().y - seed_galley.size().y / 2.0 + 0.5);
     // The button clips what does not fit (WPF's layout clip).
     let inside_button = button_rect.shrink(1.5);
     ui.painter().with_clip_rect(inside_button).galley(seed_position, seed_galley, text_color);
@@ -1169,9 +1133,9 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     // button, 32 wider (64 at least), its text taken as a formula.
     let typing_id = id.with("seed-typing");
     if button.secondary_clicked() && enabled {
-        slider_popups::open_typing(ui.ctx(), typing_id, shown.clone());
+        slider_popups::open_typing(ui.ctx(), typing_id, seed.to_string());
     }
-    let button = if trimmed { button.tooltip(format!("{shown}\n\nNew seed")) } else { button.tooltip("New seed") };
+    let button = button.tooltip("New seed");
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
         top_left: Pos2::new(button.rect.left(), button.rect.top() - 4.0 * popup_scale),
@@ -1189,18 +1153,6 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
         }
     });
     edit
-}
-
-/// The seed box's header column, `span` being from its left to the seed
-/// button's right: 88, narrowed for a seed that would not fit the button,
-/// but never past what the name needs.
-fn seed_column(ui: &Ui, label: &str, seed: &str, span: f32) -> f32 {
-    let name_width = ui.painter().layout_no_wrap(label.to_string(), theme::interface(12.0), Color32::WHITE).size().x;
-    let seed_width = ui.painter().layout_no_wrap(seed.to_string(), theme::monospace(12.0), Color32::WHITE).size().x;
-    // The gap of 8 and the button: the seed and the padding 4 after it.
-    let button = 8.0 + SEED_TEXT_INSET + seed_width.ceil() + 4.0;
-    let least = (name_width.ceil() + 8.0).min(SEED_COLUMN);
-    SEED_COLUMN.min(span - button).max(least)
 }
 
 /// Notes a seed the dice drew in the box's `LocalMemory`.
@@ -1257,17 +1209,21 @@ enum Shrunk {
     Lot,
 }
 
-/// `ToggleX`: the name in the header column and the switch
+/// `ToggleX`: the name in the header column (`Column.Size`; 100 narrower
+/// than 300), cut with "…" and whole in its own tooltip, and the switch
 /// (`ToggleButton`: 26 by 14, the accent when on).
 pub fn toggle(ui: &mut Ui, id: Id, label: &str, value: bool, accent: Color32) -> Option<bool> {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::hover());
-    let column = toggle_column(ui, label, width);
+    let column = if width < 300.0 { 100.0 } else { theme::sizes(ui.ctx()).header_column };
     let enabled = ui.is_enabled();
-    let header = Rect::from_min_size(rect.min, Vec2::new(column, rect.height()));
+    let header = Rect::from_min_size(rect.min, Vec2::new(column.min(width), rect.height()));
     // Disabled: the control at 0.8, its name at 0.3, the switch at 0.33.
     let label_color = theme::LABEL_DEFAULT.gamma_multiply(if enabled { 1.0 } else { 0.3 });
     header_label(ui, header, label, label_color);
+    // `PART_DisplayName`'s `ToolTip` is its own text, over the row's.
+    let name_rect = Rect::from_min_max(header.min, Pos2::new((header.right() - 8.0).max(header.left()), header.bottom()));
+    ui.interact(name_rect, id.with("toggle-name"), Sense::hover()).tooltip(label);
 
     let switch = Rect::from_min_size(Pos2::new(header.right(), rect.center().y - 7.0), Vec2::new(26.0, 14.0));
     let response = ui.interact(switch.expand(3.0), id.with("toggle"), Sense::click());
@@ -1278,16 +1234,6 @@ pub fn toggle(ui: &mut Ui, id: Id, label: &str, value: bool, accent: Color32) ->
     let knob_color = if response.hovered() { theme::TOGGLE_HOVER } else { theme::TOGGLE_INDICATOR };
     ui.painter().circle_filled(Pos2::new(knob_x, switch.center().y), 5.0, knob_color.gamma_multiply(switch_opacity));
     if response.clicked() && enabled { Some(!value) } else { None }
-}
-
-/// A toggle's header column: 160 (100 narrower than 300), widened to fit
-/// a longer name, and narrowed to keep the switch and the reach of its
-/// hit area (3) in the row.
-fn toggle_column(ui: &Ui, label: &str, width: f32) -> f32 {
-    let column = if width < 300.0 { 100.0 } else { theme::sizes(ui.ctx()).header_column };
-    let name_width = ui.painter().layout_no_wrap(label.to_string(), theme::interface(12.0), Color32::WHITE).size().x;
-    let wanted = name_width.ceil() + 8.0;
-    column.max(wanted).min(width - 26.0 - 3.0).max(0.0)
 }
 
 /// Which `OptionsX` template an enum gets.
@@ -1416,8 +1362,6 @@ fn option_cells(ui: &mut Ui, id: Id, list: Rect, entries: &[String], selected: O
         let text_color = if is_selected || hovered { theme::LABEL_EMPHASIS } else { theme::OPTIONS_LABEL };
         let shown_color = text_color.gamma_multiply(opacity);
         let galley = fitted_line(ui, entry, theme::interface(font_size), shown_color, item.width() - 2.0 * sizes.option_padding[0]);
-        // A cut entry is named in full under the pointer.
-        let response = if galley.elided { response.tooltip(entry) } else { response };
         ui.painter().galley(item.center() - galley.size() / 2.0, galley, shown_color);
         if response.clicked() && enabled && !is_selected {
             chosen = Some(index);
@@ -1460,10 +1404,7 @@ pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String
     let width = ui.available_width();
     let (shrunk, column) = header_column(ui, width);
     let header = if shrunk == Shrunk::Lot { None } else { Some(label) };
-    if header.is_none() {
-        note_cut_name(ui, label);
-    }
-    let chosen = dropdown_box(ui, id, header, column, 26.0, shown, entries, current, theme::interface(12.0));
+    let chosen = dropdown_box(ui, id, header, column, 26.0, shown, entries, theme::interface(12.0));
     chosen.filter(|name| name != current)
 }
 
@@ -1471,14 +1412,18 @@ pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String
 /// `LiteComboBox` (20): `entries` are (value, text) shown in `font`;
 /// returns the picked value.
 #[allow(clippy::too_many_arguments)]
-pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, height: f32, shown: &str, entries: &[(String, String)], current: &str, font: egui::FontId) -> Option<String> {
+pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, height: f32, shown: &str, entries: &[(String, String)], font: egui::FontId) -> Option<String> {
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let enabled = ui.is_enabled();
     let opacity = if enabled { 1.0 } else { 0.5 };
+    // The name wraps in its column; the row is as tall as it, or `height`.
+    let header_galley = header.map(|header| wrapped_header(ui, column.min(width), header, theme::LABEL_DEFAULT.gamma_multiply(opacity)));
+    let row_height = header_galley.as_ref().map_or(height, |galley| galley.size().y.max(height));
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, row_height), Sense::hover());
     let header_rect = Rect::from_min_size(rect.min, Vec2::new(column.min(width), rect.height()));
-    if let Some(header) = header {
-        header_label(ui, header_rect, header, theme::LABEL_DEFAULT.gamma_multiply(opacity));
+    if let Some(galley) = header_galley {
+        let position = Pos2::new(header_rect.right() - 8.0, header_rect.center().y - galley.size().y / 2.0);
+        ui.painter().with_clip_rect(header_rect.intersect(ui.clip_rect())).galley(position, galley, theme::LABEL_DEFAULT);
     }
     let box_rect = Rect::from_min_max(Pos2::new(header_rect.right(), rect.top()), rect.max);
     let response = ui.interact(box_rect, id.with("dropdown"), Sense::click());
@@ -1507,28 +1452,19 @@ pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, heig
     frame.stroke = Stroke::new(1.0, theme::POPUP_BORDER);
     frame.corner_radius = CornerRadius::same(3);
     frame.inner_margin = egui::Margin::symmetric(2, 0);
-    // The list is as wide as its widest entry (text 10 in, as much spare
-    // after it, inside the frame) and no narrower than the box. It keeps
-    // to the box's right edge and grows left, or to its left edge where
-    // only the right has the room; with too little room either way,
-    // entries are cut and named whole under the pointer.
+    // The list (`DropDownBorder`: at least the box's width) is as wide as
+    // its widest entry, 10 in (`ComboBoxItem` padding 10, 0, 0, 0), inside
+    // its padding and border. It opens under the box from its left edge,
+    // moved left as little as keeps it in the window.
     let frame_width = frame.total_margin().sum().x;
     let widest = entries.iter().map(|(_, text)| ui.painter().layout_no_wrap(text.clone(), font.clone(), Color32::WHITE).size().x).fold(0.0, f32::max);
-    let wanted = (widest + 2.0 * 10.0 + frame_width).ceil().max(box_rect.width());
     let screen = ui.ctx().content_rect();
-    let room_left = box_rect.right() - screen.left();
-    let room_right = screen.right() - box_rect.left();
-    let (align, flipped, room) = if wanted <= room_left || room_left >= room_right {
-        (egui::RectAlign::BOTTOM_END, egui::RectAlign::TOP_END, room_left)
-    } else {
-        (egui::RectAlign::BOTTOM_START, egui::RectAlign::TOP_START, room_right)
-    };
-    let popup_width = wanted.min(room).max(box_rect.width());
-    let alternatives = [flipped];
+    let popup_width = (widest + 10.0 + frame_width).ceil().max(box_rect.width()).min(screen.width());
+    let alternatives = [egui::RectAlign::TOP_START];
     let mut popup = egui::Popup::from_toggle_button_response(&response);
     popup = popup.frame(frame);
     popup = popup.gap(0.0);
-    popup = popup.align(align);
+    popup = popup.align(egui::RectAlign::BOTTOM_START);
     popup = popup.align_alternatives(&alternatives);
     popup = popup.width(popup_width);
     popup.show(|ui| {
@@ -1544,12 +1480,10 @@ pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, heig
                 if hovered {
                     ui.painter().rect_filled(item.shrink(2.0), 2.0, theme::ACCENT_MUTED_GRAY);
                 }
-                let is_current = value == current;
-                let color = if hovered || is_current { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
-                let room = item.width() - 10.0 - 4.0;
-                let galley = fitted_line(ui, text, font.clone(), color, room);
-                let item_response = if galley.elided { item_response.tooltip(text) } else { item_response };
-                ui.painter().galley(Pos2::new(item.left() + 10.0, item.center().y - galley.size().y / 2.0), galley, color);
+                // No mark for the current entry: only the hover's.
+                let color = if hovered { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
+                let galley = ui.painter().layout_no_wrap(text.clone(), font.clone(), color);
+                ui.painter().with_clip_rect(item.intersect(ui.clip_rect())).galley(Pos2::new(item.left() + 10.0, item.center().y - galley.size().y / 2.0), galley, color);
                 if item_response.clicked() {
                     chosen = Some(value.clone());
                     ui.close();
@@ -1721,23 +1655,23 @@ fn command_button(ui: &mut Ui, label: &str) -> Edit {
     if clicked { Edit::Command } else { Edit::None }
 }
 
-/// `ColorPickerEditor` (margin 20, 4, 4, 4): the name and the colour, a
-/// swatch opening the `ColorEditor`, which leaves the alpha as it is.
-fn color_editor(ui: &mut Ui, label: &str, value: &Value) -> Edit {
+/// `ColorPickerEditor` (margin 20, 4, 4, 4): a `ColorPicker` filled with
+/// the colour, the name centred in it, which opens the
+/// `MinimalColorPicker`; a right-click types a colour. The colour taken is
+/// the picker's (`ToColor`), the alpha left as it is.
+fn color_editor(ui: &mut Ui, id: Id, label: &str, value: &Value) -> Edit {
     let current = color_of(value);
     let linear = [current[0], current[1], current[2]];
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
-    let header = Rect::from_min_size(rect.min, Vec2::new(90.0 + 20.0, rect.height()));
-    header_label(ui, header, label, theme::LABEL_DEFAULT);
-    // A row narrower than the header leaves the swatch no width, not less.
-    let swatch_right = (rect.right() - 4.0).max(header.right());
-    let swatch = Rect::from_min_max(Pos2::new(header.right(), rect.top() + 4.0), Pos2::new(swatch_right, rect.bottom() - 4.0));
-    let mut swatch_ui = ui.new_child(egui::UiBuilder::new().max_rect(swatch));
-    let Some(colour) = colour_button(&mut swatch_ui, swatch.size(), linear.map(linear_to_srgb)) else {
+    let height = colour_button::button_height(ui) + 8.0;
+    let (row, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    // A row narrower than the margins leaves the button no width, not less.
+    let left = row.left() + 20.0;
+    let button = Rect::from_min_max(Pos2::new(left, row.top() + 4.0), Pos2::new((row.right() - 4.0).max(left), row.bottom() - 4.0));
+    let Some(colour) = colour_button(ui, id.with("colour"), button, linear.map(linear_to_srgb), label, Some(linear)) else {
         return Edit::None;
     };
-    let [red, green, blue] = picked_linear(linear, colour);
+    let [red, green, blue] = colour.map(srgb_to_linear);
     let mut updated = value.clone();
     set_color(&mut updated, [red, green, blue, current[3]]);
     Edit::Set(updated)
@@ -1759,22 +1693,21 @@ fn information(ui: &mut Ui, text: &str, margin: egui::Margin, format: Option<&[V
     });
 }
 
-/// `TextEditor` (margin 0, 2): the name in a dropdown's header column and
+/// `TextEditor` (margin 20, 2, 4, 2): the name in a 90 header column and
 /// the value in a text box that only shows it (`TextBox`: #101010 with a
-/// #363636 line, padding 4, corners 3), out to the row's right edge as a
-/// dropdown's box is. A click opens an `EditablePopup` over the value
-/// (monospace 16, as wide as the value, 96 at least), which closes as
-/// [`crate::ui::widgets::popup_outcome`] says.
+/// #363636 line, padding 4, corners 3). A click opens an `EditablePopup`
+/// over the value (monospace 16, as wide as the value, 96 at least),
+/// which closes as [`crate::ui::widgets::popup_outcome`] says.
 fn text_box(ui: &mut Ui, id: Id, label: &str, current: &str) -> Edit {
     let width = ui.available_width();
-    let (shrunk, column) = header_column(ui, width);
-    let (row, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
-    let control = row.shrink2(Vec2::new(0.0, 2.0));
+    // The name wraps in its column; the row is as tall as it, or 30.
+    let header_galley = wrapped_header(ui, 90.0, label, theme::LABEL_DEFAULT);
+    let (row, _) = ui.allocate_exact_size(Vec2::new(width, (header_galley.size().y + 4.0).max(30.0)), Sense::hover());
+    let control = Rect::from_min_max(row.min + Vec2::new(20.0, 2.0), row.max - Vec2::new(4.0, 2.0));
     let response = ui.interact(control, id.with("text-editor"), Sense::click());
-    let header = Rect::from_min_size(control.min, Vec2::new(column.min(width), control.height()));
-    if shrunk != Shrunk::Lot {
-        header_label(ui, header, label, theme::LABEL_DEFAULT);
-    }
+    let header = Rect::from_min_size(control.min, Vec2::new(90.0, control.height()));
+    let header_position = Pos2::new(header.right() - 8.0, header.center().y - header_galley.size().y / 2.0);
+    ui.painter().with_clip_rect(header.intersect(ui.clip_rect())).galley(header_position, header_galley, theme::LABEL_DEFAULT);
     let field = Rect::from_min_max(Pos2::new(header.right(), control.top()), control.max);
     let opacity = if ui.is_enabled() { 1.0 } else { 0.5 };
     ui.painter().rect_filled(field, 3.0, theme::TEXTBOX_BACKGROUND.gamma_multiply(opacity));
@@ -1789,12 +1722,12 @@ fn text_box(ui: &mut Ui, id: Id, label: &str, current: &str) -> Edit {
     if response.clicked() && ui.is_enabled() {
         slider_popups::open_typing(ui.ctx(), typing_id, current.to_string());
     }
-    // Over the value, as wide as it: both already in the editor's points;
-    // only the 96 at least is in the popup's own units.
+    // 90 in from the control, as wide as it less 90 (96 at least), in
+    // the popup's own units.
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
-        top_left: field.min,
-        width: BoxWidth::Fixed(field.width().max(96.0 * popup_scale)),
+        top_left: Pos2::new(control.left() + 90.0 * popup_scale, control.top()),
+        width: BoxWidth::Fixed(((control.width() - 90.0) * popup_scale).max(96.0 * popup_scale)),
         font: slider_popups::value_font(),
     };
     match slider_popups::typing_box(ui, typing_id, &typing_look) {
@@ -2071,7 +2004,7 @@ pub fn macro_variables(ui: &mut Ui, id: Id, variables: &Value, color: Color32) -
                 let entries: Vec<(String, String)> = choices.iter().enumerate().map(|(index, choice)| (index.to_string(), choice.clone())).collect();
                 let shown = choices.get(current).cloned().unwrap_or_default();
                 let column = theme::sizes(ui.ctx()).header_column;
-                let picked = dropdown_box(ui, variable_id, Some(label), column, 26.0, &shown, &entries, &current.to_string(), theme::interface(12.0));
+                let picked = dropdown_box(ui, variable_id, Some(label), column, 26.0, &shown, &entries, theme::interface(12.0));
                 picked.and_then(|index| index.parse::<i64>().ok()).filter(|index| *index as usize != current).map(|index| json!(index))
             }
             "Bool" => toggle(ui, variable_id, label, value.as_bool().unwrap_or(false), theme::ACCENT_PRIMARY).map(|flag| json!(flag)),
@@ -2128,87 +2061,71 @@ mod tests {
         assert_eq!(drawn, "Seed");
     }
 
-    /// One frame of `draw` in a row `width` wide, then the name it cut
-    /// short.
-    fn row_frame<R>(width: f32, mut draw: impl FnMut(&mut Ui) -> R) -> (R, Option<String>) {
+    /// One frame of `draw` in a row `width` wide: the shapes drawn.
+    fn row_shapes(width: f32, mut draw: impl FnMut(&mut Ui)) -> Vec<egui::epaint::ClippedShape> {
         let context = themed_context();
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
         let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-        let mut drawn = None;
-        let output = context.run_ui(input, |ui| {
+        let mut output = context.run_ui(input, |ui| {
             let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 30.0));
             let mut row = ui.new_child(egui::UiBuilder::new().max_rect(row));
-            drawn = Some(draw(&mut row));
+            draw(&mut row);
         });
+        let shapes = std::mem::take(&mut output.shapes);
         output.drop_without_applying_deltas();
-        (drawn.unwrap(), take_cut_name(&context))
+        shapes
     }
 
-    /// A toggle's header column in a row `width` wide, and the name it cut.
-    fn toggle_row(label: &str, width: f32) -> (f32, Option<String>) {
-        row_frame(width, |ui| {
-            toggle(ui, Id::new("toggle-test"), label, false, Color32::WHITE);
-            toggle_column(ui, label, width)
-        })
-    }
-
-    #[test]
-    fn a_long_toggle_name_takes_the_room_beside_the_switch() {
-        // Short names keep the column: 100 narrower than 300, 160 wider.
-        assert_eq!(toggle_row("Invert", 250.0), (100.0, None));
-        assert_eq!(toggle_row("Invert", 350.0), (160.0, None));
-        // A longer one moves the switch along instead of being cut.
-        let (column, cut) = toggle_row("Enforce Linear Gamma", 250.0);
-        assert!(column > 100.0 && column + 26.0 + 3.0 <= 250.0, "{column}");
-        assert_eq!(cut, None);
-        // With too little room left by the switch, it is cut and noted.
-        let (column, cut) = toggle_row("Enforce Linear Gamma", 120.0);
-        assert_eq!(column, 120.0 - 26.0 - 3.0);
-        assert_eq!(cut.as_deref(), Some("Enforce Linear Gamma"));
+    /// The texts in `shapes`, each with where it was drawn and its clip.
+    fn texts_of(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::epaint::TextShape, Rect)> {
+        let texts = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some((text.clone(), clipped.clip_rect)),
+            _ => None,
+        });
+        texts.collect()
     }
 
     #[test]
-    fn a_seed_with_no_room_is_trimmed_and_whole_in_its_tooltip() {
-        let context = themed_context();
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
-        let frame = |width: f32, events: Vec<egui::Event>| {
-            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-            let mut output = context.run_ui(input, |ui| {
-                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 30.0))));
-                seed_box(&mut row, Id::new("seed-test"), "Seed", 1999999);
+    fn a_toggle_keeps_its_column_and_cuts_a_long_name() {
+        // `Column.Size`, 100 narrower than 300; the name ends 8 short of
+        // the switch, cut with "…" when longer.
+        for (width, column) in [(250.0, 100.0), (350.0, 160.0)] {
+            let shapes = row_shapes(width, |ui| {
+                toggle(ui, Id::new("toggle-test"), "Enforce Linear Gamma", false, Color32::WHITE);
             });
-            let shapes = std::mem::take(&mut output.shapes);
-            output.drop_without_applying_deltas();
-            let texts = shapes.into_iter().filter_map(|clipped| match clipped.shape {
-                egui::Shape::Text(text) => Some((text, clipped.clip_rect)),
-                _ => None,
-            });
-            texts.collect::<Vec<_>>()
-        };
-        let seed_in = |shown: &[(egui::epaint::TextShape, Rect)]| shown.iter().find(|(text, _)| text.galley.text() == "1999999").cloned().expect("the seed is drawn");
-        // With room the seed shows whole; the name gives up what it does
-        // not need for it.
-        let (whole, _) = seed_in(&frame(200.0, Vec::new()));
-        assert!(!whole.galley.elided);
-        // Without, it ends in an ellipsis inside the button.
-        let (trimmed, clip) = seed_in(&frame(150.0, Vec::new()));
-        assert_eq!(trimmed.galley.rows[0].glyphs.last().map(|glyph| glyph.chr), Some('…'));
-        assert!(clip.contains_rect(trimmed.visual_bounding_rect()), "{:?} leaves {clip:?}", trimmed.visual_bounding_rect());
-        // The tooltip says what it is.
-        frame(150.0, vec![egui::Event::PointerMoved(trimmed.visual_bounding_rect().center())]);
-        let tooltip = "1999999\n\nNew seed";
-        let shows = (0..120).any(|_| frame(150.0, Vec::new()).iter().any(|(text, _)| text.galley.text() == tooltip));
-        assert!(shows, "no tooltip says {tooltip:?}");
+            let (name, _) = texts_of(&shapes).into_iter().find(|(text, _)| text.galley.text() == "Enforce Linear Gamma").expect("the name is drawn");
+            assert!(name.visual_bounding_rect().right() <= column - 8.0 + 0.5, "{width}: {:?}", name.visual_bounding_rect());
+            assert_eq!(name.galley.elided, width < 300.0, "{width}");
+        }
     }
 
     #[test]
-    fn dropdown_names_cut_or_left_out_are_noted() {
+    fn a_seed_too_long_for_its_button_is_cut_off_at_its_border() {
+        // The name's column stays 88; the button clips the seed (no "…").
+        let shapes = row_shapes(150.0, |ui| {
+            seed_box(ui, Id::new("seed-test"), "Seed", 1999999);
+        });
+        let (seed, clip) = texts_of(&shapes).into_iter().find(|(text, _)| text.galley.text() == "1999999").expect("the seed is drawn");
+        assert!(!seed.galley.elided);
+        assert!(seed.visual_bounding_rect().right() > clip.right(), "the seed fits: {:?} in {clip:?}", seed.visual_bounding_rect());
+        let (name, _) = texts_of(&shapes).into_iter().find(|(text, _)| text.galley.text() == "Seed").expect("the name is drawn");
+        assert!((name.visual_bounding_rect().right() - 80.0).abs() < 1.0, "{:?}", name.visual_bounding_rect());
+    }
+
+    #[test]
+    fn a_dropdown_name_wraps_in_its_column() {
         let entries = [("None".to_string(), "None".to_string())];
-        let dropdown = |label: &'static str, width: f32| row_frame(width, |ui| dropdown_row(ui, Id::new("dropdown-test"), label, &entries, "None", "None")).1;
-        assert_eq!(dropdown("Mode", 250.0), None);
-        assert_eq!(dropdown("Artifact Reduction", 250.0).as_deref(), Some("Artifact Reduction"));
+        let shapes = row_shapes(250.0, |ui| {
+            dropdown_row(ui, Id::new("dropdown-test"), "Artifact Reduction", &entries, "None", "None");
+        });
+        let (name, _) = texts_of(&shapes).into_iter().find(|(text, _)| text.galley.text() == "Artifact Reduction").expect("the name is drawn");
+        assert_eq!(name.galley.rows.len(), 2);
+        assert!(!name.galley.elided);
         // Narrower than 150 the name is not shown at all.
-        assert_eq!(dropdown("Mode", 120.0).as_deref(), Some("Mode"));
+        let shapes = row_shapes(120.0, |ui| {
+            dropdown_row(ui, Id::new("dropdown-test"), "Mode", &entries, "None", "None");
+        });
+        assert!(texts_of(&shapes).iter().all(|(text, _)| text.galley.text() != "Mode"));
     }
 
     /// A dropdown box at `boxed` in a screen `screen_width` wide, opened
@@ -2223,7 +2140,7 @@ mod tests {
             let input = egui::RawInput { screen_rect: Some(screen), time: Some(time.get()), events, ..Default::default() };
             let mut output = context.run_ui(input, |ui| {
                 let mut row = ui.new_child(egui::UiBuilder::new().max_rect(boxed));
-                dropdown_box(&mut row, Id::new("dropdown"), None, 0.0, boxed.height(), "Shown", entries, "", theme::interface(12.0));
+                dropdown_box(&mut row, Id::new("dropdown"), None, 0.0, boxed.height(), "Shown", entries, theme::interface(12.0));
             });
             let shapes = std::mem::take(&mut output.shapes);
             output.drop_without_applying_deltas();
@@ -2251,96 +2168,57 @@ mod tests {
     }
 
     #[test]
-    fn dropdown_lists_widen_to_their_entries() {
+    fn dropdown_lists_open_from_the_boxs_left_as_wide_as_their_entries() {
         // Export › Format: the .raw and .r16 pairs differ only at the end.
         let names = ["Pure Raw (.graw)", "Half Raw 16-bit (.raw)", "Half Raw 16-bit (.r16)", "Ushort Raw 16-bit (.raw)", "Ushort Raw 16-bit (.r16)", "OpenEXR 32-bit (.exr)"];
         let entries: Vec<(String, String)> = names.iter().map(|name| (name.to_string(), name.to_string())).collect();
-        // Every entry drawn once and whole, with no tooltip.
         let whole = |drawn: &[(String, String)]| drawn.len() == entries.len() && drawn.iter().all(|(text, shown)| text == shown);
 
-        // Room to the left: the list keeps to the box's right edge.
-        let boxed = Rect::from_min_size(Pos2::new(600.0, 100.0), Vec2::new(131.0, 26.0));
+        // Under the box from its left, wider than it.
+        let boxed = Rect::from_min_size(Pos2::new(300.0, 100.0), Vec2::new(131.0, 26.0));
         let (popup, drawn) = opened_dropdown(800.0, boxed, &entries);
-        assert!(popup.width() > boxed.width() + 10.0, "{popup:?}");
-        assert!((popup.right() - boxed.right()).abs() < 1.0, "{popup:?}");
-        assert!(whole(&drawn), "{drawn:?}");
-
-        // Room only to the right: it keeps to the box's left edge.
-        let boxed = Rect::from_min_size(Pos2::new(10.0, 100.0), Vec2::new(131.0, 26.0));
-        let (popup, drawn) = opened_dropdown(400.0, boxed, &entries);
         assert!(popup.width() > boxed.width() + 10.0, "{popup:?}");
         assert!((popup.left() - boxed.left()).abs() < 1.0, "{popup:?}");
         assert!(whole(&drawn), "{drawn:?}");
 
-        // Too little room either way: it takes what there is to the left,
-        // cuts the entries short and names the hovered one whole.
-        let boxed = Rect::from_min_size(Pos2::new(10.0, 100.0), Vec2::new(80.0, 26.0));
-        let (popup, drawn) = opened_dropdown(100.0, boxed, &entries);
-        assert!(popup.left().abs() < 1.0 && (popup.right() - boxed.right()).abs() < 1.0, "{popup:?}");
-        assert!(drawn.iter().any(|(_, shown)| shown.ends_with('…')), "{drawn:?}");
-        let first = &entries[0].1;
-        assert_eq!(drawn.iter().filter(|(text, _)| text == first).count(), 2, "{drawn:?}");
-        assert!(drawn.iter().any(|(text, shown)| text == first && shown == first), "{drawn:?}");
+        // Short of room on the right: moved left into the window.
+        let boxed = Rect::from_min_size(Pos2::new(700.0, 100.0), Vec2::new(90.0, 26.0));
+        let (popup, drawn) = opened_dropdown(800.0, boxed, &entries);
+        assert!(popup.right() <= 800.0 + 0.5 && popup.left() < boxed.left(), "{popup:?}");
+        assert!(whole(&drawn), "{drawn:?}");
     }
 
     #[test]
-    fn text_boxes_keep_to_the_dropdown_columns() {
-        // Each width shrinks the header column differently (none, a
-        // little, a lot), and each size theme has its own column.
-        for compact in [false, true] {
-            let context = themed_context();
-            theme::set_settings(&context, theme::InterfaceSettings { compact, ..Default::default() });
-            for width in [120.0, 200.0, 299.0, 300.0, 600.0] {
-                let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0));
-                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-                let entries = [("Value".to_string(), "Value".to_string())];
-                let mut output = context.run_ui(input, |ui| {
-                    let mut dropdown = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 26.0))));
-                    dropdown_row(&mut dropdown, Id::new("dropdown"), "Edit Mode", &entries, "Value", "Value");
-                    let mut text = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(0.0, 50.0), Vec2::new(width, 30.0))));
-                    text_box(&mut text, Id::new("text"), "Variable Name", "x");
-                });
-                let shapes = std::mem::take(&mut output.shapes);
-                output.drop_without_applying_deltas();
-                let filled = |fill: Color32| {
-                    let rect = shapes.iter().find_map(|clipped| match &clipped.shape {
-                        egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect),
-                        _ => None,
-                    });
-                    rect.expect("the box is drawn")
-                };
-                let dropdown = filled(theme::DROPDOWN_BACKGROUND);
-                let field = filled(theme::TEXTBOX_BACKGROUND);
-                assert_eq!((field.left(), field.right()), (dropdown.left(), dropdown.right()), "{width} wide, compact: {compact}");
-                let name_end = |name: &str| {
-                    shapes.iter().find_map(|clipped| match &clipped.shape {
-                        egui::Shape::Text(text) if text.galley.text() == name => Some(text.pos.x + text.galley.size().x),
-                        _ => None,
-                    })
-                };
-                match (name_end("Edit Mode"), name_end("Variable Name")) {
-                    (Some(dropdown_end), Some(text_end)) => assert!((dropdown_end - text_end).abs() < 0.5, "{width} wide, compact: {compact}: the names end at {dropdown_end} and {text_end}"),
-                    (None, None) => assert!(width < 150.0),
-                    shown => panic!("{width} wide, compact: {compact}: only one name shows: {shown:?}"),
-                }
-            }
+    fn a_text_box_keeps_its_margin_and_its_column_of_90() {
+        // `TextEditor`: margin 20, 2, 4, 2 and a header column of 90,
+        // whatever the width.
+        for width in [120.0, 200.0, 299.0, 600.0] {
+            let shapes = row_shapes(width, |ui| {
+                text_box(ui, Id::new("text"), "Variable Name", "x");
+            });
+            let field = shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.fill == theme::TEXTBOX_BACKGROUND => Some(rect.rect),
+                _ => None,
+            });
+            let field = field.expect("the box is drawn");
+            assert_eq!((field.left(), field.right()), (20.0 + 90.0, width - 4.0), "{width}");
         }
     }
 
     #[test]
-    fn colour_rows_narrower_than_their_header_lay_out() {
-        // The header and the swatch's margin take 114: a narrower row
-        // leaves the swatch no width, which egui would refuse if negative.
+    fn colour_rows_narrower_than_their_margins_lay_out() {
+        // The button's margins take 24: a narrower row leaves it no width,
+        // which egui would refuse if negative.
         let context = themed_context();
         let value = json!({"R": 1.0, "G": 1.0, "B": 1.0, "A": 1.0});
-        for width in [0.0, 60.0, 113.0, 114.0, 200.0] {
+        for width in [0.0, 10.0, 23.0, 24.0, 200.0] {
             let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
             let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
             let mut edit = Edit::None;
             let output = context.run_ui(input, |ui| {
-                let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 30.0));
+                let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 60.0));
                 let mut row = ui.new_child(egui::UiBuilder::new().max_rect(row));
-                edit = color_editor(&mut row, "Color", &value);
+                edit = color_editor(&mut row, Id::new("colour"), "Color", &value);
             });
             output.drop_without_applying_deltas();
             assert!(matches!(edit, Edit::None));
@@ -2348,18 +2226,18 @@ mod tests {
     }
 
     #[test]
-    fn colour_properties_pick_in_the_colour_editor_and_keep_their_alpha() {
+    fn colour_properties_pick_in_the_minimal_picker_and_keep_their_alpha() {
         let context = themed_context();
         // Constant "White" in Alpine Valley, half transparent.
         let value = json!({"R": 0.8879231, "G": 0.9046612, "B": 0.9301109, "A": 0.5});
-        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 30.0));
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 60.0));
         let frame = |events: Vec<egui::Event>| {
-            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0));
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 600.0));
             let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
             let mut edit = Edit::None;
             let output = context.run_ui(input, |ui| {
                 let mut row = ui.new_child(egui::UiBuilder::new().max_rect(row));
-                edit = color_editor(&mut row, "Color", &value);
+                edit = color_editor(&mut row, Id::new("colour"), "Color", &value);
             });
             output.drop_without_applying_deltas();
             edit
@@ -2368,19 +2246,25 @@ mod tests {
             let button = |pressed: bool| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
             [vec![egui::Event::PointerMoved(position)], vec![button(true)], vec![button(false)]].into_iter().map(&frame).collect::<Vec<_>>()
         };
-        // The swatch, right of the 110 header.
-        assert!(click(Pos2::new(250.0, 15.0)).iter().all(|edit| matches!(edit, Edit::None)));
+        // The button: the whole row past its margin of 20.
+        assert!(click(Pos2::new(30.0, 20.0)).iter().all(|edit| matches!(edit, Edit::None)));
         frame(Vec::new());
-        let popup = context.memory(|memory| memory.areas().top_layer_id(egui::Order::Foreground).and_then(|layer| memory.area_rect(layer.id)));
-        let popup = popup.expect("the swatch opens the colour editor");
-        // Well inside the spectrum, which starts at the popup's margin.
+        let popup = context.memory(|memory| memory.area_rect(Id::new("colour").with("colour").with("picker")));
+        let popup = popup.expect("the button opens the picker");
+        // As wide as the button (400 less its margins of 20 and 4).
+        assert!((popup.width() - 376.0).abs() < 0.5 && (popup.left() - 20.0).abs() < 0.5, "{popup:?}");
+        // Well inside the square, which starts at the picker's margin.
         let edits = click(popup.min + Vec2::splat(60.0));
         let Some(Edit::Set(updated)) = edits.into_iter().find(|edit| matches!(edit, Edit::Set(_))) else {
-            panic!("a click on the spectrum sets the colour");
+            panic!("a click on the square sets the colour");
         };
         assert_eq!(updated["A"].as_f64(), Some(0.5));
         let picked = color_of(&updated);
         assert!(picked[..3].iter().zip(color_of(&value)).all(|(new, old)| (new - old).abs() > 0.01), "{updated}");
+        // Kept as the picker gives it (`ToColor`): each float an sRGB byte's.
+        for component in &picked[..3] {
+            assert_eq!(srgb_to_linear(linear_to_srgb(*component)), *component);
+        }
     }
 
     #[test]
@@ -2522,30 +2406,6 @@ mod tests {
         file_frame(&context, "/old.png", vec![egui::Event::PointerMoved(below)]);
         let edit = file_frame_dropping(&context, "/old.png", Vec::new(), vec!["/maps/height.psd"]);
         assert!(matches!(edit, Edit::None));
-    }
-
-    #[test]
-    fn a_cut_option_is_named_in_full_on_hover() {
-        let context = themed_context();
-        let entries = vec!["Constant".to_string(), "Custom".to_string()];
-        let list = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(60.0, 40.0));
-        let frame = |events: Vec<egui::Event>| {
-            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
-            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-            let mut output = context.run_ui(input, |ui| {
-                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(list));
-                option_list(&mut row, Id::new("options-test"), &entries, Some(1), 2, 11.0);
-            });
-            let shapes = std::mem::take(&mut output.shapes);
-            output.drop_without_applying_deltas();
-            shapes
-        };
-        let whole = |shapes: &[egui::epaint::ClippedShape]| {
-            shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == "Constant" && !text.galley.elided))
-        };
-        assert!(!whole(&frame(Vec::new())), "Constant is cut in its cell");
-        frame(vec![egui::Event::PointerMoved(list.left_center() + Vec2::new(10.0, 0.0))]);
-        assert!((0..120).any(|_| whole(&frame(Vec::new()))), "Constant shows in full on hover");
     }
 
     #[test]
@@ -2700,14 +2560,14 @@ mod tests {
         // Up 10, the eighth button: a tenth of the range, and the box
         // follows.
         let bar_left = SLIDER_ROW.left() + 20.0 + 3.5 - 2.0;
-        let (button, _) = slider_popups::nudge_widths(SLIDER_ROW.right() - 3.5 + 2.0 - bar_left, 1.0);
+        let (button, box_width) = slider_popups::nudge_widths(SLIDER_ROW.width() - 20.0, 1.0);
         let up_ten = Pos2::new(bar_left + 7.5 * button, SLIDER_ROW.top() + 1.0 - 2.0 + 13.0);
         let changes = left_click(&context, 0.25, &spec, up_ten);
         let changed = changes.into_iter().flatten().next().expect("Up 10 changes the value");
         assert!((changed - 0.35).abs() < 1e-6, "{changed}");
         assert_eq!(slider_popups::nudge_text(&context, nudge_id).as_deref(), Some("0.3500"));
         // The box takes a formula with Enter.
-        let field = Pos2::new(bar_left + 9.0 * button + 6.0 + 20.0, up_ten.y);
+        let field = Pos2::new(bar_left + 9.0 * button + 6.0 + box_width / 2.0, up_ten.y);
         left_click(&context, 0.35, &spec, field);
         slider_frame(&context, 0.35, &spec, vec![egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }]);
         slider_frame(&context, 0.35, &spec, vec![egui::Event::Text("1/8".to_string())]);
@@ -2753,43 +2613,50 @@ mod tests {
     }
 
     #[test]
-    fn the_nudge_bar_keeps_to_its_slider_and_shows_the_value_in_its_box() {
+    fn the_nudge_bar_is_as_wide_as_its_slider_which_keeps_its_value() {
         let spec = SliderSpec::linear(0.0, 1.0);
         let draw = |ui: &mut Ui| {
             slider(ui, slider_id(), "Scale", 0.25, &spec, Color32::WHITE);
         };
-        assert!(painted_texts(&themed_context(), draw).iter().any(|(text, _)| text == "0.25"));
         for scale in [0.8, 1.0, 1.2] {
             let (bar, texts) = nudge_shown(scale, 0.3, draw);
-            // Areas sit on whole pixels: within one of the slider's bar,
-            // short of the parameter menu past the row.
+            // 2 (at 100%) before the slider's bar, as wide as the control;
+            // areas sit on whole pixels.
             let pixel = 1.0 / scale;
             let content = Rect::from_min_max(Pos2::new(SLIDER_ROW.left() + 20.0, SLIDER_ROW.top()), SLIDER_ROW.max);
-            assert!(bar.left() >= content.left() - pixel && bar.right() <= content.right() + pixel, "at {scale}: {bar:?} leaves {content:?}");
-            let (_, boxed) = texts.iter().find(|(text, _)| text == "0.2500").unwrap_or_else(|| panic!("at {scale}: the box shows"));
-            assert!(bar.contains_rect(*boxed), "at {scale}: the box's text {boxed:?} leaves {bar:?}");
-            // The slider's own value hides under it.
-            assert!(!texts.iter().any(|(text, _)| text == "0.25"), "at {scale}: the value shows under the bar");
+            let left = content.left() + 3.5 - 2.0 / scale;
+            assert!((bar.left() - left).abs() <= pixel, "at {scale}: {bar:?}");
+            assert!((bar.width() - content.width()).abs() <= pixel, "at {scale}: {bar:?} for {content:?}");
+            // The value stays; the name hides.
+            assert!(texts.iter().any(|(text, _)| text == "0.25"), "at {scale}: the value hides");
+            assert!(!texts.iter().any(|(text, _)| text == "Scale"), "at {scale}: the name shows");
         }
     }
 
     #[test]
-    fn a_range_nudge_bar_keeps_to_its_slider_and_hides_both_values() {
+    fn a_narrow_nudge_bar_squeezes_its_buttons_before_its_box_shows() {
+        // Nine 28-wide buttons and the gap of 6: 258 to show them whole.
+        assert_eq!(slider_popups::nudge_widths(300.0, 1.0), (28.0, 42.0));
+        assert_eq!(slider_popups::nudge_widths(258.0, 1.0), (28.0, 0.0));
+        assert_eq!(slider_popups::nudge_widths(213.0, 1.0), (23.0, 0.0));
+        // In the popup's own units at 120%.
+        let (cell, rest) = slider_popups::nudge_widths(300.0, 1.0 / 1.2);
+        assert!((cell - 28.0 / 1.2).abs() < 1e-4 && (rest - (300.0 - 258.0 / 1.2)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_range_nudge_bar_is_as_wide_as_its_slider_which_keeps_its_values() {
         let spec = RangeSpec::linear(0.0, 1.0);
         let draw = |ui: &mut Ui| {
             range_slider(ui, slider_id(), "Range", 0.2, 0.6, &spec, Color32::WHITE);
         };
-        let closed = painted_texts(&themed_context(), draw);
-        assert!(closed.iter().any(|(text, _)| text == "0.20") && closed.iter().any(|(text, _)| text == "0.60"));
         for scale in [0.8, 1.0, 1.2] {
             // The low end's bar: its box on the left.
             let (bar, texts) = nudge_shown(scale, 0.3, draw);
             let pixel = 1.0 / scale;
             let content = Rect::from_min_max(Pos2::new(SLIDER_ROW.left() + 20.0, SLIDER_ROW.top()), SLIDER_ROW.max);
-            assert!(bar.left() >= content.left() - pixel && bar.right() <= content.right() + pixel, "at {scale}: {bar:?} leaves {content:?}");
-            let (_, boxed) = texts.iter().find(|(text, _)| text == "0.2000").unwrap_or_else(|| panic!("at {scale}: the box shows"));
-            assert!(bar.contains_rect(*boxed) && boxed.center().x < bar.center().x, "at {scale}: the box's text {boxed:?} in {bar:?}");
-            assert!(!texts.iter().any(|(text, _)| text == "0.20" || text == "0.60"), "at {scale}: a value shows under the bar");
+            assert!((bar.width() - content.width()).abs() <= pixel, "at {scale}: {bar:?} for {content:?}");
+            assert!(texts.iter().any(|(text, _)| text == "0.20") && texts.iter().any(|(text, _)| text == "0.60"), "at {scale}: a value hides");
         }
     }
 
@@ -2816,13 +2683,6 @@ mod tests {
         Id::new("text-test")
     }
 
-    /// The row's value: past the header column to the row's end, 2 in
-    /// from its top and bottom.
-    fn text_field(context: &egui::Context) -> Rect {
-        let column = theme::sizes(context).header_column;
-        Rect::from_min_max(Pos2::new(TEXT_ROW.left() + column, TEXT_ROW.top() + 2.0), TEXT_ROW.max - Vec2::new(0.0, 2.0))
-    }
-
     /// One frame of a text property holding `text`, with these events.
     fn text_frame(context: &egui::Context, text: &str, events: Vec<egui::Event>) {
         let output = context.run_ui(frame_input(events, egui::Modifiers::NONE), |ui| {
@@ -2833,12 +2693,14 @@ mod tests {
     }
 
     #[test]
-    fn the_text_popup_covers_its_value_at_any_interface_scale() {
+    fn the_text_popup_sits_90_in_from_the_control_in_its_own_units() {
+        // `HorizontalOffset 90`, `Width ActualWidth - 90` (96 at least), at
+        // 100% whatever the interface scale.
         for scale in [1.0, 1.2, 1.5] {
             let context = themed_context();
             context.set_zoom_factor(scale);
-            let field = text_field(&context);
-            let on_value = field.center();
+            let control = Rect::from_min_max(TEXT_ROW.min + Vec2::new(20.0, 2.0), TEXT_ROW.max - Vec2::new(4.0, 2.0));
+            let on_value = Pos2::new(control.left() + 150.0, control.center().y);
             let events = [egui::Event::PointerMoved(on_value), press(on_value, egui::PointerButton::Primary, true), press(on_value, egui::PointerButton::Primary, false)];
             for event in events {
                 text_frame(&context, "height", vec![event]);
@@ -2847,9 +2709,10 @@ mod tests {
             text_frame(&context, "height", Vec::new());
             let area = text_id().with("text-typing").with("area");
             let shown = context.memory(|memory| memory.area_rect(area)).expect("the popup shows");
-            // Areas sit on whole pixels: within one of the value.
-            let off = (shown.left() - field.left()).abs().max((shown.right() - field.right()).abs()).max((shown.top() - field.top()).abs());
-            assert!(off < 1.0 / scale, "at {scale}: {shown:?} over {field:?}");
+            let left = control.left() + 90.0 / scale;
+            let width = ((control.width() - 90.0) / scale).max(96.0 / scale);
+            assert!((shown.left() - left).abs() < 1.0 / scale, "at {scale}: {shown:?}");
+            assert!((shown.width() - width).abs() < 1.0 / scale, "at {scale}: {shown:?}");
         }
     }
 

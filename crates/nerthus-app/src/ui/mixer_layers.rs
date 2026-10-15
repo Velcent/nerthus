@@ -16,8 +16,10 @@ use serde_json::{json, Value};
 
 use crate::icons;
 use crate::theme;
-use crate::ui::editors::{dropdown_box, fitted_line, option_list, range_slider, slider, Edit, RangeSpec, SliderSpec};
-use crate::ui::widgets::Tooltips;
+use crate::ui::colour_button::colour_button;
+use crate::ui::colour_picker::{linear_to_srgb, srgb_to_linear};
+use crate::ui::editors::{dropdown_box, option_list, range_slider, slider, Edit, RangeSpec, SliderSpec};
+use crate::ui::graph_canvas::elided_galley;
 
 /// `MaskSource` as the source list names it.
 const SOURCES: [(&str, &str); 5] = [("Constant", "None"), ("Height", "Height"), ("Slope", "Slope"), ("Both", "Mixed"), ("Custom", "Custom")];
@@ -75,13 +77,13 @@ fn layer_palette(node_id: i32) -> [Color32; 15] {
 /// The layer's own colour, or `None` when it is black (unset).
 fn own_color(layer: &Value) -> Option<Color32> {
     let color = layer.get("Color");
-    let channel = |name: &str| color.and_then(|color| color.get(name)).and_then(Value::as_f64).unwrap_or(0.0);
+    let channel = |name: &str| color.and_then(|color| color.get(name)).and_then(Value::as_f64).unwrap_or(0.0) as f32;
     let (red, green, blue) = (channel("R"), channel("G"), channel("B"));
     if red == 0.0 && green == 0.0 && blue == 0.0 {
         return None;
     }
-    let byte = |component: f64| (component.clamp(0.0, 1.0) * 255.0).round() as u8;
-    Some(Color32::from_rgb(byte(red), byte(green), byte(blue)))
+    // scRGB, as `ToWPFColor` shows it.
+    Some(Color32::from_rgb(linear_to_srgb(red), linear_to_srgb(green), linear_to_srgb(blue)))
 }
 
 /// The layers whose ports the node has (`Layer1`… while `LayerN` exists).
@@ -110,17 +112,13 @@ fn source_name(node: &NodeData, nodes: &IndexMap<i32, NodeData>, port: &str, fal
 /// `LayerListItem`'s height: the 32 preview, padding 4 and the border.
 const LAYER_ROW_HEIGHT: f32 = 32.0 + 8.0 + 2.0;
 
-/// Where a `LayerListItem`'s parts go in its row.
+/// Where a `LayerListItem`'s parts go in its row (a `DockPanel`).
 struct LayerRowLayout {
     eye: Rect,
     preview: Rect,
-    /// Between the preview and the simplify eye: the source's and the
-    /// layer's names side by side.
+    /// What the preview and the simplify eye leave between them, past
+    /// their margins: the source's and the layer's names side by side.
     names: Rect,
-    /// The names one above the other: 8 clear of the preview and into
-    /// the simplify eye's padding, so "Layer 15" fits where the property
-    /// area is narrowest.
-    stacked_names: Rect,
     simplify: Rect,
     swatch: Rect,
 }
@@ -133,24 +131,18 @@ impl LayerRowLayout {
         let eye = Rect::from_min_size(Pos2::new(content.left() + 8.0, content.center().y - 8.0), Vec2::splat(16.0));
         let preview = Rect::from_min_size(Pos2::new(eye.right() + 8.0 + 8.0, content.center().y - 16.0), Vec2::splat(32.0));
         // From the right: the swatch (margin 8, 2, 0, 2) and the simplify
-        // eye (`IconX-Toggle-Colored`, margin 8, 0, 0, 0).
+        // eye (`IconX-Toggle-Colored`, padding 8, margin 8, 0, 0, 0).
         let swatch = Rect::from_min_size(Pos2::new(content.right() - 18.0, content.top() + 2.0), Vec2::new(18.0, content.height() - 4.0));
         let simplify = Rect::from_min_size(Pos2::new(swatch.left() - 8.0 - 8.0 - 16.0, content.center().y - 8.0), Vec2::splat(16.0));
-        let between = |left: f32, right: f32| Rect::from_min_max(Pos2::new(left, content.top()), Pos2::new(right.max(left), content.bottom()));
-        let names = between(preview.right() + 8.0 + 4.0, simplify.left() - 8.0 - 4.0);
-        let stacked_names = between(preview.right() + 8.0, simplify.left() - 4.0);
-        LayerRowLayout { eye, preview, names, stacked_names, simplify, swatch }
+        let names_left = preview.right() + 8.0;
+        let names_right = (simplify.left() - 8.0 - 8.0).max(names_left);
+        let names = Rect::from_min_max(Pos2::new(names_left, content.top()), Pos2::new(names_right, content.bottom()));
+        LayerRowLayout { eye, preview, names, simplify, swatch }
     }
 }
 
-/// The gap between the source's name and the layer's beside it.
-const NAME_GAP: f32 = 4.0;
-
-/// Whether the source's name and the layer's fit side by side in `room`.
-fn names_fit(ui: &Ui, label: &str, key: &str, room: f32) -> bool {
-    let width = |text: String| ui.painter().layout_no_wrap(text, theme::monospace(12.0), Color32::WHITE).size().x;
-    width(label.to_string()) + NAME_GAP + width(humanize_title(key)) <= room
-}
+/// The margin round each of a layer row's names.
+const NAME_MARGIN: f32 = 4.0;
 
 /// A `MixerListBoxItem` (`ModifierBorder`: cladding, padding 16, 4; the
 /// first and last rounded; `#343a40` when chosen; a pale outline under the
@@ -205,18 +197,13 @@ pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData
         // Black layers all take the colour at the layer count in the list.
         let list_fallback = palette[list.len() % palette.len()];
         let labels: Vec<String> = list.iter().map(|layer| source_name(node, nodes, &layer.key, &layer.key)).collect();
-        // Where any row's names would not fit side by side, every row
-        // puts them one above the other.
-        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(ui.available_width(), LAYER_ROW_HEIGHT));
-        let room = LayerRowLayout::of(row).names.width();
-        let stacked = !list.iter().zip(&labels).all(|(layer, label)| names_fit(ui, label, &layer.key, room));
         for (layer, label) in list.iter().zip(&labels) {
             let first = row_index == 0;
             let last = row_index + 1 == row_count;
             row_index += 1;
             let is_selected = selected.as_deref() == Some(layer.key.as_str());
             let color = own_color(&layer.value).unwrap_or(list_fallback);
-            if let Some(edit) = layer_row(ui, id, layer, label, color, first, last, is_selected, stacked, &mut selected) {
+            if let Some(edit) = layer_row(ui, id, layer, label, color, first, last, is_selected, &mut selected) {
                 edits.push((layer.key.clone(), edit));
             }
         }
@@ -238,11 +225,9 @@ pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData
 
 /// A `LayerListItem`: the visibility eye, a 32 preview, the source's name
 /// in the layer's colour, the layer's name, the simplify eye and the
-/// colour swatch (18 wide). `stacked`, the source's name goes above the
-/// layer's, each cut with "…" to the room, and the row's tooltip names
-/// them in full when either is cut.
+/// colour swatch (18 wide).
 #[allow(clippy::too_many_arguments)]
-fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, first: bool, last: bool, is_selected: bool, stacked: bool, selected: &mut Option<String>) -> Option<Edit> {
+fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, first: bool, last: bool, is_selected: bool, selected: &mut Option<String>) -> Option<Edit> {
     let (row, response) = list_item(ui, LAYER_ROW_HEIGHT, first, last, is_selected, Sense::click());
     let layout = LayerRowLayout::of(row);
     let mut edit = None;
@@ -260,7 +245,15 @@ fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, fi
     ui.painter().rect_filled(layout.preview, 0.0, color);
     ui.painter().rect_stroke(layout.preview, 0.0, Stroke::new(1.0, theme::ACCENT_MUTED_GRAY), StrokeKind::Inside);
 
-    ui.painter().rect_filled(layout.swatch, 2.0, color);
+    // `color`: a `ColorPicker` opening the `MinimalColorPicker`; the colour
+    // picked is the layer's (`ToColor`).
+    let swatch_id = id.with(("colour", &layer.key));
+    if let Some(picked) = colour_button(ui, swatch_id, layout.swatch, [color.r(), color.g(), color.b()], "", None) {
+        let [red, green, blue] = picked.map(srgb_to_linear);
+        let mut changed = layer.value.clone();
+        changed["Color"] = json!({"R": f32_value(red), "G": f32_value(green), "B": f32_value(blue)});
+        edit = Some(Edit::Set(changed));
+    }
     let simplified = layer.value.get("IsSimplified").and_then(Value::as_bool).unwrap_or(false);
     let simplify = ui.interact(layout.simplify.expand(8.0), id.with(("simplify", &layer.key)), Sense::click());
     let simplify_color = if simplified { theme::ACCENT_MUTED_MAGENTA } else { theme::ICON_DARKISH };
@@ -271,29 +264,24 @@ fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, fi
         edit = Some(Edit::Set(changed));
     }
 
-    // The names, kept to their room.
-    let names = if stacked { layout.stacked_names } else { layout.names };
-    let painter = ui.painter_at(names);
+    // The names, docked: the layer's on the right, whole as far as there
+    // is room, and the source's in what is left, cut with "…"
+    // (`CharacterEllipsis`) and to nothing when no room is left.
+    let names = layout.names;
     let font = theme::monospace(12.0);
-    let layer_name = humanize_title(&layer.key);
-    let mut cut = false;
-    if stacked {
-        let source_galley = fitted_line(ui, label, font.clone(), color, names.width());
-        let layer_galley = fitted_line(ui, &layer_name, font, theme::LABEL_DEFAULT, names.width());
-        cut = source_galley.elided || layer_galley.elided;
-        let top = names.center().y - (source_galley.size().y + layer_galley.size().y) / 2.0;
-        let layer_top = top + source_galley.size().y;
-        painter.galley(Pos2::new(names.left(), top), source_galley, color);
-        painter.galley(Pos2::new(names.left(), layer_top), layer_galley, theme::LABEL_DEFAULT);
-    } else {
-        // The source's name from the left, the layer's from the right.
-        let layer_galley = ui.painter().layout_no_wrap(layer_name.clone(), font.clone(), theme::LABEL_DEFAULT);
-        let layer_position = Pos2::new(names.right() - layer_galley.size().x, names.center().y - layer_galley.size().y / 2.0);
-        painter.galley(layer_position, layer_galley, theme::LABEL_DEFAULT);
-        let source_galley = ui.painter().layout_no_wrap(label.to_string(), font, color);
-        painter.galley(Pos2::new(names.left(), names.center().y - source_galley.size().y / 2.0), source_galley, color);
+    let layer_galley = ui.painter().layout_no_wrap(humanize_title(&layer.key), font.clone(), theme::LABEL_DEFAULT);
+    let layer_width = (layer_galley.size().x + 2.0 * NAME_MARGIN).min(names.width());
+    let layer_slot = Rect::from_min_max(Pos2::new(names.right() - layer_width, names.top()), names.max);
+    let label_slot = Rect::from_min_max(names.min, Pos2::new(layer_slot.left(), names.bottom()));
+    let layer_text = layer_slot.shrink2(Vec2::new(NAME_MARGIN, 0.0));
+    let layer_position = Pos2::new(layer_text.right() - layer_galley.size().x, names.center().y - layer_galley.size().y / 2.0);
+    ui.painter_at(layer_text).galley(layer_position, layer_galley, theme::LABEL_DEFAULT);
+    let label_text = label_slot.shrink2(Vec2::new(NAME_MARGIN, 0.0));
+    if label_text.width() > 0.0 {
+        let label_galley = elided_galley(ui.painter(), label, font, color, label_text.width());
+        let label_position = Pos2::new(label_text.left(), names.center().y - label_galley.size().y / 2.0);
+        ui.painter_at(label_text).galley(label_position, label_galley, color);
     }
-    let response = if cut { response.tooltip(format!("{label}\n{layer_name}")) } else { response };
 
     if response.clicked() {
         *selected = Some(layer.key.clone());
@@ -301,43 +289,24 @@ fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, fi
     edit
 }
 
-/// `text` wrapped to `width` in at most `rows` lines, the last cut with
-/// "…".
-fn wrapped(ui: &Ui, text: String, font: egui::FontId, color: Color32, width: f32, rows: usize) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple(text, font, color, width.max(0.0));
-    job.wrap.max_rows = rows;
-    job.wrap.overflow_character = Some('…');
-    ui.painter().layout_job(job)
-}
-
 /// The ground layer (disabled): the In map's 48 preview and "(Ground
-/// Layer)" with its note, both wrapped to the row (taller as they need)
-/// and named in full by its tooltip when cut.
+/// Layer)" with its note, a line each, cut off at the row's padding
+/// (laid out in a sideways `StackPanel`, they never wrap).
 fn ground_layer(ui: &mut Ui, node: &NodeData, nodes: &IndexMap<i32, NodeData>, first: bool) {
-    // The text: 8 right of the preview, as far as the row's padding.
-    let text_width = ui.available_width() - 16.0 - 48.0 - 8.0 - 16.0;
-    let source = source_name(node, nodes, "In", "");
-    let title_text = format!("{source} (Ground Layer)");
-    let note_text = "Each layer is added above this, bottom to top.";
-    let title = wrapped(ui, title_text.clone(), theme::semibold(12.0), theme::LABEL_DEFAULT, text_width, 2);
-    let note = wrapped(ui, note_text.to_string(), theme::interface(10.0), theme::ICON_DEFAULT, text_width, 3);
-    let cut = title.elided || note.elided;
-    let text_height = title.size().y + note.size().y;
-    let height = (48.0_f32 + 16.0 + 8.0).max(4.0 + 8.0 + 8.0 + text_height + 8.0);
-    let (row, response) = list_item(ui, height, first, true, false, Sense::hover());
+    let (row, _) = list_item(ui, 48.0 + 16.0 + 8.0, first, true, false, Sense::hover());
     let content = row.shrink2(Vec2::new(16.0, 4.0));
     let preview = Rect::from_min_size(Pos2::new(content.left(), content.top() + 8.0), Vec2::splat(48.0));
     ui.painter().rect_filled(preview, 0.0, theme::PANEL_BACKGROUND);
     ui.painter().rect_stroke(preview, 0.0, Stroke::new(1.0, theme::ACCENT_MUTED_GRAY), StrokeKind::Inside);
+    let source = source_name(node, nodes, "In", "");
+    let title = ui.painter().layout_no_wrap(format!("{source} (Ground Layer)"), theme::semibold(12.0), theme::LABEL_DEFAULT);
+    let note = ui.painter().layout_no_wrap("Each layer is added above this, bottom to top.".to_string(), theme::interface(10.0), theme::ICON_DEFAULT);
     let text_left = preview.right() + 8.0;
     let text_top = preview.top() + 8.0;
     let note_top = text_top + title.size().y;
-    let painter = ui.painter_at(Rect::from_min_max(Pos2::new(text_left, content.top()), content.max));
+    let painter = ui.painter_at(content);
     painter.galley(Pos2::new(text_left, text_top), title, theme::LABEL_DEFAULT);
     painter.galley(Pos2::new(text_left, note_top), note, theme::ICON_DEFAULT);
-    if cut {
-        response.tooltip(format!("{title_text}\n{note_text}"));
-    }
 }
 
 /// `LayerEditor` (margin 16; its stack 4 wider each side) for one layer;
@@ -358,21 +327,12 @@ fn layer_editor(ui: &mut Ui, id: Id, layer: &Value, label: &str, key: &str, colo
         let layer_position = Pos2::new(header.right() - 8.0 - layer_name.size().x, header.center().y - layer_name.size().y / 2.0);
         ui.painter().galley(layer_position, layer_name, theme::LABEL_DEFAULT);
 
-        // The mask source (`lstSource`: `ListBox-OptionsX` at 10), in one
-        // row; as `OptionsX` wraps, two columns narrower than 300 and one
-        // narrower than 200.
+        // The mask source (`lstSource`: `ListBox-OptionsX` at 10, its
+        // `UniformGrid` one row at any width).
         let source = layer.get("Mask").and_then(Value::as_str).unwrap_or("Height").to_string();
         let entries: Vec<String> = SOURCES.iter().map(|(_, text)| text.to_string()).collect();
         let current = SOURCES.iter().position(|(member, _)| *member == source);
-        let width = ui.available_width();
-        let columns = if width < 200.0 {
-            1
-        } else if width < 300.0 {
-            2
-        } else {
-            entries.len()
-        };
-        if let Some(index) = option_list(ui, id.with("source"), &entries, current, columns, 10.0) {
+        if let Some(index) = option_list(ui, id.with("source"), &entries, current, entries.len(), 10.0) {
             changed["Mask"] = json!(SOURCES[index].0);
             any = true;
         }
@@ -453,7 +413,7 @@ fn layer_editor(ui: &mut Ui, id: Id, layer: &Value, label: &str, key: &str, colo
             let mode = layer.get("BlendMode").and_then(Value::as_str).unwrap_or("Blend").to_string();
             let entries: Vec<(String, String)> = BLEND_MODES.iter().map(|member| (member.to_string(), humanize_title(member))).collect();
             ui.allocate_ui(Vec2::new(ui.available_width(), plain_height), |ui| {
-                let picked = dropdown_box(ui, id.with("blend-mode"), None, 0.0, 20.0, &humanize_title(&mode), &entries, &mode, theme::interface(12.0));
+                let picked = dropdown_box(ui, id.with("blend-mode"), None, 0.0, 20.0, &humanize_title(&mode), &entries, theme::interface(12.0));
                 if let Some(member) = picked.filter(|member| member != &mode) {
                     changed["BlendMode"] = json!(member);
                     any = true;
@@ -526,36 +486,30 @@ mod tests {
     }
 
     #[test]
-    fn layer_names_keep_clear_of_each_other_and_the_preview() {
+    fn layer_names_dock_the_layer_s_right_and_the_source_s_in_what_is_left() {
         let context = themed_context();
         let (document, mixer) = mixer(3);
         for width in WIDTHS {
             let shapes = frame(&context, &document, mixer, width);
+            // Past the preview (32 wide, 8 + 16 + 8 + 8 in from the row, 4
+            // inside the list) and its margin, and short of the simplify
+            // eye's button and margin (16 + 8 + 8 in from the swatch).
+            let names_left = 20.0 + 4.0 + 16.0 + 8.0 + 16.0 + 8.0 + 8.0 + 32.0 + 8.0;
+            let names_right = 20.0 + width - 4.0 - 16.0 - 18.0 - 8.0 - 32.0 - 8.0;
             for index in 1..=3 {
-                let (source_clip, source) = text_saying(&shapes, &format!("Layer{index}"));
                 let (layer_clip, layer) = text_saying(&shapes, &format!("Layer {index}"));
-                let source_rect = source.visual_bounding_rect();
-                let layer_rect = layer.visual_bounding_rect();
-                assert!(!source_rect.intersects(layer_rect), "at {width}, the source {source_rect:?} clears the layer's name {layer_rect:?}");
-                assert!(source_clip.contains_rect(source_rect) && layer_clip.contains_rect(layer_rect), "at {width}, layer {index}'s names are not cut off by the edge of their room");
-                assert!(source.galley.rows[0].glyphs.len() > 1, "at {width}, more of the source than \"…\" shows");
-                // Clear of the preview (32 wide, 8 + 16 + 8 + 8 in from
-                // the row, 4 inside the list).
-                let preview_right = 20.0 + 4.0 + 16.0 + 8.0 + 16.0 + 8.0 + 8.0 + 32.0;
-                assert!(source_rect.left() > preview_right && layer_rect.left() > preview_right, "at {width}, layer {index}'s names clear the preview");
+                assert!(layer_clip.left() >= names_left - 0.01 && layer_clip.right() <= names_right - 4.0 + 0.01, "at {width}: {layer_clip:?}");
+                let layer_rect = layer.visual_bounding_rect().intersect(layer_clip);
+                // The source's name, when there is room for it, keeps left
+                // of the layer's and is cut with "…" to its room.
+                let source = shapes.iter().find_map(|clipped| match &clipped.shape {
+                    Shape::Text(shape) if shape.galley.text() == format!("Layer{index}") && shape.pos.y < layer.pos.y + 1.0 => Some(clipped.clip_rect),
+                    _ => None,
+                });
+                if let Some(source_clip) = source {
+                    assert!(source_clip.left() >= names_left + 4.0 - 0.01 && source_clip.right() <= layer_rect.left() - 4.0 + 0.5, "at {width}: {source_clip:?} beside {layer_rect:?}");
+                }
             }
-        }
-    }
-
-    #[test]
-    fn layer_names_show_whole_at_the_default_width() {
-        let context = themed_context();
-        let (document, mixer) = mixer(15);
-        let shapes = frame(&context, &document, mixer, DEFAULT_WIDTH);
-        for name in ["Layer1", "Layer 1", "Layer15", "Layer 15"] {
-            let (clip, shape) = text_saying(&shapes, name);
-            assert!(!shape.galley.elided, "{name} shows whole");
-            assert!(clip.contains_rect(shape.visual_bounding_rect()), "{name} is not cut off");
         }
     }
 
@@ -564,13 +518,15 @@ mod tests {
         let context = themed_context();
         let (document, mixer) = mixer(3);
         let shapes = frame(&context, &document, mixer, 420.0);
-        let source = text_saying(&shapes, "Layer2").1.visual_bounding_rect();
+        let (_, source_shape) = text_saying(&shapes, "Layer2");
+        let source = source_shape.visual_bounding_rect();
         let layer = text_saying(&shapes, "Layer 2").1.visual_bounding_rect();
+        assert!(!source_shape.galley.elided, "Layer2 is cut");
         assert!(source.right() < layer.left() && source.center().y == layer.center().y, "{source:?} beside {layer:?}");
     }
 
     #[test]
-    fn the_ground_layer_note_stays_inside_the_list() {
+    fn the_ground_layer_note_is_cut_off_at_the_row_s_padding() {
         let context = themed_context();
         let (document, mixer) = mixer(2);
         for width in WIDTHS {
@@ -578,26 +534,56 @@ mod tests {
             let list_right = 20.0 + width - 4.0;
             for text in [" (Ground Layer)", "Each layer is added above this, bottom to top."] {
                 let (clip, shape) = text_saying(&shapes, text);
-                let rect = shape.visual_bounding_rect();
-                assert!(rect.right() <= list_right - 16.0, "at {width}, {text:?} ({rect:?}) stays inside the list ({list_right})");
-                assert!(clip.contains_rect(rect), "at {width}, {text:?} is not cut off");
-                if width >= DEFAULT_WIDTH {
-                    assert!(!shape.galley.elided, "at {width}, {text:?} shows whole");
-                }
+                assert!(clip.right() <= list_right - 16.0 + 0.01, "at {width}, {text:?} is cut off at {}, past the row's padding ({list_right})", clip.right());
+                assert_eq!(shape.galley.rows.len(), 1, "at {width}, {text:?} wraps");
+                assert!(!shape.galley.elided, "at {width}, {text:?} is cut short with an ellipsis");
             }
         }
     }
 
     #[test]
-    fn mask_sources_show_whole() {
+    fn a_layer_s_swatch_opens_the_minimal_picker() {
+        let context = themed_context();
+        let (document, mixer) = mixer(1);
+        let width = 420.0;
+        let shapes = frame(&context, &document, mixer, width);
+        // The first row's swatch: 18 wide at the row's content edge.
+        let swatch = shapes.iter().find_map(|clipped| match &clipped.shape {
+            Shape::Rect(rect) if rect.rect.width() == 18.0 => Some(rect.rect),
+            _ => None,
+        });
+        let swatch = swatch.expect("the swatch is drawn");
+        let at = swatch.center();
+        let node = document.node(mixer).unwrap();
+        let nodes = &document.project.assets[0].terrain.nodes;
+        let press = |pressed: bool| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        for events in [vec![egui::Event::PointerMoved(at)], vec![press(true)], vec![press(false)], Vec::new()] {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1200.0));
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(20.0, 0.0), Vec2::new(width, 1200.0))));
+                panel.spacing_mut().item_spacing = Vec2::ZERO;
+                show(&mut panel, Id::new("mixer-test"), node, nodes, &node.values);
+            });
+            output.drop_without_applying_deltas();
+        }
+        // The picker under it, at its least size.
+        let pickers: Vec<Rect> = context.memory(|memory| {
+            let layers = memory.areas().visible_layer_ids().into_iter().filter(|layer| layer.order == egui::Order::Foreground);
+            layers.filter_map(|layer| memory.area_rect(layer.id)).collect()
+        });
+        let picker = pickers.into_iter().find(|area| (area.width() - 200.0).abs() < 0.5).expect("the swatch opens the picker");
+        assert!((picker.top() - (swatch.bottom() - 10.0)).abs() < 0.5 && (picker.left() - swatch.left()).abs() < 0.5, "{picker:?} under {swatch:?}");
+    }
+
+    #[test]
+    fn mask_sources_keep_to_one_row() {
         let context = themed_context();
         let (document, mixer) = mixer(1);
         for width in WIDTHS.into_iter().chain([200.0, 224.0, 312.0, 324.0]) {
             let shapes = frame(&context, &document, mixer, width);
-            for (_, text) in SOURCES {
-                let (_, shape) = text_saying(&shapes, text);
-                assert!(!shape.galley.elided, "at {width}, {text} shows whole");
-            }
+            let rows: Vec<f32> = SOURCES.iter().map(|(_, text)| text_saying(&shapes, text).1.pos.y).collect();
+            assert!(rows.iter().all(|row| (row - rows[0]).abs() < 0.5), "at {width}: {rows:?}");
         }
     }
 

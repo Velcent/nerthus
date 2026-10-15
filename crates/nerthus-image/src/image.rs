@@ -25,6 +25,8 @@ pub enum VirtualPixel {
     Black,
     White,
     Transparent,
+    /// The image's background colour (`Image::background`, every channel).
+    Background,
 }
 
 /// The origin of a virtual pixel: a real pixel or a constant colour.
@@ -63,6 +65,9 @@ pub struct Image {
     /// IM `image->filter` (Magick.NET `FilterType`); `None` is IM's
     /// undefined filter, which lets each operation pick its default.
     pub filter: Option<Filter>,
+    /// IM `image->background_color` for every channel, in the image's
+    /// units, as the `Background` virtual pixel gives it.
+    pub background: f32,
 }
 
 impl Image {
@@ -76,6 +81,7 @@ impl Image {
             interpolate: Interpolate::Bilinear,
             colorspace: Colorspace::for_channels(channels),
             filter: None,
+            background: 0.0,
         }
     }
 
@@ -96,6 +102,7 @@ impl Image {
             interpolate: Interpolate::Bilinear,
             colorspace: Colorspace::for_channels(channels),
             filter: None,
+            background: 0.0,
         }
     }
 
@@ -141,6 +148,7 @@ impl Image {
         image.interpolate = self.interpolate;
         image.colorspace = self.colorspace;
         image.filter = self.filter;
+        image.background = self.background;
         image
     }
 
@@ -204,6 +212,7 @@ impl Image {
             }
             VirtualPixel::Black | VirtualPixel::Transparent => VirtualSource::Constant(0.0),
             VirtualPixel::White => VirtualSource::Constant(1.0),
+            VirtualPixel::Background => VirtualSource::Constant(self.background),
         }
     }
 

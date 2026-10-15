@@ -241,17 +241,15 @@ pub fn start(editor: &Editor, ui_state: &mut UiState) {
 }
 
 /// Esc closes the tool window on top, as its close button does, when it
-/// is Diagnostics, the Artifact Explorer, the documentation, the console
-/// or Export Macro. Taken before the shell's keys, and before the modal
-/// check that the Artifact Explorer keeps them from: the windows that
-/// close themselves on Esc (Options, Help's, the Start dialog) and egui's
-/// modals keep it from a window under them.
+/// is Diagnostics, the documentation or Export Macro (`IsCancel`); the
+/// Artifact Explorer and the console have no Cancel button and stay.
+/// Taken before the shell's keys: the windows that close themselves on
+/// Esc (Options, Help's, the Start dialog) and egui's modals keep it from
+/// a window under them.
 pub fn take_escape(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState) {
     let shown = [
         (ui_state.diagnostics.is_some(), diagnostics_window::window_id()),
-        (ui_state.artifact_explorer.is_some(), artifact_explorer::window_id()),
         (ui_state.docs.is_some(), docs_window::window_id()),
-        (ui_state.console.is_some(), console_window::window_id()),
         (editor.files.export_macro.is_some(), file_windows::export_macro_id()),
     ];
     let windows: Vec<egui::Id> = shown.into_iter().filter_map(|(open, id)| open.then_some(id)).collect();
@@ -260,12 +258,8 @@ pub fn take_escape(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiSt
     };
     if closed == diagnostics_window::window_id() {
         ui_state.diagnostics = None;
-    } else if closed == artifact_explorer::window_id() {
-        ui_state.artifact_explorer = None;
     } else if closed == docs_window::window_id() {
         ui_state.docs = None;
-    } else if closed == console_window::window_id() {
-        ui_state.console = None;
     } else if closed == file_windows::export_macro_id() {
         file_windows::close_export_macro(editor);
     }
@@ -394,22 +388,17 @@ mod tests {
         (context, Editor::new(Document::new()), UiState::default())
     }
 
-    /// Which of the console, the documentation, the Artifact Explorer,
-    /// Diagnostics and Export Macro are open.
+    /// Which of the documentation, Diagnostics and Export Macro are open.
     fn open(editor: &Editor, ui_state: &UiState) -> Vec<bool> {
-        let docs = ui_state.docs.is_some();
-        let explorer = ui_state.artifact_explorer.is_some();
-        vec![ui_state.console.is_some(), docs, explorer, ui_state.diagnostics.is_some(), editor.files.export_macro.is_some()]
+        vec![ui_state.docs.is_some(), ui_state.diagnostics.is_some(), editor.files.export_macro.is_some()]
     }
 
     #[test]
     fn escape_closes_the_tool_windows_from_the_top_down() {
         let (context, mut editor, mut ui_state) = shell();
         // Opened one after another, each over the last.
-        let opening: [fn(&mut Editor, &mut UiState); 5] = [
-            |_, ui_state| ui_state.console = Some(ConsoleWindow::open()),
+        let opening: [fn(&mut Editor, &mut UiState); 3] = [
             |_, ui_state| ui_state.docs = Some(DocsWindow::open(crate::docs::HOME)),
-            |editor, ui_state| ui_state.artifact_explorer = Some(ArtifactExplorer::open(editor)),
             |_, ui_state| ui_state.diagnostics = Some(DiagnosticsWindow::open()),
             |editor, _| editor.files.export_macro = Some(ExportForm::for_project(editor)),
         ];
@@ -417,12 +406,12 @@ mod tests {
             open_window(&mut editor, &mut ui_state);
             settle(&context, &mut editor, &mut ui_state);
         }
-        assert_eq!(open(&editor, &ui_state), [true; 5]);
+        assert_eq!(open(&editor, &ui_state), [true; 3]);
         // Each Esc closes the one on top, and does not stop a build too.
-        for left in (0..5).rev() {
+        for left in (0..3).rev() {
             let seen = frame(&context, &mut editor, &mut ui_state, vec![escape()]);
             assert!(!seen, "the shell saw the Esc that closed a window");
-            let expected: Vec<bool> = (0..5).map(|window| window < left).collect();
+            let expected: Vec<bool> = (0..3).map(|window| window < left).collect();
             assert_eq!(open(&editor, &ui_state), expected);
             settle(&context, &mut editor, &mut ui_state);
         }
@@ -431,16 +420,23 @@ mod tests {
     }
 
     #[test]
-    fn about_over_the_console_closes_first() {
+    fn the_console_and_the_artifact_explorer_stay_on_escape() {
         let (context, mut editor, mut ui_state) = shell();
         ui_state.console = Some(ConsoleWindow::open());
         settle(&context, &mut editor, &mut ui_state);
+        // About over the console closes; the console, with no Cancel
+        // button, stays.
         ui_state.help.about = true;
         settle(&context, &mut editor, &mut ui_state);
         frame(&context, &mut editor, &mut ui_state, vec![escape()]);
         assert!(!ui_state.help.about && ui_state.console.is_some());
         settle(&context, &mut editor, &mut ui_state);
         frame(&context, &mut editor, &mut ui_state, vec![escape()]);
-        assert!(ui_state.console.is_none());
+        assert!(ui_state.console.is_some());
+        // So does the Artifact Explorer.
+        ui_state.artifact_explorer = Some(ArtifactExplorer::open(&editor));
+        settle(&context, &mut editor, &mut ui_state);
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(ui_state.artifact_explorer.is_some());
     }
 }

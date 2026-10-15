@@ -370,7 +370,7 @@ pub fn node_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
         commands.push(Command::ShowLocked2DViewport);
     }
     menu_separator(ui);
-    if menu_item(ui, Some("arrow-left-rhombus"), Some(theme::ACCENT_PURPLE), "Select Upstream", "").clicked() {
+    if menu_item(ui, Some("arrow-left-rhombus"), Some(theme::ACCENT_PURPLE), "Select Upsteam", "").clicked() {
         commands.push(Command::SelectUpstream);
     }
     if menu_item(ui, Some("arrow-right-rhombus"), Some(theme::ACCENT_PURPLE), "Select Downstream", "").clicked() {

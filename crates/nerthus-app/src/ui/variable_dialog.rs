@@ -22,7 +22,6 @@ const CONTENT_WIDTH: f32 = 480.0 - 24.0;
 /// `NumericTextBox`'s `Minimum` and `Maximum` here (`RecreateUI`).
 const LIMIT: f32 = 65535.0;
 /// A `NumericTextBox`'s header (`MinWidth="96"`) and box (96 at least).
-/// Every row's header takes this column, so that the boxes line up.
 const NUMBER_COLUMN: f32 = 96.0;
 /// `Thumb_OnDragDelta`: how far a point of dragging the header moves the
 /// value.
@@ -237,13 +236,16 @@ fn accept_changes(editor: &mut Editor, dialog: &mut EditVariable, commands: &mut
     true
 }
 
-/// A field's row: `header` right-aligned in the header column, and a `Ui`
-/// for the box from 8 after it to the row's end, which centres the box
-/// down the row as the header is. Returns the header's rect and that `Ui`.
-fn field_row(ui: &mut Ui, header: &str) -> (Rect, Ui) {
+/// A field's row: `header`, and a `Ui` for the box from 8 after it to the
+/// row's end, which centres the box down the row as the header is. In a
+/// `DockPanel` row (`column` None) the header takes its own width with 8
+/// round it (`Margin="8"`); a `NumericTextBox`'s is right-aligned in its
+/// `column`. Returns the header's rect and that `Ui`.
+fn field_row(ui: &mut Ui, header: &str, column: Option<f32>) -> (Rect, Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(CONTENT_WIDTH, ROW_HEIGHT), Sense::hover());
-    let header_rect = Rect::from_min_size(rect.min, Vec2::new(NUMBER_COLUMN, rect.height()));
     let galley = ui.painter().layout_no_wrap(header.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
+    let header_width = column.unwrap_or(8.0 + galley.size().x);
+    let header_rect = Rect::from_min_size(rect.min, Vec2::new(header_width, rect.height()));
     let header_position = Pos2::new(header_rect.right() - galley.size().x, header_rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(header_position, galley, theme::LABEL_DEFAULT);
     let box_rect = Rect::from_min_max(Pos2::new(header_rect.right() + 8.0, rect.top()), rect.max);
@@ -254,7 +256,7 @@ fn field_row(ui: &mut Ui, header: &str) -> (Rect, Ui) {
 /// "Variable Name" and its box, focused with its text chosen when the
 /// dialog opens.
 fn name_row(ui: &mut Ui, dialog: &mut EditVariable) {
-    let (_, mut box_ui) = field_row(ui, "Variable Name");
+    let (_, mut box_ui) = field_row(ui, "Variable Name", None);
     let mut edit = egui::TextEdit::singleline(&mut dialog.name);
     edit = edit.id(window_id().with("name"));
     edit = edit.font(theme::monospace(12.0));
@@ -277,7 +279,7 @@ fn name_row(ui: &mut Ui, dialog: &mut EditVariable) {
 /// (`Accent-Muted-Green` for integers). Enter, Tab or leaving the box
 /// takes its text.
 fn number_field(ui: &mut Ui, id: Id, header: &str, field: &mut NumberField) {
-    let (header_rect, mut box_ui) = field_row(ui, header);
+    let (header_rect, mut box_ui) = field_row(ui, header, Some(NUMBER_COLUMN));
     // `thumb`: invisible over the header.
     let thumb = ui.interact(header_rect, id.with("thumb"), Sense::drag());
     if thumb.hovered() || thumb.dragged() {
@@ -319,7 +321,7 @@ fn number_field(ui: &mut Ui, id: Id, header: &str, field: &mut NumberField) {
 /// `dockChoices`: "Choices" and its box, and the hint under it on the
 /// right (10, at 0.7).
 fn choices_row(ui: &mut Ui, dialog: &mut EditVariable) {
-    let (_, mut box_ui) = field_row(ui, "Choices");
+    let (_, mut box_ui) = field_row(ui, "Choices", None);
     let mut edit = egui::TextEdit::singleline(&mut dialog.choices);
     edit = edit.id(window_id().with("choices"));
     edit = edit.font(theme::monospace(12.0));
@@ -333,14 +335,14 @@ fn choices_row(ui: &mut Ui, dialog: &mut EditVariable) {
     });
 }
 
-/// `cboStringType` (`DropdownX` "String Type"), its box lined up with the
-/// other rows' (`dropdown_box` leaves 8 after the header).
+/// `cboStringType` (`DropdownX` "String Type"): its header in the theme's
+/// column (`Column.Size`).
 fn string_type_row(ui: &mut Ui, dialog: &mut EditVariable) {
     let entries: Vec<(String, String)> = STRING_TYPES.iter().enumerate().map(|(index, name)| (index.to_string(), name.to_string())).collect();
     let shown = STRING_TYPES.get(dialog.string_type).copied().unwrap_or("");
-    let current = dialog.string_type.to_string();
     let id = window_id().with("string-type");
-    let chosen = dropdown_box(ui, id, Some("String Type"), NUMBER_COLUMN + 8.0, ROW_HEIGHT, shown, &entries, &current, theme::interface(12.0));
+    let column = theme::sizes(ui.ctx()).header_column;
+    let chosen = dropdown_box(ui, id, Some("String Type"), column, ROW_HEIGHT, shown, &entries, theme::interface(12.0));
     if let Some(index) = chosen.and_then(|value| value.parse::<usize>().ok()) {
         dialog.string_type = index;
     }
@@ -387,19 +389,23 @@ mod tests {
     }
 
     #[test]
-    fn the_boxes_share_their_left_edge_and_sit_level_with_their_headers() {
+    fn each_row_lays_its_header_out_as_gaea_s_and_its_box_level_with_it() {
+        // The numbers' boxes 8 past their 96 header column, each level
+        // with its header.
         let context = shown("Int");
         let name = rect(&context, window_id().with("name"));
         for limit in ["min", "max"] {
             let header = rect(&context, window_id().with(limit).with("thumb"));
             let number = rect(&context, window_id().with(limit).with("text"));
-            assert!((number.left() - name.left()).abs() < 0.5, "{limit} {number:?} does not line up with the name {name:?}");
+            assert!((header.width() - NUMBER_COLUMN).abs() < 0.5, "{limit} {header:?}");
+            assert!(number.left() >= header.right() + 8.0 - 0.5, "{limit} {number:?} is not 8 past its header {header:?}");
             assert!((number.center().y - header.center().y).abs() < 0.5, "{limit} {number:?} is not level with its header {header:?}");
         }
+        // "Variable Name" and "Choices" take their own widths with 8 round
+        // them (`DockPanel` rows), so their boxes start apart.
         let context = shown("Choice");
-        let name = rect(&context, window_id().with("name"));
         let choices = rect(&context, window_id().with("choices"));
-        assert!((choices.left() - name.left()).abs() < 0.5, "the choices {choices:?} do not line up with the name {name:?}");
+        assert!(choices.left() < name.left(), "the choices {choices:?} start no nearer than the name {name:?}");
     }
 
     #[test]

@@ -285,16 +285,7 @@ fn tab_list(ui: &mut Ui, selected: &mut OptionsTab) {
             if std::mem::take(&mut group_gap) {
                 ui.add_space(24.0);
             }
-            let (rect, response) = ui.allocate_exact_size(Vec2::new(TAB_WIDTH, 26.0), Sense::click());
-            let chosen = *selected == tab;
-            if chosen {
-                ui.painter().rect_filled(rect.shrink(2.0), 3.0, brush);
-            }
-            let color = if chosen || response.hovered() { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
-            let galley = ui.painter().layout_no_wrap(name.to_string(), theme::interface(12.0), color);
-            let position = egui::Pos2::new(rect.right() - 10.0 - galley.size().x, rect.center().y - galley.size().y / 2.0);
-            ui.painter().galley(position, galley, color);
-            if response.clicked() {
+            if crate::ui::widgets::tab_list_item(ui, name, *selected == tab, true, brush).clicked() {
                 *selected = tab;
             }
         }

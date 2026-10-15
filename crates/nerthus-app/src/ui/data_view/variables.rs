@@ -12,10 +12,11 @@ use crate::document::variable_name_problem;
 use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
-use crate::ui::colour_picker::{colour_button, linear_to_srgb, picked_linear};
+use crate::ui::colour_button::{self, colour_button};
+use crate::ui::colour_picker::{linear_to_srgb, srgb_to_linear};
 use crate::ui::commands::Command;
 use crate::ui::data_view::{toolbar, toolbar_divider, toolbar_row};
-use crate::ui::editors::{dropdown_box, fitted_line, palette_color, range_slider, slider, toggle, RangeSpec, SliderSpec};
+use crate::ui::editors::{dropdown_box, palette_color, range_slider, slider, toggle, RangeSpec, SliderSpec};
 use crate::ui::slider_popups::{self, BoxWidth, TypingLook};
 use crate::ui::widgets::{dialog, dialog_button, icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator};
 
@@ -539,8 +540,7 @@ fn variable_editor(ui: &mut Ui, editor: &mut Editor, key: &str, variable: &Varia
             let shown = options.get(current).cloned().unwrap_or_default();
             let entries: Vec<(String, String)> = options.iter().enumerate().map(|(index, option)| (index.to_string(), option.clone())).collect();
             let column = if ui.available_width() < 300.0 { 100.0 } else { 160.0 };
-            let current_text = current.to_string();
-            let chosen = frame.show(ui, |ui| dropdown_box(ui, id, Some(&variable.name), column, 26.0, &shown, &entries, &current_text, theme::interface(12.0))).inner;
+            let chosen = frame.show(ui, |ui| dropdown_box(ui, id, Some(&variable.name), column, 26.0, &shown, &entries, theme::interface(12.0))).inner;
             let chosen_index = chosen.and_then(|value| value.parse::<i64>().ok());
             if let Some(index) = chosen_index {
                 editor.document.set_variable_value(key, json!(index));
@@ -574,26 +574,22 @@ fn choice_options(variable: &Variable) -> Vec<String> {
     list.map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
 }
 
-/// `ColorPicker` (margin 24, 2, 4, 2): the name and the colour, a swatch
-/// opening the `ColorEditor`.
+/// `ColorPicker` (margin 24, 2, 4, 2): a button filled with the colour, the
+/// name centred in it, which opens the `MinimalColorPicker`; the colour
+/// taken is the picker's (`ToColor`).
 fn color_row(ui: &mut Ui, editor: &mut Editor, key: &str, variable: &Variable) {
     let value = variable.json.get("Value").cloned().unwrap_or(Value::Null);
     let component = |name: &str| value.get(name).and_then(Value::as_f64).unwrap_or(0.0) as f32;
     let linear = [component("R"), component("G"), component("B")];
     let width = ui.available_width();
-    let (outer, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
-    let rect = Rect::from_min_max(outer.min + Vec2::new(24.0, 2.0), outer.max - Vec2::new(4.0, 2.0));
-    // The name is trimmed short of the swatch and kept inside the row.
-    let name_room = (NAME_COLUMN - NAME_GAP).min(rect.width());
-    let galley = fitted_line(ui, &variable.name, theme::interface(12.0), theme::LABEL_DEFAULT, name_room);
-    let name_painter = ui.painter_at(rect);
-    name_painter.galley(Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0), galley, theme::LABEL_DEFAULT);
-    // A row narrower than the name column leaves the swatch no width, not less.
-    let swatch_left = rect.left() + NAME_COLUMN;
-    let swatch = Rect::from_min_max(Pos2::new(swatch_left, rect.top()), Pos2::new(rect.right().max(swatch_left), rect.bottom()));
-    let mut swatch_ui = ui.new_child(egui::UiBuilder::new().max_rect(swatch));
-    if let Some(colour) = colour_button(&mut swatch_ui, swatch.size(), linear.map(linear_to_srgb)) {
-        let [red, green, blue] = picked_linear(linear, colour);
+    let height = colour_button::button_height(ui) + 4.0;
+    let (outer, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    // A row narrower than the margins leaves the button no width, not less.
+    let left = outer.left() + 24.0;
+    let rect = Rect::from_min_max(Pos2::new(left, outer.top() + 2.0), Pos2::new((outer.right() - 4.0).max(left), outer.bottom() - 2.0));
+    let id = ui.id().with(("colour-variable", key));
+    if let Some(colour) = colour_button(ui, id, rect, linear.map(linear_to_srgb), &variable.name, None) {
+        let [red, green, blue] = colour.map(srgb_to_linear);
         let saved = json!({"R": red as f64, "G": green as f64, "B": blue as f64});
         editor.document.set_variable_value(key, saved);
         editor.changed();
@@ -638,21 +634,22 @@ fn unbound_row(ui: &mut Ui, editor: &mut Editor, key: &str, variable: &Variable,
         icons::paint(ui, icon_rect, icon, theme::ICON_DEFAULT);
         x = icon_rect.right() + 6.0;
     }
-    // The name is trimmed to its column (a decoration's to the row) and
-    // the value to the rest of the row; neither crosses the border.
-    let text_painter = ui.painter_at(rect.shrink(1.0));
+    // The name in its 96 column (`header`, a decoration's too) and the
+    // value after it, each laid out whole and cut off where its place
+    // ends: the column, or the row's padding.
     let name_left = x + 6.0;
     let text_right = rect.right() - ROW_PADDING;
     let header_color = if decoration { ACCENT_BRIGHT } else { theme::LABEL_DEFAULT };
-    let name_room = if decoration { text_right - name_left } else { NAME_COLUMN };
-    let header = fitted_line(ui, &variable.name, theme::monospace(12.0), header_color, name_room);
-    text_painter.galley(Pos2::new(name_left, rect.center().y - header.size().y / 2.0), header, header_color);
+    let header = ui.painter().layout_no_wrap(variable.name.clone(), theme::monospace(12.0), header_color);
+    let name_right = (name_left + NAME_COLUMN).min(text_right).max(name_left);
+    let name_place = Rect::from_x_y_ranges(name_left..=name_right, rect.y_range());
+    ui.painter_at(name_place).galley(Pos2::new(name_left, rect.center().y - header.size().y / 2.0), header, header_color);
     let value_left = name_left + NAME_COLUMN + NAME_GAP;
     if !decoration && value_left < text_right {
-        let value = value_text(variable);
-        let value_galley = fitted_line(ui, &value, theme::monospace(12.0), theme::ACCENT_MUTED_GREEN, text_right - value_left);
+        let value_galley = ui.painter().layout_no_wrap(value_text(variable), theme::monospace(12.0), theme::ACCENT_MUTED_GREEN);
+        let value_place = Rect::from_x_y_ranges(value_left..=text_right, rect.y_range());
         let value_position = Pos2::new(value_left, rect.center().y - value_galley.size().y / 2.0);
-        text_painter.galley(value_position, value_galley, theme::ACCENT_MUTED_GREEN);
+        ui.painter_at(value_place).galley(value_position, value_galley, theme::ACCENT_MUTED_GREEN);
     }
     response.context_menu(|ui| {
         crate::ui::widgets::menu_style(ui);
@@ -953,13 +950,13 @@ mod tests {
     }
 
     #[test]
-    fn a_long_name_is_cut_short_of_its_rows_value() {
+    fn a_long_name_is_cut_off_at_its_column() {
         for (kind, value) in [("Float", json!(0.5)), ("Int", json!(0)), ("Choice", json!(0)), ("Bool", json!(false))] {
             let variable = Variable::from_json(&json!({"Name": LONG_NAME, "Type": kind, "Value": value, "Min": 0, "Max": 1}));
             let (row, texts) = unbound_row_texts(&variable, 300.0);
             let name = painted(&texts, LONG_NAME);
             let value = painted(&texts, &value_text(&variable));
-            assert!(name.elided, "{kind}: the name is cut short");
+            assert!(!name.elided, "{kind}: the name is cut short with an ellipsis");
             assert!(name.shown.right() <= value.shown.left(), "{kind}: the name {:?} runs into the value {:?}", name.shown, value.shown);
             assert_inside(row, &texts);
         }
@@ -971,7 +968,7 @@ mod tests {
         let colour = Variable::from_json(&json!({"Name": "Tint", "Type": "Color", "Value": {"R": 0.8, "G": 0.2, "B": 0.0}}));
         for variable in [string, colour] {
             let (row, texts) = unbound_row_texts(&variable, 300.0);
-            assert!(painted(&texts, &value_text(&variable)).elided, "{}: the value is cut short", variable.name);
+            assert!(!painted(&texts, &value_text(&variable)).elided, "{}: the value is cut short with an ellipsis", variable.name);
             assert_inside(row, &texts);
         }
         // Too narrow for the value: the name alone shows, inside the row.
@@ -982,23 +979,28 @@ mod tests {
     }
 
     #[test]
-    fn a_long_decoration_name_stays_inside_its_row() {
+    fn a_long_decoration_name_is_cut_off_at_its_column() {
         let variable = Variable::from_json(&json!({"Name": format!("{LONG_NAME}{LONG_NAME}"), "Type": "Decoration", "Value": "StartGroup"}));
         let (row, texts) = unbound_row_texts(&variable, 300.0);
-        assert!(painted(&texts, &variable.name).elided, "the name is cut short");
+        let name = painted(&texts, &variable.name);
+        assert!(!name.elided, "the name is cut short with an ellipsis");
+        assert!(name.shown.width() <= NAME_COLUMN + 0.5, "the name {:?} runs past its column", name.shown);
         assert_inside(row, &texts);
     }
 
     #[test]
-    fn a_long_colour_name_is_cut_short_of_its_swatch() {
+    fn a_long_colour_name_is_cut_off_at_its_button() {
         let variable = Variable::from_json(&json!({"Name": LONG_NAME, "Type": "Color", "Value": {"R": 1.0, "G": 0.5, "B": 0.0}}));
         let (outer, texts) = painted_texts(300.0, |ui, editor| {
             color_row(ui, editor, "Tint", &variable);
             ui.min_rect()
         });
+        // Centred in the `ColorPicker` (margin 24, 2, 4, 2), whole, and
+        // cut off at its edges.
         let name = painted(&texts, LONG_NAME);
-        assert!(name.elided, "the name is cut short");
-        assert!(name.shown.right() <= outer.left() + 24.0 + NAME_COLUMN, "the name {:?} runs into the swatch", name.shown);
+        assert!(!name.elided, "the name is cut short with an ellipsis");
+        let button = Rect::from_min_max(outer.min + Vec2::new(24.0, 2.0), outer.max - Vec2::new(4.0, 2.0));
+        assert!(button.expand(0.5).contains_rect(name.shown), "the name {:?} runs past the button {button:?}", name.shown);
     }
 
     /// One frame of a row's typing box with these events.

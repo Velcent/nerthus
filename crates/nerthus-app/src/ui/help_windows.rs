@@ -236,18 +236,12 @@ fn shortcuts_window(ctx: &egui::Context) -> bool {
         scroll = scroll.id_salt("shortcut-guide-text");
         scroll = scroll.max_height((ui.available_height() - footer).max(100.0));
         scroll = scroll.auto_shrink([false, false]);
-        // The scroll area 12 in from the dialog's sides, so that its bar
-        // keeps clear of the border, and the text 24 further in: 36 in all.
-        let inset = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0));
+        // The viewer, its scroll bar with it, 36 in from the dialog's sides
+        // (`Margin="36,0,36,8"`).
+        let inset = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(36, 0));
         inset.show(ui, |ui| {
             scroll.show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(24.0);
-                    ui.vertical(|ui| {
-                        ui.set_max_width(ui.available_width() - 24.0);
-                        markdown::show(ui, SHORTCUTS);
-                    });
-                });
+                markdown::show(ui, SHORTCUTS);
             });
         });
         ui.add_space(8.0);

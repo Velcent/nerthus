@@ -190,7 +190,8 @@ pub fn resize_to_fit(image: &Image, box_width: usize, box_height: usize) -> Imag
 }
 
 /// `ResizeImage(image, width, height, filter)`: the pass along the axis with
-/// the larger factor runs first, exactly like IM.
+/// the larger factor runs first, exactly like IM, and both always run: an
+/// axis that keeps its size is still filtered (Mitchell blurs it).
 pub fn resize_with_filter(image: &Image, width: usize, height: usize, filter: Filter) -> Image {
     let x_factor = width as f64 / image.width as f64;
     let y_factor = height as f64 / image.height as f64;
@@ -206,9 +207,6 @@ pub fn resize_with_filter(image: &Image, width: usize, height: usize, filter: Fi
 }
 
 fn resize_horizontal(image: &Image, width: usize, filter: Filter) -> Image {
-    if width == image.width {
-        return image.clone();
-    }
     let channels = image.channels;
     let alpha_channel = alpha_channel_of(channels);
     let weights = contributions(image.width, width, filter);
@@ -247,9 +245,6 @@ fn resize_horizontal(image: &Image, width: usize, filter: Filter) -> Image {
 }
 
 fn resize_vertical(image: &Image, height: usize, filter: Filter) -> Image {
-    if height == image.height {
-        return image.clone();
-    }
     let channels = image.channels;
     let alpha_channel = alpha_channel_of(channels);
     let width = image.width;

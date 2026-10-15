@@ -15,7 +15,6 @@ use crate::editor::Editor;
 use crate::progress::{ProgressStep, StepEnd};
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::elided_galley;
 use crate::ui::tool_commands::ToolCommand;
 use crate::ui::widgets::{check_item, link_button, menu_caption, menu_item, menu_separator, menu_style, submenu, Tooltips};
 
@@ -382,9 +381,9 @@ fn draw_grid(painter: &egui::Painter, canvas: Rect, cells: usize, color: Color32
 /// a 2-pixel outline in its colour, its name (on its colour when it is the
 /// one previewed, `SelectRegion`), its size and place in the middle, the
 /// focus outline (`FocusRegion`) and the four corner thumbs. The labels
-/// stay inside the region and clear of the thumbs: the name is cut short
-/// before the top-right thumb, and the size and place show only where they
-/// fit under the name.
+/// are cut off at their places in the region however small it is: the
+/// name (`txtRegionName`: margin 1, padding 8,2, top left) and the size and
+/// place (`txtData`: padding 8,2, its lines centred in the middle).
 fn draw_region(painter: &egui::Painter, region: &Region, rect: Rect, focused: bool, previewed: bool) {
     let color = theme::from_sc_rgb(region.color, 1.0);
     let fill = theme::from_sc_rgb(region.color, 0.35);
@@ -397,22 +396,26 @@ fn draw_region(painter: &egui::Painter, region: &Region, rect: Rect, focused: bo
 
     let name_color = if previewed { theme::WINDOW_DARK } else { color };
     let name_font = if previewed { theme::monospace(12.0) } else { theme::monospace_bold(12.0) };
-    let name_corner = rect.min + Vec2::splat(1.0);
-    let name_position = name_corner + Vec2::new(8.0, 2.0);
-    let name_room = rect.right() - THUMB - 1.0 - name_position.x;
-    let name = elided_galley(painter, &region.name, name_font, name_color, name_room.max(1.0));
-    let name_rect = Rect::from_min_size(name_corner, name.size() + Vec2::new(16.0, 4.0));
-    if name.size().x <= name_room && name_rect.bottom() <= rect.bottom() - THUMB {
-        if previewed {
-            painter.rect_filled(name_rect, 0.0, color);
-        }
-        painter.galley(name_position, name, name_color);
+    let name_slot = rect.shrink(1.0);
+    let name_painter = painter.with_clip_rect(painter.clip_rect().intersect(name_slot));
+    let name = name_painter.layout_no_wrap(region.name.clone(), name_font, name_color);
+    let name_rect = Rect::from_min_size(name_slot.min, name.size() + Vec2::new(16.0, 4.0));
+    if previewed {
+        name_painter.rect_filled(name_rect, 0.0, color);
     }
+    name_painter.galley(name_rect.min + Vec2::new(8.0, 2.0), name, name_color);
 
-    let data = painter.layout(data_text(region), theme::monospace(12.0), color, f32::INFINITY);
-    let data_rect = Rect::from_center_size(rect.center(), data.size());
-    if data_rect.top() >= name_rect.bottom() && data_rect.width() <= rect.width() - 4.0 {
-        painter.galley(data_rect.min, data, color);
+    // Each line centred without its trailing space, as WPF aligns them.
+    let data_painter = painter.with_clip_rect(painter.clip_rect().intersect(rect));
+    let data_text = data_text(region);
+    let lines: Vec<_> = data_text.lines().map(|line| data_painter.layout_no_wrap(line.trim_end().to_string(), theme::monospace(12.0), color)).collect();
+    let data_height: f32 = lines.iter().map(|line| line.size().y).sum();
+    let mut line_top = rect.center().y - data_height / 2.0;
+    for line in lines {
+        let line_height = line.size().y;
+        let line_left = rect.center().x - line.size().x / 2.0;
+        data_painter.galley(Pos2::new(line_left, line_top), line, color);
+        line_top += line_height;
     }
 
     for corner in Corner::ALL {

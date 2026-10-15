@@ -17,10 +17,15 @@ pub fn toolbar_button(ui: &Ui) -> f32 {
 
 /// A dialog button's least height.
 pub const DIALOG_BUTTON_HEIGHT: f32 = 26.0;
-/// Inside a dialog's border (`DockPanel Margin="12"`) and a tooltip's.
-/// egui gives both the theme's `menu_margin`, which is 1 for the menus.
+/// Inside a dialog's border (`DockPanel Margin="12"`). egui gives it the
+/// theme's `menu_margin`, which is 1 for the menus.
 const DIALOG_MARGIN: i8 = 12;
-const TOOLTIP_MARGIN: Margin = Margin::symmetric(6, 4);
+/// The `ToolTip` style: padding 12, 8 inside a 1 `Button-Border` line on
+/// `Button-Border-Alt`, corners 2.5, its words `Label-Emphasis` at 12,
+/// wrapped at 480.
+const TOOLTIP_MARGIN: Margin = Margin::symmetric(12, 8);
+const TOOLTIP_CORNER: u8 = 3;
+const TOOLTIP_MAX_WIDTH: f32 = 480.0;
 /// `Default-Menu-Item`: rows 23 high (11px text, padding 2, 4), a 30 icon
 /// column and a 20 arrow column; menus at least 190 wide.
 const MENU_ROW_HEIGHT: f32 = 23.0;
@@ -245,15 +250,11 @@ pub fn menu_row_width(ui: &Ui, content_width: f32) -> f32 {
     ui.available_width().max(needed)
 }
 
-/// A row's shortcut colour: `Menu-Gesture`, or, when the row is disabled,
-/// its label's grey. The gesture's slate dimmed by half as well would all
-/// but vanish on the menu (under 2:1).
+/// A row's shortcut colour: `Menu-Gesture` at 0.75, which a disabled
+/// row's trigger sets to 0.5 as it does the icon's and the text's.
 fn shortcut_color(enabled: bool) -> Color32 {
-    if enabled {
-        theme::MENU_GESTURE
-    } else {
-        theme::MENU_FOREGROUND.gamma_multiply(MENU_DISABLED_OPACITY)
-    }
+    let opacity = if enabled { 0.75 } else { MENU_DISABLED_OPACITY };
+    theme::MENU_GESTURE.gamma_multiply(opacity)
 }
 
 /// One menu row: the hover fill (inset 1, corners 4), the icon centred in
@@ -530,8 +531,8 @@ impl DialogFit {
     }
 }
 
-/// The tooltips, as egui's `on_hover_text` and its kin show them but
-/// with `TOOLTIP_MARGIN` round them.
+/// The tooltips, as egui's `on_hover_text` and its kin show them but in
+/// the `ToolTip` style's frame.
 pub trait Tooltips {
     /// `text` under the widget while it is hovered and enabled.
     fn tooltip(self, text: impl Into<WidgetText>) -> Self;
@@ -566,18 +567,25 @@ impl Tooltips for Response {
 }
 
 fn show_tooltip(mut tooltip: egui::Tooltip<'_>, add_contents: impl FnOnce(&mut Ui)) {
-    let frame = Frame::popup(&tooltip.popup.ctx().global_style()).inner_margin(TOOLTIP_MARGIN);
+    let mut frame = Frame::new();
+    frame.fill = theme::BUTTON_BORDER_ALT;
+    frame.stroke = Stroke::new(1.0, theme::BUTTON_BORDER);
+    frame.corner_radius = CornerRadius::same(TOOLTIP_CORNER);
+    frame.inner_margin = TOOLTIP_MARGIN;
     tooltip.popup = tooltip.popup.frame(frame);
-    tooltip.show(add_contents);
+    tooltip.show(|ui| {
+        ui.visuals_mut().override_text_color = Some(theme::LABEL_EMPHASIS);
+        add_contents(ui);
+    });
 }
 
-/// A tooltip's words, laid out as egui's are.
+/// A tooltip's words: wrapped at the style's width.
 fn tooltip_text(text: impl Into<WidgetText>) -> impl FnOnce(&mut Ui) {
     let text = text.into();
     move |ui| {
         // Kept from shrinking as the area sizes itself.
-        ui.set_max_width(ui.spacing().tooltip_width);
-        ui.add(egui::Label::new(text));
+        ui.set_max_width(TOOLTIP_MAX_WIDTH);
+        ui.add(egui::Label::new(text).wrap());
     }
 }
 
@@ -589,6 +597,29 @@ pub fn link_button(ui: &mut Ui, text: &str, font: FontId, padding: Vec2) -> Resp
     let color = if response.hovered() { theme::ACCENT_STRONG_BLUE } else { theme::ACCENT_BLUE };
     ui.painter().galley(rect.min + padding, galley, color);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A `TabList` tab's size: `MinWidth="128"`, a line in its padding.
+pub const TAB_ITEM_SIZE: Vec2 = Vec2::new(128.0, 26.0);
+
+/// A `TabList` tab: `name` right-aligned (12), `Label-Emphasis` on the
+/// tab's `brush` (corners 3, 2 in) while selected, `Label-Default` on
+/// nothing otherwise; nothing changes under the pointer, and a disabled
+/// tab's name shows at half.
+pub fn tab_list_item(ui: &mut Ui, name: &str, selected: bool, enabled: bool, brush: Color32) -> Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(TAB_ITEM_SIZE, sense);
+    if selected {
+        ui.painter().rect_filled(rect.shrink(2.0), 3.0, brush);
+    }
+    let mut color = if selected { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
+    if !enabled {
+        color = color.gamma_multiply(0.5);
+    }
+    let galley = ui.painter().layout_no_wrap(name.to_string(), theme::interface(12.0), color);
+    let position = Pos2::new(rect.right() - 10.0 - galley.size().x, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(position, galley, color);
+    response
 }
 
 /// A selectable item's text: when selected, the selection stroke's colour
@@ -636,11 +667,11 @@ struct ToolbarGroups {
 /// Where a vertical toolbar's top group ends and its bottom group starts
 /// (`vertical_toolbar`).
 pub struct ToolbarDock {
-    /// Where the bottom group starts, down from the column's top, to end
-    /// at the foot: while the last layout found both groups fit.
-    docked_at: Option<f32>,
-    /// The column's top.
+    /// How tall the bottom group was when last laid out.
+    bottom_height: Option<f32>,
+    /// The column's top and its foot.
     start: f32,
+    foot: f32,
     /// The top group's height and where the bottom one starts, once the
     /// top one ends.
     split: Option<(f32, f32)>,
@@ -648,52 +679,44 @@ pub struct ToolbarDock {
 
 impl ToolbarDock {
     /// Ends the top group: what is added after it docks at the foot of
-    /// the toolbar, as far down as the room allows.
+    /// the toolbar, cut off above where the top group ends.
     pub fn bottom(&mut self, ui: &mut Ui) {
-        let top = ui.cursor().top() - self.start;
-        if let Some(docked_at) = self.docked_at {
-            ui.add_space((docked_at - top).max(0.0));
+        let top_end = ui.cursor().top();
+        if let Some(height) = self.bottom_height {
+            // Over the top group's end, when the toolbar is too short for
+            // both.
+            ui.add_space(self.foot - height - top_end);
         }
-        self.split = Some((top, ui.cursor().top()));
+        let mut clip = ui.clip_rect();
+        clip.min.y = clip.min.y.max(top_end);
+        ui.set_clip_rect(clip);
+        self.split = Some((top_end - self.start, ui.cursor().top()));
     }
 }
 
-/// A vertical toolbar's buttons in `inner`, cut to the toolbar `clip`:
-/// what `contents` adds before `ToolbarDock::bottom` from the top down,
-/// what it adds after (in order down the toolbar) docked at its foot. In
-/// a toolbar too short for both groups the bottom one follows the top one
-/// and the column scrolls (fading at the edge with more), so no button is
-/// drawn over another or outside the toolbar, or takes clicks there.
+/// A vertical toolbar's buttons in `inner`, cut to the toolbar `clip`, as
+/// its `DockPanel` (`LastChildFill="False"`) lays them out: what
+/// `contents` adds before `ToolbarDock::bottom` from the top down, what it
+/// adds after (in order down the toolbar) docked at its foot. The top
+/// group takes its room first; in a toolbar too short for both, the
+/// bottom group keeps to what the top one leaves, the buttons nearest the
+/// foot whole and those above cut off where the top group ends.
 pub fn vertical_toolbar<R>(ui: &mut Ui, id_salt: &str, inner: Rect, clip: Rect, contents: impl FnOnce(&mut Ui, &mut ToolbarDock) -> R) -> R {
     let id = ui.id().with(id_salt);
     let measured: Option<ToolbarGroups> = ui.data(|data| data.get_temp(id));
-    let fits = |groups: &ToolbarGroups| groups.top + groups.bottom <= inner.height();
-    let docked_at = measured.filter(fits).map(|groups| inner.height() - groups.bottom);
-    // The fades over the scrolled edges blend into the cladding.
-    let cladding = egui::Frame::new().fill(theme::PANEL_CLADDING);
-    let info = egui::UiStackInfo::new(egui::UiKind::Frame).with_frame(cladding);
     let layout = egui::Layout::top_down(egui::Align::Center);
-    let builder = egui::UiBuilder::new().id_salt(id_salt).max_rect(inner).layout(layout).ui_stack_info(info);
+    let builder = egui::UiBuilder::new().id_salt(id_salt).max_rect(inner).layout(layout);
     let mut column = ui.new_child(builder);
     column.shrink_clip_rect(clip);
-    // However short the toolbar: not egui's least of 64 past its foot.
-    let mut scroll = egui::ScrollArea::vertical().id_salt("toolbar-scroll").auto_shrink(false).min_scrolled_height(0.0);
-    if docked_at.is_some() {
-        // Grown to fit after a scroll: back to the top this frame.
-        scroll = scroll.vertical_scroll_offset(0.0);
-    }
-    let (result, groups) = scroll.show(&mut column, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let start = ui.cursor().top();
-        let mut dock = ToolbarDock { docked_at, start, split: None };
-        let result = contents(ui, &mut dock);
-        let end = ui.cursor().top();
-        let groups = match dock.split {
-            Some((top, bottom_start)) => ToolbarGroups { top, bottom: end - bottom_start },
-            None => ToolbarGroups { top: end - start, bottom: 0.0 },
-        };
-        (result, groups)
-    }).inner;
+    column.spacing_mut().item_spacing.y = 0.0;
+    let start = column.cursor().top();
+    let mut dock = ToolbarDock { bottom_height: measured.map(|groups| groups.bottom), start, foot: inner.bottom(), split: None };
+    let result = contents(&mut column, &mut dock);
+    let end = column.cursor().top();
+    let groups = match dock.split {
+        Some((top, bottom_start)) => ToolbarGroups { top, bottom: end - bottom_start },
+        None => ToolbarGroups { top: end - start, bottom: 0.0 },
+    };
     let changed = measured.is_none_or(|measured| (measured.top - groups.top).abs() > 0.5 || (measured.bottom - groups.bottom).abs() > 0.5);
     if changed {
         ui.data_mut(|data| data.insert_temp(id, groups));
@@ -985,49 +1008,62 @@ mod tests {
     }
 
     #[test]
-    fn a_short_toolbar_never_draws_a_button_over_another_or_outside_it() {
+    fn a_short_toolbar_keeps_its_bottom_group_at_its_foot() {
         let context = themed_context();
+        let button = theme::sizes(&context).toolbar_button;
         // As a splitter drags it shorter, then taller again.
         let heights = (40..=400).rev().step_by(9).chain((40..=400).step_by(9));
         for height in heights {
             let inner = toolbar_inner(&context, height as f32);
             let buttons = toolbar_frame(&context, inner, Vec::new());
-            assert_apart_and_inside(&buttons, inner, &height.to_string());
+            assert_eq!(buttons.len(), 5, "{height}");
+            // The top group from the top, the bottom group up from the foot.
+            assert!((buttons[0].rect.top() - inner.top()).abs() < 0.5, "{height}: the top group starts at {}", buttons[0].rect.top());
+            assert!((buttons[4].rect.bottom() - inner.bottom()).abs() < 0.5, "{height}: the bottom group ends at {}", buttons[4].rect.bottom());
+            // Nothing takes clicks outside the toolbar, and the bottom group
+            // none above where the top group ends.
+            let top_end = buttons[2].rect.bottom() + 17.0;
+            for (index, shown) in buttons.iter().enumerate().filter(|(_, button)| button.interact.is_positive()) {
+                let inside = shown.interact.top() >= inner.top() - 0.01 && shown.interact.bottom() <= inner.bottom() + 2.01;
+                assert!(inside, "{height}: button {index} takes clicks at {:?}, outside {inner:?}", shown.interact);
+                if index >= 3 {
+                    assert!(shown.interact.top() >= top_end.min(inner.bottom()) - 0.01, "{height}: button {index} takes clicks at {:?}, over the top group", shown.interact);
+                }
+            }
             if height as f32 >= toolbar_content(&context) {
-                assert!((buttons[4].rect.bottom() - inner.bottom()).abs() < 0.5, "{height}: room for both, the bottom group ends at {}", buttons[4].rect.bottom());
-            } else {
-                assert!(buttons[3].rect.top() - buttons[2].rect.bottom() <= 17.01, "{height}: the bottom group does not follow the top one");
+                assert!(buttons[3].rect.top() >= top_end - 0.5, "{height}: room for both, the groups overlap");
+            } else if (height as f32) < 3.0 * button + 17.0 - button {
+                // Too short for the top group: the bottom group has nothing.
+                assert!(!buttons[3].interact.is_positive() && !buttons[4].interact.is_positive(), "{height}: the bottom group takes clicks");
             }
         }
     }
 
     #[test]
-    fn a_short_toolbar_scrolls_to_its_bottom_group() {
+    fn the_top_group_keeps_its_clicks_where_the_bottom_group_is_cut_off() {
         let context = themed_context();
-        let inner = toolbar_inner(&context, 80.0);
-        let last = toolbar_frame(&context, inner, Vec::new())[4].rect;
-        assert!(last.top() >= inner.bottom(), "the last button starts out of sight, at {last:?}");
-        // Where it is laid out, under the toolbar, it takes no click.
-        assert_eq!(click_toolbar(&context, inner, last.center()), Vec::<usize>::new());
-        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
-        toolbar_frame(&context, inner, vec![egui::Event::PointerMoved(inner.center())]);
-        toolbar_frame(&context, inner, vec![wheel]);
-        for _ in 0..60 {
-            toolbar_frame(&context, inner, Vec::new());
-        }
+        let button = theme::sizes(&context).toolbar_button;
+        // Room for the top group and one of the bottom group's buttons.
+        let inner = toolbar_inner(&context, 4.0 * button + 17.0);
         let buttons = toolbar_frame(&context, inner, Vec::new());
-        assert_apart_and_inside(&buttons, inner, "scrolled");
-        let last = buttons[4].rect;
-        assert!((last.bottom() - inner.bottom()).abs() < 0.5, "scrolled to the end, the last button ends at {}", last.bottom());
-        assert_eq!(click_toolbar(&context, inner, last.center()), [4]);
+        let top_last = buttons[2].rect.center();
+        assert_eq!(click_toolbar(&context, inner, top_last), [2]);
+        let foot = buttons[4].rect.center();
+        assert_eq!(click_toolbar(&context, inner, foot), [4]);
+        // The bottom group's first button, under the top group's
+        // separator, is cut off there.
+        assert!(buttons[3].rect.top() < buttons[2].rect.bottom() + 17.0);
     }
 
     #[test]
-    fn shortcuts_stay_legible_when_disabled() {
+    fn shortcuts_dim_with_their_rows() {
+        // `Menu-Gesture` at 0.75, set to 0.5 (not halved again) when the
+        // row is disabled.
+        assert_eq!(shortcut_color(true), theme::MENU_GESTURE.gamma_multiply(0.75));
+        assert_eq!(shortcut_color(false), theme::MENU_GESTURE.gamma_multiply(0.5));
         let enabled = contrast(shortcut_color(true), theme::MENU_BACKGROUND);
         let disabled = contrast(shortcut_color(false), theme::MENU_BACKGROUND);
-        assert!(enabled >= 3.0, "an enabled shortcut is {enabled:.2}:1");
-        assert!(disabled >= 3.0, "a disabled shortcut is {disabled:.2}:1");
+        assert!(disabled < enabled, "a disabled shortcut ({disabled:.2}:1) stands out more than an enabled one ({enabled:.2}:1)");
     }
 
     /// The colour each text in `shapes` was painted in, as epaint resolves

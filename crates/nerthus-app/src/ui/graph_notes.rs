@@ -14,7 +14,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{drag_origin, drag_pointer, GraphState, GraphView};
+use crate::ui::graph_canvas::{drag_origin, GraphState, GraphView};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
 use crate::ui::widgets::{menu_caption, menu_item, menu_separator, menu_style, Tooltips};
@@ -192,7 +192,7 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
     };
     let held = ui.input(|input| input.pointer.primary_down());
     let mut corner = drag.start;
-    let pointer = if drag.moves() { drag_pointer(ui, state.rect) } else { ui.input(|input| input.pointer.interact_pos()) };
+    let pointer = ui.input(|input| input.pointer.interact_pos());
     if let Some(point) = pointer {
         let delta = view.to_canvas(origin, point) - drag.pointer_start;
         if drag.resizing {

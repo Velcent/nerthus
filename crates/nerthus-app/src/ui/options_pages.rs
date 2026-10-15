@@ -11,11 +11,11 @@
 //! sends nothing; the boxes show, disabled).
 
 use egui::text::{CCursor, CCursorRange};
-use egui::{Align, Color32, Layout, RichText, Stroke, Ui, Vec2};
+use egui::{Align, Color32, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use serde_json::{json, Value};
 
 use crate::theme;
-use crate::ui::colour_picker::colour_button;
+use crate::ui::colour_button::{self, colour_button};
 use crate::ui::editors;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::options_window::OptionsTab;
@@ -397,17 +397,7 @@ fn check(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, indent: f32, tex
     });
 }
 
-/// A check box headed by a label in the column `label_width` wide, as
-/// far from it as `choice` puts its choices.
-fn labelled_check(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, label_width: f32, text: &str) {
-    ui.horizontal(|ui| {
-        row_label(ui, label, label_width);
-        ui.add_space(8.0);
-        check_box(ui, copy, setting, text);
-    });
-}
-
-/// The check box of `check` and `labelled_check`.
+/// The check box of `check`.
 fn check_box(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, text: &str) {
     let mut checked = copy.flag(setting);
     if ui.checkbox(&mut checked, RichText::new(text).font(theme::interface(12.0))).changed() {
@@ -526,11 +516,11 @@ fn take_folder_answers(copy: &mut OptionsCopy, dialogs: &mut FileDialogs) {
 
 /// An enum member stored by name: each choice shown, and the name it
 /// stores.
-fn named_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, label_width: f32, choices: &[(&str, &str)], width: Option<f32>) {
+fn named_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, choices: &[(&str, &str)], width: Option<f32>) {
     let current = copy.text(setting);
     let index = choices.iter().position(|(_, name)| *name == current);
     let shown: Vec<&str> = choices.iter().map(|(shown, _)| *shown).collect();
-    if let Some(chosen) = choice(ui, label, label_width, &shown, index, width) {
+    if let Some(chosen) = choice(ui, label, 96.0, &shown, index, width) {
         copy.set(setting, Value::String(choices[chosen].1.to_string()));
     }
 }
@@ -545,12 +535,12 @@ fn indexed_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: 
 }
 
 /// An integer member stored as one of `values`.
-fn valued_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, label_width: f32, values: &[i64], width: Option<f32>) {
+fn valued_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, values: &[i64], width: Option<f32>) {
     let current = copy.number(setting) as i64;
     let names: Vec<String> = values.iter().map(i64::to_string).collect();
     let choices: Vec<&str> = names.iter().map(String::as_str).collect();
     let index = values.iter().position(|value| *value == current);
-    if let Some(chosen) = choice(ui, label, label_width, &choices, index, width) {
+    if let Some(chosen) = choice(ui, label, 96.0, &choices, index, width) {
         copy.set(setting, json!(values[chosen]));
     }
 }
@@ -627,7 +617,7 @@ fn paths(ui: &mut Ui, copy: &mut OptionsCopy, dialogs: &mut FileDialogs) {
     ui.add_space(8.0);
     section(ui, "Paths", 16.0);
     let storage = [("Don't Save", "None"), ("Central Data Folder", "Central"), ("Next to File", "Local")];
-    named_choice(ui, copy, Opt("ThumbnailStorage"), "File Thumbnails", 96.0, &storage, None);
+    named_choice(ui, copy, Opt("ThumbnailStorage"), "File Thumbnails", &storage, None);
     ui.add_space(12.0);
     folder_box(ui, copy, dialogs, Pref("Locations", "Documents"), "User Files");
     note(ui, 100.0, "This is where all Presets, Screenshots, and other Nerthus documents are stored.", theme::LABEL_DEFAULT);
@@ -644,55 +634,53 @@ fn paths(ui: &mut Ui, copy: &mut OptionsCopy, dialogs: &mut FileDialogs) {
     note(ui, 24.0, "Projects are usually small, lightweight files. However, Builds are very large and heavy. Keeping them separate is recommended if you frequently backup either folder.", theme::LABEL_EMPHASIS);
 }
 
-/// `ToolboxTab`'s label column, wide enough for "Maximum Results" to
-/// start in line with the section titles.
-const TOOLBOX_LABELS: f32 = 108.0;
-/// Where `ToolboxTab`'s check boxes go: in line with its choices, which
-/// `choice` puts 8 and the item spacing past the labels.
-const TOOLBOX_CHECKS: f32 = TOOLBOX_LABELS + 14.0;
-
 /// `ToolboxTab`: Menus show their layout and organization, the Toolbox
 /// its layout and labels.
 fn toolbox(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.add_space(8.0);
     section(ui, "Toolbox", 16.0);
-    named_choice(ui, copy, Opt("ToolboxStyle"), "Configuration", TOOLBOX_LABELS, &[("Menus", "Menus"), ("Toolbox", "Panel")], Some(220.0));
+    named_choice(ui, copy, Opt("ToolboxStyle"), "Configuration", &[("Menus", "Menus"), ("Toolbox", "Panel")], Some(220.0));
     ui.add_space(12.0);
     if copy.text(Opt("ToolboxStyle")) == "Panel" {
         let compact = copy.flag(Opt("ToolboxCompact"));
-        if let Some(chosen) = choice(ui, "Layout", TOOLBOX_LABELS, &["Compact", "Expanded"], Some(usize::from(!compact)), Some(220.0)) {
+        if let Some(chosen) = choice(ui, "Layout", 96.0, &["Compact", "Expanded"], Some(usize::from(!compact)), Some(220.0)) {
             copy.set(Opt("ToolboxCompact"), Value::Bool(chosen == 0));
         }
         ui.add_space(8.0);
-        check(ui, copy, Opt("ToolboxLeftAlignLabels"), TOOLBOX_CHECKS, "Left-align labels");
+        check(ui, copy, Opt("ToolboxLeftAlignLabels"), 112.0, "Left-align labels");
     } else {
         let modes = [("Compact", "Single"), ("Buttons", "Double"), ("Large", "Expanded")];
-        named_choice(ui, copy, Opt("ToolboxMode"), "Layout", TOOLBOX_LABELS, &modes, Some(220.0));
+        named_choice(ui, copy, Opt("ToolboxMode"), "Layout", &modes, Some(220.0));
         ui.add_space(8.0);
         let menus = [("Nested by Family", "Nested"), ("Show All", "Flat")];
-        named_choice(ui, copy, Opt("ToolboxMenus"), "Organization", TOOLBOX_LABELS, &menus, Some(220.0));
+        named_choice(ui, copy, Opt("ToolboxMenus"), "Organization", &menus, Some(220.0));
         ui.add_space(8.0);
-        check(ui, copy, Opt("ShowIconsInToolbox"), TOOLBOX_CHECKS, "Show icons in Toolbox");
+        check(ui, copy, Opt("ShowIconsInToolbox"), 112.0, "Show icons in Toolbox");
     }
     ui.add_space(8.0);
-    check(ui, copy, Opt("ToolboxHighlightHighUse"), TOOLBOX_CHECKS, "Highlight most-used nodes");
+    check(ui, copy, Opt("ToolboxHighlightHighUse"), 112.0, "Highlight most-used nodes");
     ui.add_space(4.0);
-    check(ui, copy, Opt("ToolboxPinHighUse"), TOOLBOX_CHECKS, "Pin most-used nodes");
+    check(ui, copy, Opt("ToolboxPinHighUse"), 112.0, "Pin most-used nodes");
     ui.add_space(8.0);
     section(ui, "Search", 8.0);
-    labelled_check(ui, copy, Opt("ShowFamilyName"), "Search Results", TOOLBOX_LABELS, "Show Family Name");
-    check(ui, copy, Opt("ShowIconsInSearchResults"), TOOLBOX_CHECKS, "Show Icons");
+    // "Search Results" (margin 26, 6, 0, -25) shares the first check's row.
+    let row_top = ui.cursor().top();
+    let label_position = egui::pos2(ui.min_rect().left() + 26.0, row_top + 3.0);
+    let label_galley = ui.painter().layout_no_wrap("Search Results".to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
+    ui.painter().galley(label_position, label_galley, theme::LABEL_DEFAULT);
+    check(ui, copy, Opt("ShowFamilyName"), 112.0, "Show Family Name");
+    check(ui, copy, Opt("ShowIconsInSearchResults"), 112.0, "Show Icons");
     ui.add_space(8.0);
-    valued_choice(ui, copy, Opt("MaximumSearchResults"), "Maximum Results", TOOLBOX_LABELS, &[5, 10, 15], Some(220.0));
+    valued_choice(ui, copy, Opt("MaximumSearchResults"), "Maximum Results", &[5, 10, 15], Some(220.0));
     ui.separator();
-    check(ui, copy, Opt("StackedSatelliteMaps"), TOOLBOX_CHECKS, "Show Satellite Maps List as a Single Stack");
+    check(ui, copy, Opt("StackedSatelliteMaps"), 112.0, "Show Satellite Maps List as a Single Stack");
 }
 
 /// `GraphTab`.
 fn graph(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.add_space(8.0);
     section(ui, "Graph", 16.0);
-    valued_choice(ui, copy, Opt("GridSize"), "Grid Snap Size", 96.0, &[10, 20, 25, 50, 100], Some(220.0));
+    valued_choice(ui, copy, Opt("GridSize"), "Grid Snap Size", &[10, 20, 25, 50, 100], Some(220.0));
     ui.separator();
     ui.add_space(8.0);
     check(ui, copy, Opt("ConfineShortcuts"), 108.0, "Allow node shortcuts only when cursor is inside the graph");
@@ -739,7 +727,7 @@ fn node(ui: &mut Ui, copy: &mut OptionsCopy) {
 fn data_view(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.add_space(8.0);
     section(ui, "Data View", 16.0);
-    named_choice(ui, copy, Opt("DataViewIcons"), "Icons", 96.0, &[("Colorful", "Color"), ("Muted", "Muted"), ("Hide", "Hide")], None);
+    named_choice(ui, copy, Opt("DataViewIcons"), "Icons", &[("Colorful", "Color"), ("Muted", "Muted"), ("Hide", "Hide")], None);
     ui.add_space(12.0);
     check(ui, copy, Opt("ExpandDataView"), 112.0, "Always expand");
 }
@@ -845,8 +833,11 @@ fn viewport(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.horizontal(|ui| {
         row_label(ui, "Background", 96.0);
         ui.add_space(8.0);
-        let size = ui.spacing().interact_size;
-        if let Some(colour) = colour_button(ui, size, colour) {
+        // `viewportBG`: a `ColorPicker` with nothing in it (margin 0, 4,
+        // 4, 4).
+        let (row, _) = ui.allocate_exact_size(colour_button::empty_button_size() + Vec2::new(4.0, 8.0), Sense::hover());
+        let button = Rect::from_min_max(row.min + Vec2::new(0.0, 4.0), row.max - Vec2::splat(4.0));
+        if let Some(colour) = colour_button(ui, ui.id().with("viewport-background"), button, colour, "", None) {
             let value = json!({"R": colour[0] as f64 / 255.0, "G": colour[1] as f64 / 255.0, "B": colour[2] as f64 / 255.0});
             copy.set(Opt("ViewportBackground"), value);
         }
@@ -1063,35 +1054,32 @@ mod tests {
     }
 
     #[test]
-    fn toolbox_labels_line_up_in_their_column() {
+    fn toolbox_labels_keep_their_96_column() {
         for style in ["Menus", "Panel"] {
             let context = context();
             let mut copy = copy();
             copy.set(Opt("ToolboxStyle"), Value::String(style.to_string()));
             let texts = settle(&context, OptionsTab::Toolbox, &mut copy);
-            let mut labels = vec!["Configuration", "Layout", "Search Results", "Maximum Results"];
+            let mut labels = vec!["Configuration", "Layout", "Maximum Results"];
             if style == "Menus" {
                 labels.push("Organization");
             }
+            // Right-aligned in the 96 column, "Maximum Results" running out
+            // of it on the left as it does in Gaea.
             let column = rect_of(&texts, "Configuration").right();
             for label in labels {
                 let rect = rect_of(&texts, label);
                 assert!((rect.right() - column).abs() <= 0.5, "{style}: {label} ends at {}, not {column}", rect.right());
-                assert!(rect.left() >= PLACE.left() + 8.0, "{style}: {label} starts at {}, at the section's edge {}", rect.left(), PLACE.left());
             }
-            // "Search Results" heads the first of its check boxes, as far
-            // from it as the other labels are from what they label.
+            // "Search Results" 26 in, in the row of the first of its check
+            // boxes, which line up with the other checks at 112.
             let search = rect_of(&texts, "Search Results");
             let family = rect_of(&texts, "Show Family Name");
-            let icons = rect_of(&texts, "Show Icons");
+            assert!((search.left() - (column - 96.0 + 26.0)).abs() <= 0.5, "{style}: {search:?}");
             assert!((search.center().y - family.center().y).abs() <= 1.0, "{style}: {search:?} is not in the row of {family:?}");
-            assert!((family.left() - icons.left()).abs() <= 0.5, "{style}: the search check boxes do not line up");
-            let first_choice = rect_of(&texts, if style == "Menus" { "Menus" } else { "Compact" });
-            let first_check = rect_of(&texts, "Highlight most-used nodes");
-            let family_gap = family.left() - search.right();
-            let choice_gap = first_check.left() - column;
-            assert!((family_gap - choice_gap).abs() <= 0.5, "{style}: Show Family Name is {family_gap} from its label, the checks {choice_gap} from the column");
-            assert!(first_choice.left() > column + 8.0, "{style}: the choices start at {}, too near the labels", first_choice.left());
+            for check in ["Show Icons", "Highlight most-used nodes"] {
+                assert!((family.left() - rect_of(&texts, check).left()).abs() <= 0.5, "{style}: {check} does not line up");
+            }
         }
     }
 

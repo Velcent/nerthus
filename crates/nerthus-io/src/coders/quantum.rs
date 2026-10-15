@@ -1,8 +1,9 @@
-//! ImageMagick's `ImportQuantumPixels` for the quantum types its TIFF
-//! reader uses, with its quirks: min-is-white honoured only at 1, 8 and
-//! 16 bits; pads skipped by the byte-sized paths but not the bit-packed
-//! ones; 10-bit RGBA scaled as `value << 6`; associated alpha divided out
-//! of every other updated channel afterwards.
+//! ImageMagick's `ImportQuantumPixels` (`quantum-import.c`) for the
+//! quantum types the readers use, with its quirks: min-is-white honoured
+//! only at 1, 8 and 16 bits; pads skipped by the byte-sized paths but not
+//! the bit-packed ones; 10-bit RGBA scaled as `value << 6`; associated
+//! alpha divided out of every other updated channel afterwards. Samples of
+//! more than a byte are in the quantum's byte order (`quantum_info->endian`).
 
 use anyhow::{bail, Result};
 
@@ -12,7 +13,7 @@ const QUANTUM_RANGE: f64 = 65535.0;
 const MAGICK_EPSILON: f64 = 1.0e-12;
 
 /// The image being filled: ImageMagick's pixel cache and channel map.
-pub(super) struct Picture {
+pub(crate) struct Picture {
     pub width: usize,
     pub height: usize,
     pub cmyk: bool,
@@ -69,6 +70,61 @@ impl Picture {
         Self { width, height, cmyk, alpha, pseudo, meta, stride: count, data, colormap: Vec::new(), red, green, blue, black, alpha_offset, index, meta_offset }
     }
 
+    /// The picture as a pixel cache: its channels in the map's order.
+    pub fn into_cache(self, gray: bool, colorspace: crate::pixel_cache::CacheColorspace, gamma: f64, image_type: crate::pixel_cache::ImageType) -> crate::pixel_cache::PixelCache {
+        use crate::pixel_cache::PixelChannel;
+        let mut channels = if gray { vec![PixelChannel::Gray] } else { vec![PixelChannel::Red, PixelChannel::Green, PixelChannel::Blue] };
+        if self.cmyk {
+            channels.push(PixelChannel::Black);
+        }
+        if self.alpha {
+            channels.push(PixelChannel::Alpha);
+        }
+        if self.pseudo {
+            channels.push(PixelChannel::Index);
+        }
+        channels.extend(std::iter::repeat_n(PixelChannel::Meta, self.meta));
+        let mut cache = crate::pixel_cache::PixelCache::new(self.width, self.height, channels, self.data, colorspace, gamma);
+        cache.image_type = image_type;
+        if self.pseudo {
+            cache.colormap = self.colormap.iter().map(|entry| [entry[0], entry[1], entry[2], QUANTUM_RANGE]).collect();
+        }
+        cache
+    }
+
+    /// `ResetImagePixels`: every sample zero.
+    pub fn reset(&mut self) {
+        self.data.fill(0.0);
+    }
+
+    /// The sample of `channel` at `pixel` (`SetPixelRed`, …; a grey image's
+    /// colours share one channel).
+    pub fn set_red(&mut self, pixel: usize, value: f32) {
+        self.set(pixel, Slot::Red, value);
+    }
+
+    pub fn set_green(&mut self, pixel: usize, value: f32) {
+        self.set(pixel, Slot::Green, value);
+    }
+
+    pub fn set_blue(&mut self, pixel: usize, value: f32) {
+        self.set(pixel, Slot::Blue, value);
+    }
+
+    pub fn set_black(&mut self, pixel: usize, value: f32) {
+        self.set(pixel, Slot::Black, value);
+    }
+
+    pub fn set_alpha(&mut self, pixel: usize, value: f32) {
+        self.set(pixel, Slot::Alpha, value);
+    }
+
+    /// The red, green and blue of `pixel`.
+    pub fn rgb(&self, pixel: usize) -> [f32; 3] {
+        let base = pixel * self.stride;
+        [self.data[base + self.red], self.data[base + self.green], self.data[base + self.blue]]
+    }
+
     /// `GetImageChannels`: the channels with the update trait (all but
     /// the index).
     fn update_channels(&self) -> usize {
@@ -79,7 +135,7 @@ impl Picture {
 
 /// The ImageMagick quantum types the TIFF reader imports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum QuantumType {
+pub(crate) enum QuantumType {
     Gray,
     GrayAlpha,
     Index,
@@ -94,6 +150,8 @@ pub(super) enum QuantumType {
     Blue,
     Black,
     Multispectral,
+    /// Two samples a pixel (DPX 4:2:2), into red and green.
+    CbYCrY,
 }
 
 impl QuantumType {
@@ -101,6 +159,7 @@ impl QuantumType {
     fn channels(self, picture: &Picture) -> usize {
         match self {
             QuantumType::GrayAlpha | QuantumType::IndexAlpha => 2,
+            QuantumType::CbYCrY => 4,
             QuantumType::Rgb => 3,
             QuantumType::Rgba | QuantumType::Cmyk => 4,
             QuantumType::Cmyka => 5,
@@ -110,14 +169,44 @@ impl QuantumType {
     }
 }
 
+/// `SetQuantumImageType`: the image type a reader leaves after importing
+/// samples of `kind` at `depth` bits.
+pub(crate) fn image_type(kind: QuantumType, depth: u32) -> crate::pixel_cache::ImageType {
+    use crate::pixel_cache::ImageType;
+    match kind {
+        QuantumType::Index | QuantumType::IndexAlpha => ImageType::Palette,
+        QuantumType::Gray | QuantumType::GrayAlpha if depth == 1 => ImageType::Bilevel,
+        QuantumType::Gray | QuantumType::GrayAlpha => ImageType::Grayscale,
+        QuantumType::Black | QuantumType::Cmyk | QuantumType::Cmyka | QuantumType::Multispectral => ImageType::ColorSeparation,
+        _ => ImageType::TrueColor,
+    }
+}
+
+/// `EndianType` of a quantum's multi-byte samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Endian {
+    Lsb,
+    Msb,
+}
+
 /// `QuantumInfo`: how samples are laid out.
 #[derive(Clone, Debug)]
-pub(super) struct QuantumInfo {
+pub(crate) struct QuantumInfo {
     pub depth: u32,
     pub float: bool,
+    pub endian: Endian,
+    /// What 32- and 64-bit floats are offset by, then scaled by
+    /// (`quantum:minimum`, `scale`).
+    pub minimum: f64,
+    pub scale: f64,
     pub min_is_white: bool,
     pub pad: usize,
     pub associated_alpha: bool,
+    /// `quantum_info->pack`: false for DPX's filled 32-bit words.
+    pub pack: bool,
+    /// `quantum_info->quantum`: 32 makes 10- and 12-bit RGB take its bits
+    /// from 32-bit words, least significant first.
+    pub quantum: u32,
     /// The meta channel a separate plane goes to (1-based; 0 is none).
     pub meta_channel: usize,
 }
@@ -137,7 +226,7 @@ impl QuantumInfo {
                 16
             };
         }
-        Self { depth, float, min_is_white: false, pad: 0, associated_alpha: false, meta_channel: 0 }
+        Self { depth, float, endian: Endian::Lsb, minimum: 0.0, scale: QUANTUM_RANGE, min_is_white: false, pad: 0, associated_alpha: false, pack: true, quantum: 8, meta_channel: 0 }
     }
 
     /// `GetQuantumExtent` (packed samples).
@@ -147,10 +236,13 @@ impl QuantumInfo {
     }
 }
 
-/// Samples read from a row of bytes, ImageMagick's `Push*Pixel` in
-/// little-endian order; bytes past the buffer read as zero.
+/// Samples read from a row of bytes, ImageMagick's `Push*Pixel` in the
+/// quantum's byte order; bytes past the buffer read as zero.
 struct Samples<'a> {
     bytes: &'a [u8],
+    endian: Endian,
+    minimum: f64,
+    scale: f64,
     position: usize,
     /// `quantum_info->state`: the byte being taken apart bit by bit.
     bits: u32,
@@ -169,22 +261,25 @@ impl Samples<'_> {
     }
 
     fn short(&mut self) -> u16 {
-        let low = self.byte() as u16;
-        let high = self.byte() as u16;
-        low | (high << 8)
+        let first = self.byte() as u16;
+        let second = self.byte() as u16;
+        match self.endian {
+            Endian::Lsb => first | (second << 8),
+            Endian::Msb => (first << 8) | second,
+        }
     }
 
     fn long(&mut self) -> u32 {
-        let mut value = 0u32;
-        for shift in [0, 8, 16, 24] {
-            value |= (self.byte() as u32) << shift;
+        let bytes = [self.byte(), self.byte(), self.byte(), self.byte()];
+        match self.endian {
+            Endian::Lsb => u32::from_le_bytes(bytes),
+            Endian::Msb => u32::from_be_bytes(bytes),
         }
-        value
     }
 
     /// `ScaleFloatPixel` on a float's bits.
-    fn scale_float(bits: u32) -> f32 {
-        let pixel = f32::from_bits(bits) as f64 * QUANTUM_RANGE;
+    fn scale_float(&self, bits: u32) -> f32 {
+        let pixel = (f32::from_bits(bits) as f64 - self.minimum) * self.scale;
         if pixel < -(f32::MAX as f64) {
             return -f32::MAX;
         }
@@ -197,13 +292,16 @@ impl Samples<'_> {
     /// `PushQuantumFloatPixel`.
     fn float(&mut self) -> f32 {
         let bits = self.long();
-        Self::scale_float(bits)
+        self.scale_float(bits)
     }
 
     /// `PushQuantumFloat24Pixel`: sign, 7-bit exponent biased by 63 and a
     /// 16-bit mantissa, widened to a float.
     fn float24(&mut self) -> f32 {
         let mut quantum = [self.byte(), self.byte(), self.byte(), 0u8];
+        if self.endian == Endian::Msb {
+            quantum.swap(0, 2);
+        }
         if (quantum[0] | quantum[1] | quantum[2]) != 0 {
             let sign_bit = quantum[2] & 0x80;
             let mut exponent = quantum[2] & 0x7F;
@@ -215,7 +313,7 @@ impl Samples<'_> {
             quantum[1] = ((quantum[1] & 0x01) << 7) | ((quantum[0] & 0xFE) >> 1);
             quantum[0] = (quantum[0] & 0x01) << 7;
         }
-        Self::scale_float(u32::from_le_bytes(quantum))
+        self.scale_float(u32::from_le_bytes(quantum))
     }
 
     /// `PushDoublePixel`.
@@ -224,7 +322,11 @@ impl Samples<'_> {
         for byte in eight.iter_mut() {
             *byte = self.byte();
         }
-        f64::from_le_bytes(eight) * QUANTUM_RANGE
+        let value = match self.endian {
+            Endian::Lsb => f64::from_le_bytes(eight),
+            Endian::Msb => f64::from_be_bytes(eight),
+        };
+        (value - self.minimum) * self.scale
     }
 
     /// `PushQuantumPixel`: `depth` bits, most significant first.
@@ -245,6 +347,26 @@ impl Samples<'_> {
         quantum as u32
     }
 
+    /// `PushQuantumLongPixel`: `depth` bits from 32-bit words in the
+    /// quantum's byte order, least significant first.
+    fn long_bits(&mut self, depth: u32) -> u32 {
+        let mut quantum = 0u32;
+        let mut remaining = depth;
+        while remaining > 0 {
+            if self.bits == 0 {
+                self.pixel = self.long();
+                self.bits = 32;
+            }
+            let count = remaining.min(self.bits);
+            let mask = if count >= 32 { u32::MAX } else { (1u32 << count) - 1 };
+            let part = (self.pixel >> (32 - self.bits)) & mask;
+            quantum |= part << (depth - remaining);
+            remaining -= count;
+            self.bits -= count;
+        }
+        quantum
+    }
+
     /// A half float (`HalfToSinglePrecision`) times the quantum range.
     fn half(&mut self) -> f32 {
         let value = self.short();
@@ -253,7 +375,7 @@ impl Samples<'_> {
 }
 
 /// `GetQuantumRange`.
-fn quantum_range(depth: u32) -> u64 {
+pub(crate) fn quantum_range(depth: u32) -> u64 {
     if depth == 0 {
         return 0;
     }
@@ -264,7 +386,7 @@ fn quantum_range(depth: u32) -> u64 {
 }
 
 /// `ScaleAnyToQuantum`.
-fn scale_any(quantum: u64, range: u64) -> f32 {
+pub(crate) fn scale_any(quantum: u64, range: u64) -> f32 {
     if quantum > range {
         return QUANTUM_RANGE as f32;
     }
@@ -272,11 +394,11 @@ fn scale_any(quantum: u64, range: u64) -> f32 {
     (QUANTUM_RANGE * (quantum as f64 * reciprocal)) as f32
 }
 
-fn char_quantum(value: u8) -> f32 {
+pub(crate) fn char_quantum(value: u8) -> f32 {
     (257.0 * value as f64) as f32
 }
 
-fn long_quantum(value: u32) -> f32 {
+pub(crate) fn long_quantum(value: u32) -> f32 {
     (value as f64 / 65537.0) as f32
 }
 
@@ -388,8 +510,8 @@ fn slots(kind: QuantumType) -> &'static [Slot] {
 
 /// `ImportQuantumPixels` for `count` pixels from pixel `start` of the
 /// picture.
-pub(super) fn import(picture: &mut Picture, info: &QuantumInfo, kind: QuantumType, start: usize, count: usize, bytes: &[u8]) -> Result<()> {
-    let mut samples = Samples { bytes, position: 0, bits: 0, pixel: 0 };
+pub(crate) fn import(picture: &mut Picture, info: &QuantumInfo, kind: QuantumType, start: usize, count: usize, bytes: &[u8]) -> Result<()> {
+    let mut samples = Samples { bytes, endian: info.endian, minimum: info.minimum, scale: info.scale, position: 0, bits: 0, pixel: 0 };
     match kind {
         QuantumType::Alpha => {
             if !picture.alpha {
@@ -407,6 +529,7 @@ pub(super) fn import(picture: &mut Picture, info: &QuantumInfo, kind: QuantumTyp
         QuantumType::Green => import_channel(picture, info, start, count, &mut samples, Slot::Green),
         QuantumType::Blue => import_channel(picture, info, start, count, &mut samples, Slot::Blue),
         QuantumType::Gray => import_gray(picture, info, start, count, &mut samples),
+        QuantumType::CbYCrY => import_cbycry(picture, info, start, count, &mut samples),
         QuantumType::GrayAlpha => import_gray_alpha(picture, info, start, count, &mut samples),
         QuantumType::Index => import_index(picture, info, start, count, &mut samples)?,
         QuantumType::IndexAlpha => import_index_alpha(picture, info, start, count, &mut samples)?,
@@ -509,6 +632,50 @@ fn import_gray(picture: &mut Picture, info: &QuantumInfo, start: usize, count: u
                 let value = if info.min_is_white { QUANTUM_RANGE as f32 - value } else { value };
                 set(picture, pixel, value);
                 set_opaque(picture, pixel);
+                samples.skip(info.pad);
+            }
+        }
+        10 if !info.pack => {
+            // Three samples a 32-bit word: high to low on little-endian
+            // images, low to high on big-endian ones.
+            let range = quantum_range(10);
+            let shifts = if info.endian == Endian::Lsb { [22, 12, 2] } else { [2, 12, 22] };
+            let mut pixel = start;
+            let mut word = 0u32;
+            let mut x = 0;
+            while x + 2 < count {
+                word = samples.long();
+                for shift in shifts {
+                    set(picture, pixel, scale_any(((word >> shift) & 0x3ff) as u64, range));
+                    pixel += 1;
+                }
+                samples.skip(info.pad);
+                x += 3;
+            }
+            if x + 1 < count {
+                word = samples.long();
+                set(picture, pixel, scale_any(((word >> shifts[0]) & 0x3ff) as u64, range));
+                pixel += 1;
+            }
+            if x + 1 < count {
+                set(picture, pixel, scale_any(((word >> 12) & 0x3ff) as u64, range));
+            }
+        }
+        12 if !info.pack => {
+            // A 16-bit word each, the sample in its top twelve bits.
+            let range = quantum_range(12);
+            let mut pixel = start;
+            let mut x = 0;
+            while x + 1 < count {
+                for _ in 0..2 {
+                    set(picture, pixel, scale_any((samples.short() >> 4) as u64, range));
+                    pixel += 1;
+                }
+                samples.skip(info.pad);
+                x += 2;
+            }
+            if count % 2 == 1 {
+                set(picture, pixel, scale_any((samples.short() >> 4) as u64, range));
                 samples.skip(info.pad);
             }
         }
@@ -747,6 +914,33 @@ fn import_index_alpha(picture: &mut Picture, info: &QuantumInfo, start: usize, c
 /// `ImportCMYKAQuantum`.
 fn import_colours(picture: &mut Picture, info: &QuantumInfo, kind: QuantumType, start: usize, count: usize, samples: &mut Samples) {
     let order = slots(kind);
+    if kind == QuantumType::Rgb && matches!(info.depth, 10 | 12) && (!info.pack || info.quantum == 32) {
+        import_rgb_words(picture, info, start, count, samples);
+        return;
+    }
+    if info.depth == 10 && kind == QuantumType::Rgba && !info.pack {
+        // Three samples a 32-bit word, high to low, running on across
+        // pixels; each scaled as a 16-bit value shifted up by six.
+        let mut word = 0u32;
+        let mut n = 0usize;
+        for pixel in start..start + count {
+            for &slot in order {
+                let shift = match n % 3 {
+                    0 => {
+                        word = samples.long();
+                        22
+                    }
+                    1 => 12,
+                    _ => 2,
+                };
+                let value = (((word >> shift) & 0x3ff) << 6) as u16;
+                picture.set(pixel, slot, value as f32);
+                n += 1;
+            }
+            samples.skip(info.pad);
+        }
+        return;
+    }
     if info.depth == 10 && kind == QuantumType::Rgba {
         // Scaled as 16-bit values shifted up by six.
         for pixel in start..start + count {
@@ -769,6 +963,102 @@ fn import_colours(picture: &mut Picture, info: &QuantumInfo, kind: QuantumType, 
         if pads {
             samples.skip(info.pad);
         }
+    }
+}
+
+/// `ImportRGBQuantum` at 10 and 12 bits from 32-bit words: filled
+/// (unpacked) words of three 10-bit samples or 16-bit words of one 12-bit
+/// sample, or packed bits taken from words least significant first.
+fn import_rgb_words(picture: &mut Picture, info: &QuantumInfo, start: usize, count: usize, samples: &mut Samples) {
+    let range = quantum_range(info.depth);
+    let order = [Slot::Red, Slot::Green, Slot::Blue];
+    if info.pack {
+        for pixel in start..start + count {
+            for slot in order {
+                let value = samples.long_bits(info.depth);
+                picture.set(pixel, slot, scale_any(value as u64, range));
+            }
+        }
+        return;
+    }
+    if info.depth == 10 {
+        for pixel in start..start + count {
+            let word = samples.long();
+            for (slot, shift) in order.into_iter().zip([22, 12, 2]) {
+                picture.set(pixel, slot, scale_any(((word >> shift) & 0x3ff) as u64, range));
+            }
+            samples.skip(info.pad);
+        }
+        return;
+    }
+    // 12 bits: the samples run on across pixels, two words a step.
+    let total = 3 * count;
+    let mut pixel = start;
+    let put = |picture: &mut Picture, index: usize, value: u16, pixel: &mut usize| {
+        let slot = order[index % 3];
+        picture.set(*pixel, slot, scale_any((value >> 4) as u64, range));
+        if index % 3 == 2 {
+            *pixel += 1;
+        }
+    };
+    let mut x = 0;
+    while x + 1 < total {
+        let first = samples.short();
+        put(picture, x, first, &mut pixel);
+        let second = samples.short();
+        put(picture, x + 1, second, &mut pixel);
+        samples.skip(info.pad);
+        x += 2;
+    }
+    if total % 2 == 1 {
+        let value = samples.short();
+        put(picture, x, value, &mut pixel);
+        samples.skip(info.pad);
+    }
+}
+
+/// `ImportCbYCrYQuantum`: at 10 bits in filled words, four samples (Cb, Y,
+/// Cr, Y) give two pixels but advance four, so only half the row is
+/// filled; otherwise two samples a pixel into red and green.
+fn import_cbycry(picture: &mut Picture, info: &QuantumInfo, start: usize, count: usize, samples: &mut Samples) {
+    if info.depth == 10 && !info.pack {
+        let mut word = 0u32;
+        let mut n = 0usize;
+        let mut pixel = start;
+        let mut x = 0;
+        while x + 3 < count {
+            let mut cbcr = [0.0f32; 4];
+            for value in cbcr.iter_mut() {
+                let shift = match n % 3 {
+                    0 => {
+                        word = samples.long();
+                        22
+                    }
+                    1 => 12,
+                    _ => 2,
+                };
+                *value = ((((word >> shift) & 0x3ff) << 6) as u16) as f32;
+                n += 1;
+            }
+            samples.skip(info.pad);
+            picture.set(pixel, Slot::Red, cbcr[1]);
+            picture.set(pixel, Slot::Green, cbcr[0]);
+            picture.set(pixel, Slot::Blue, cbcr[2]);
+            pixel += 1;
+            picture.set(pixel, Slot::Red, cbcr[3]);
+            picture.set(pixel, Slot::Green, cbcr[0]);
+            picture.set(pixel, Slot::Blue, cbcr[2]);
+            pixel += 1;
+            x += 4;
+        }
+        return;
+    }
+    let range = quantum_range(info.depth);
+    for pixel in start..start + count {
+        let red = samples.any(info.depth);
+        picture.set(pixel, Slot::Red, scale_any(red as u64, range));
+        let green = samples.any(info.depth);
+        picture.set(pixel, Slot::Green, scale_any(green as u64, range));
     }
 }
 

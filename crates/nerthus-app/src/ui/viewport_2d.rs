@@ -36,15 +36,6 @@ const MAX_ZOOM: f32 = 40.0;
 const BACKGROUND: Color32 = Color32::from_rgb(0x18, 0x18, 0x18);
 /// The readouts' backing (`#66000000`).
 const READOUT_BACKING: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 0x66);
-/// A readout's text sizes: 12, and smaller in a view too small for it.
-const READOUT_SIZES: [f32; 4] = [12.0, 11.0, 10.0, 9.0];
-/// Round a readout: its margin in the view, and the room it keeps from the
-/// toolbar.
-const READOUT_MARGIN: f32 = 8.0;
-const READOUT_GAP: f32 = 4.0;
-/// `tglMetric`: 24 square, 4 above the measure's readout.
-const METRIC_TOGGLE: f32 = 24.0;
-const METRIC_TOGGLE_GAP: f32 = 4.0;
 /// `MapViewer`: 720 square, and its title when it shows no one node.
 const FLOATING_SIZE: f32 = 720.0;
 const FOLLOWING_TITLE: &str = "Map Viewer";
@@ -387,14 +378,12 @@ fn show_docked(ui: &mut Ui, rect: Rect, editor: &Editor, state: &mut Viewport2DS
     });
     let painter = ui.painter_at(rect);
     let image = image_rect(rect, view);
-    // The readouts keep clear of the toolbar.
-    let toolbar = toolbar_rect(ui, rect);
     if view.measuring {
-        measure_overlay(ui, &painter, rect, toolbar, image, view, reference.as_deref(), editor);
+        measure_overlay(ui, &painter, rect, image, view, reference.as_deref(), editor);
     }
     if view.picking {
         if let Some(reference) = &reference {
-            pick_readout(ui, &painter, rect, toolbar, image, reference, editor);
+            pick_readout(ui, &painter, rect, image, reference, editor);
         }
         let response = ui.interact(image.intersect(rect), id.with("pick"), Sense::click());
         if response.hovered() {
@@ -790,7 +779,8 @@ fn view_contents(ui: &mut Ui, rect: Rect, id: Id, view: &mut View2D, resolution:
 
     // `Toolbar` at the top right: the menu button (`tglToolbar`) and Mask
     // Enhancement.
-    let toolbar = toolbar_rect(ui, rect);
+    let button = crate::ui::widgets::toolbar_button(ui);
+    let toolbar = Rect::from_min_size(Pos2::new(rect.right() - 4.0 - 40.0, rect.top() + 4.0), Vec2::new(40.0, 2.0 * button + 12.0));
     crate::ui::widgets::toolbar_background(ui, toolbar, theme::MENU_BORDER, 1.5);
     let inner = toolbar.shrink(1.5).shrink2(Vec2::new(2.0, 4.0));
     let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)));
@@ -805,13 +795,6 @@ fn view_contents(ui: &mut Ui, rect: Rect, id: Id, view: &mut View2D, resolution:
             }
         }
     });
-}
-
-/// The toolbar's place: 40 wide and two buttons high, 4 in from the view's
-/// top right.
-fn toolbar_rect(ui: &Ui, rect: Rect) -> Rect {
-    let button = crate::ui::widgets::toolbar_button(ui);
-    Rect::from_min_size(Pos2::new(rect.right() - 4.0 - 40.0, rect.top() + 4.0), Vec2::new(40.0, 2.0 * button + 12.0))
 }
 
 /// Which way the wheel turned this frame (`MouseWheelEventArgs.Delta`'s
@@ -835,11 +818,8 @@ pub fn wheel_direction(ui: &Ui) -> f32 {
 
 /// `MeasureControl`: a darkened layer over the image with two round
 /// handles and the line between them (6 wide in the accent over 2 dark),
-/// the readout at the bottom left and the metric toggle (`tglMetric`)
-/// above it, or beside it in a short view. The line and handles are drawn
-/// over the readout.
-#[allow(clippy::too_many_arguments)]
-fn measure_overlay(ui: &mut Ui, painter: &egui::Painter, rect: Rect, toolbar: Rect, image: Rect, view: &mut View2D, reference: Option<&Map>, editor: &Editor) {
+/// the readout at the bottom left and the metric toggle (`tglMetric`).
+fn measure_overlay(ui: &mut Ui, painter: &egui::Painter, rect: Rect, image: Rect, view: &mut View2D, reference: Option<&Map>, editor: &Editor) {
     painter.rect_filled(image.intersect(rect), 0.0, READOUT_BACKING);
     let to_screen = |point: Pos2| image.min + point.to_vec2() * image.width();
     for index in 0..2 {
@@ -856,15 +836,6 @@ fn measure_overlay(ui: &mut Ui, painter: &egui::Painter, rect: Rect, toolbar: Re
             view.measure[index] = Pos2::new(moved.x.clamp(-slack, 1.0 - slack), moved.y.clamp(-slack, 1.0 - slack));
         }
     }
-    let terrain = editor.document.terrain();
-    let texts = measure_text(view.measure, view.metric, reference, terrain.width, terrain.height);
-    // `tglMetric`, where the readout left room for it.
-    if let Some(toggle) = readout(painter, rect, toolbar, &texts, true) {
-        let mut toggle_ui = ui.new_child(egui::UiBuilder::new().max_rect(toggle));
-        if crate::ui::widgets::icon_toggle_sized(&mut toggle_ui, "ruler-2", "Toggle between Metric and Normalized values", view.metric, theme::ACCENT_PRIMARY, Vec2::splat(METRIC_TOGGLE)).clicked() {
-            view.metric = !view.metric;
-        }
-    }
     let first = to_screen(view.measure[0]);
     let second = to_screen(view.measure[1]);
     painter.line_segment([first, second], Stroke::new(6.0, theme::ACCENT_PRIMARY));
@@ -873,11 +844,19 @@ fn measure_overlay(ui: &mut Ui, painter: &egui::Painter, rect: Rect, toolbar: Re
         painter.circle_filled(point, 10.0, theme::ACCENT_PRIMARY);
         painter.circle_stroke(point, 10.0, Stroke::new(1.0, theme::WINDOW_DARK));
     }
+    let terrain = editor.document.terrain();
+    let text = measure_text(view.measure, view.metric, reference, terrain.width, terrain.height);
+    let readout = readout(painter, rect, &text);
+    // `tglMetric` (24, margin 10 from the bottom left).
+    let toggle = Rect::from_min_size(Pos2::new(readout.left() + 2.0, readout.top() - 4.0 - 24.0), Vec2::splat(24.0));
+    let mut toggle_ui = ui.new_child(egui::UiBuilder::new().max_rect(toggle));
+    if crate::ui::widgets::icon_toggle_sized(&mut toggle_ui, "ruler-2", "Toggle between Metric and Normalized values", view.metric, theme::ACCENT_PRIMARY, Vec2::splat(24.0)).clicked() {
+        view.metric = !view.metric;
+    }
 }
 
-/// `MeasureControl.UpdateDistance`'s readout, and its distances alone,
-/// shortly named, for a view too small for it.
-fn measure_text(points: [Pos2; 2], metric: bool, reference: Option<&Map>, terrain_width: f32, terrain_height: f32) -> [String; 2] {
+/// `MeasureControl.UpdateDistance`'s readout.
+fn measure_text(points: [Pos2; 2], metric: bool, reference: Option<&Map>, terrain_width: f32, terrain_height: f32) -> String {
     let clamp = |point: Pos2| Pos2::new(point.x.clamp(0.0, 1.0), point.y.clamp(0.0, 1.0));
     let first = clamp(points[0]);
     let mut second = clamp(points[1]);
@@ -905,38 +884,38 @@ fn measure_text(points: [Pos2; 2], metric: bool, reference: Option<&Map>, terrai
         let rise = (first_metres - second_metres) as f64;
         let across = flat * terrain_width as f64;
         let spatial = (across * across + rise * rise).sqrt();
-        let distances = [across, spatial, (first_metres - second_metres).abs() as f64].map(|distance| grouped_optional(distance, 2, true));
-        let [flat, spatial, difference] = &distances;
-        let text = format!(
-            "{}m, {}m, {}m\n × \n{}m, {}m, {}m\n\nDistance 2D: {flat}m\nDistance 3D: {spatial}m\n Difference: {difference}m\n\n",
+        return format!(
+            "{}m, {}m, {}m\n × \n{}m, {}m, {}m\n\nDistance 2D: {}m\nDistance 3D: {}m\n Difference: {}m\n\n",
             fixed(first.x * terrain_width, 1),
             fixed(first.y * terrain_width, 1),
             fixed(first_metres, 1),
             fixed(second.x * terrain_width, 1),
             fixed(second.y * terrain_width, 1),
             fixed(second_metres, 1),
+            grouped_optional(across, 2, true),
+            grouped_optional(spatial, 2, true),
+            grouped_optional((first_metres - second_metres).abs() as f64, 2, true),
         );
-        return [text, format!("2D: {flat}m\n3D: {spatial}m\nDiff: {difference}m")];
     }
     let rise = (height_first - height_second) as f64;
     let spatial = (dx * dx + dy * dy + rise * rise).sqrt();
-    let distances = [flat as f32, spatial as f32, (height_first - height_second).abs()].map(|distance| fixed(distance, 3));
-    let [flat, spatial, difference] = &distances;
-    let text = format!(
-        "{}, {}, {}\n × \n{}, {}, {}\n\nDistance 2D: {flat}\nDistance 3D: {spatial}\n Difference: {difference}\n\n",
+    format!(
+        "{}, {}, {}\n × \n{}, {}, {}\n\nDistance 2D: {}\nDistance 3D: {}\n Difference: {}\n\n",
         fixed(first.x, 3),
         fixed(first.y, 3),
         fixed(height_first, 3),
         fixed(second.x, 3),
         fixed(second.y, 3),
         fixed(height_second, 3),
-    );
-    [text, format!("2D: {flat}\n3D: {spatial}\nDiff: {difference}")]
+        fixed(flat as f32, 3),
+        fixed(spatial as f32, 3),
+        fixed((height_first - height_second).abs(), 3),
+    )
 }
 
 /// Picking's readout (`Viewport2D_MouseMove`): the pixel under the pointer
 /// and its value.
-fn pick_readout(ui: &Ui, painter: &egui::Painter, rect: Rect, toolbar: Rect, image: Rect, reference: &Map, editor: &Editor) {
+fn pick_readout(ui: &Ui, painter: &egui::Painter, rect: Rect, image: Rect, reference: &Map, editor: &Editor) {
     let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) else {
         return;
     };
@@ -956,164 +935,18 @@ fn pick_readout(ui: &Ui, painter: &egui::Painter, rect: Rect, toolbar: Rect, ima
         let byte = |value: f32| format!("{:03}", (255.0 * value) as u8);
         format!("{column} x {row}\n\n{} {} {}\n\n{} {} {}", grouped(red as f64, 6), grouped(green as f64, 6), grouped(blue as f64, 6), byte(red), byte(green), byte(blue))
     };
-    // Without where it was read when the view is too small for it.
-    let values = text.split_once("\n\n").map_or(text.as_str(), |(_, values)| values).to_string();
-    readout(painter, rect, toolbar, &[text, values], false);
-}
-
-/// Where a readout's toggle goes: above the box at its left (where
-/// `tglMetric` is), beside it at its bottom, or in the view's bottom right
-/// corner, under the toolbar.
-#[derive(Clone, Copy)]
-enum ToggleSide {
-    Above,
-    Beside,
-    Corner,
-}
-
-/// A readout laid out to fit its view.
-struct Readout {
-    galley: Arc<egui::Galley>,
-    /// The box, and the text's padding in it.
-    rect: Rect,
-    padding: Vec2,
-    toggle: Option<Rect>,
-    /// What the box may cover: the view, unless nothing fitted it.
-    clip: Rect,
+    readout(painter, rect, &text);
 }
 
 /// A readout box at the view's bottom left (margin 8, padding 12, 8;
-/// monospace, white on `#66000000`) showing the first of `texts` that
-/// fits (`fit_readout`). Returns where its toggle goes, if it has one.
-fn readout(painter: &egui::Painter, rect: Rect, toolbar: Rect, texts: &[String], toggle: bool) -> Option<Rect> {
-    let readout = fit_readout(painter, rect, toolbar, texts, toggle);
-    let painter = painter.with_clip_rect(readout.clip);
-    painter.rect_filled(readout.rect, 0.0, READOUT_BACKING);
-    painter.galley(readout.rect.min + readout.padding, readout.galley, Color32::WHITE);
-    readout.toggle
-}
-
-/// Lays a readout out inside the view's margin and clear of its toolbar,
-/// with room for a 24 square toggle if `toggle` (above the box, beside it
-/// or under the toolbar): the first of `texts` that fits at 12 or smaller,
-/// then wrapped at spaces, below the toolbar or beside it; then the next
-/// of `texts` the same way. A view too small for any of them gets the
-/// last at the smallest size with the toggle at its top left, the text
-/// cut off where it would reach the toggle or the toolbar.
-fn fit_readout(painter: &egui::Painter, rect: Rect, toolbar: Rect, texts: &[String], toggle: bool) -> Readout {
-    let area = rect.shrink(READOUT_MARGIN);
-    let clear = toolbar.expand(READOUT_GAP);
-    // Touching is not covering.
-    let overlaps = |a: Rect, b: Rect| a.intersect(b).is_positive();
-    let box_fits = |box_rect: Rect| area.contains_rect(box_rect) && !overlaps(box_rect, clear);
-    // The toggle keeps as far in from the view's edges as the toolbar does.
-    let toggle_fits = |place: Rect, box_rect: Rect| rect.shrink(toolbar.top() - rect.top()).contains_rect(place) && !overlaps(place, clear) && !overlaps(place, box_rect.expand(METRIC_TOGGLE_GAP));
-    let at_bottom_left = |size: Vec2| Rect::from_min_max(Pos2::new(area.left(), area.bottom() - size.y), Pos2::new(area.left() + size.x, area.bottom()));
-    let sides: &[Option<ToggleSide>] = if toggle { &[Some(ToggleSide::Above), Some(ToggleSide::Beside), Some(ToggleSide::Corner)] } else { &[None] };
-    // As wide as the view below the toolbar, or as far as the toolbar
-    // beside it; each less the toggle, for it to go beside the box.
-    let beside = if toggle { METRIC_TOGGLE_GAP + METRIC_TOGGLE } else { 0.0 };
-    let wide = area.width();
-    let narrow = clear.left() - area.left();
-    let wrapped = [wide, wide - beside, narrow, narrow - beside].map(Some);
-    for text in texts {
-        for widths in [&[None][..], &wrapped[..]] {
-            for size in READOUT_SIZES {
-                for &width in widths {
-                    let Some((galley, padding)) = lay_out_readout(painter, text, size, width) else {
-                        continue;
-                    };
-                    let box_rect = at_bottom_left(galley.size() + 2.0 * padding);
-                    if !box_fits(box_rect) {
-                        continue;
-                    }
-                    for side in sides {
-                        let toggle = side.map(|side| toggle_place(rect, toolbar, box_rect, side));
-                        if toggle.is_none_or(|place| toggle_fits(place, box_rect)) {
-                            return Readout { galley, rect: box_rect, padding, toggle, clip: rect };
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let text = texts.last().map_or("", String::as_str);
-    let size = READOUT_SIZES[READOUT_SIZES.len() - 1];
-    let laid_out = [Some(narrow), Some(wide), None].into_iter().find_map(|width| lay_out_readout(painter, text, size, width));
-    let (galley, padding) = laid_out.expect("a readout lays out unwrapped");
-    let box_rect = at_bottom_left(galley.size() + 2.0 * padding);
-    let toggle = toggle.then(|| Rect::from_min_size(area.min + Vec2::new(2.0, 0.0), Vec2::splat(METRIC_TOGGLE))).filter(|&place| !overlaps(place, clear));
-    let mut clip = rect;
-    if let Some(toggle) = toggle {
-        clip.min.y = clip.min.y.max(toggle.bottom() + METRIC_TOGGLE_GAP);
-    }
-    if box_rect.right() > clear.left() {
-        clip.min.y = clip.min.y.max(clear.bottom());
-    }
-    Readout { galley, rect: box_rect, padding, toggle, clip }
-}
-
-/// Where a readout's toggle goes by its box, or centred under the toolbar
-/// as far in from the view's bottom as the toolbar is from its top.
-fn toggle_place(rect: Rect, toolbar: Rect, box_rect: Rect, side: ToggleSide) -> Rect {
-    let min = match side {
-        ToggleSide::Above => Pos2::new(box_rect.left() + 2.0, box_rect.top() - METRIC_TOGGLE_GAP - METRIC_TOGGLE),
-        ToggleSide::Beside => Pos2::new(box_rect.right() + METRIC_TOGGLE_GAP, box_rect.bottom() - METRIC_TOGGLE),
-        ToggleSide::Corner => Pos2::new(toolbar.center().x - METRIC_TOGGLE / 2.0, rect.bottom() - (toolbar.top() - rect.top()) - METRIC_TOGGLE),
-    };
-    Rect::from_min_size(min, Vec2::splat(METRIC_TOGGLE))
-}
-
-/// A readout's text at `size`, and its padding: below 12, half the
-/// padding and no blank lines. With a `width`, the box is no wider, the
-/// text wrapped at spaces; there is none if a word is wider (a number is
-/// never broken).
-fn lay_out_readout(painter: &egui::Painter, text: &str, size: f32, width: Option<f32>) -> Option<(Arc<egui::Galley>, Vec2)> {
-    let small = size < READOUT_SIZES[0];
-    let padding = if small { Vec2::new(6.0, 4.0) } else { Vec2::new(12.0, 8.0) };
-    let text = text.trim_end();
-    let mut text = if small { without_blank_lines(text) } else { text.to_string() };
-    let font = theme::monospace(size);
-    if let Some(width) = width {
-        // Monospace: as many characters a row as one's width goes into it.
-        let advance = painter.layout_no_wrap("0".to_string(), font.clone(), Color32::WHITE).size().x;
-        let columns = ((width - 2.0 * padding.x) / advance).floor().max(0.0) as usize;
-        text = wrap_words(&text, columns)?;
-    }
-    Some((painter.layout_no_wrap(text, font, Color32::WHITE), padding))
-}
-
-/// The text with its empty lines left out.
-fn without_blank_lines(text: &str) -> String {
-    text.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>().join("\n")
-}
-
-/// The text wrapped at spaces into rows of at most `columns` characters,
-/// each from its first word; `None` if a word is longer than that.
-fn wrap_words(text: &str, columns: usize) -> Option<String> {
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        let mut row = String::new();
-        let mut row_length = 0;
-        for word in line.split_whitespace() {
-            let length = word.chars().count();
-            if length > columns {
-                return None;
-            }
-            if row_length > 0 && row_length + 1 + length > columns {
-                rows.push(std::mem::take(&mut row));
-                row_length = 0;
-            }
-            if row_length > 0 {
-                row.push(' ');
-                row_length += 1;
-            }
-            row.push_str(word);
-            row_length += length;
-        }
-        rows.push(row);
-    }
-    Some(rows.join("\n"))
+/// monospace, white on `#66000000`).
+fn readout(painter: &egui::Painter, rect: Rect, text: &str) -> Rect {
+    let galley = painter.layout_no_wrap(text.trim_end().to_string(), theme::monospace(12.0), Color32::WHITE);
+    let size = galley.size() + Vec2::new(24.0, 16.0);
+    let box_rect = Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.bottom() - 8.0 - size.y), size);
+    painter.rect_filled(box_rect, 0.0, READOUT_BACKING);
+    painter.galley(box_rect.min + Vec2::new(12.0, 8.0), galley, Color32::WHITE);
+    box_rect
 }
 
 /// The "Pixel sampled" dialog (`Viewport2D_HeightPicked`): the value as
@@ -1238,125 +1071,10 @@ mod tests {
     #[test]
     fn measures_read_normalised_or_metres() {
         let points = [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0)];
-        let [text, short] = measure_text(points, false, None, 5000.0, 2500.0);
+        let text = measure_text(points, false, None, 5000.0, 2500.0);
         assert!(text.starts_with("0.000, 0.000, 0.000\n × \n1.000, 0.000, 0.000\n\nDistance 2D: 1.000"));
-        assert_eq!(short, "2D: 1.000\n3D: 1.000\nDiff: 0.000");
-        let [metres, short] = measure_text(points, true, None, 5000.0, 2500.0);
+        let metres = measure_text(points, true, None, 5000.0, 2500.0);
         assert!(metres.contains("Distance 2D: 5,000.00m"));
-        assert_eq!(short, "2D: 5,000.00m\n3D: 5,000.00m\nDiff: .00m");
-    }
-
-    #[test]
-    fn readouts_wrap_between_words() {
-        assert_eq!(wrap_words("Distance 2D: 0.225\n Difference: 0.011", 12).as_deref(), Some("Distance 2D:\n0.225\nDifference:\n0.011"));
-        assert_eq!(wrap_words("0.227, 0.137, 0.168\n × \n\n2D: 1,799.42m", 13).as_deref(), Some("0.227, 0.137,\n0.168\n×\n\n2D: 1,799.42m"));
-        // A number is never broken.
-        assert_eq!(wrap_words("2D: 1,799.42m", 8), None);
-    }
-
-    /// The docked view at the smallest the splitters leave it (120 by
-    /// 112), as small windows give it, the issue's narrow column and short
-    /// viewport, and roomier ones.
-    const DOCKED_SIZES: [Vec2; 8] = [
-        Vec2::new(120.0, 112.0),
-        Vec2::new(121.0, 400.0),
-        Vec2::new(121.0, 160.0),
-        Vec2::new(160.0, 112.0),
-        Vec2::new(160.0, 160.0),
-        Vec2::new(200.0, 180.0),
-        Vec2::new(400.0, 112.0),
-        Vec2::new(500.0, 500.0),
-    ];
-
-    /// Each of the measure's texts (normalised and metric, at the default
-    /// ends on a 5 km terrain) fitted to each of `DOCKED_SIZES`: the
-    /// view, its toolbar and the readout.
-    fn fitted_measures() -> Vec<(Rect, Rect, bool, Readout)> {
-        let context = egui::Context::default();
-        theme::apply(&context);
-        let mut fitted = Vec::new();
-        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(600.0))), ..Default::default() };
-        let output = context.run_ui(input, |ui| {
-            for size in DOCKED_SIZES {
-                let view = Rect::from_min_size(Pos2::new(20.0, 30.0), size);
-                let toolbar = toolbar_rect(ui, view);
-                for metric in [false, true] {
-                    let texts = measure_text(View2D::default().measure, metric, None, 5000.0, 2500.0);
-                    fitted.push((view, toolbar, metric, fit_readout(ui.painter(), view, toolbar, &texts, true)));
-                }
-            }
-        });
-        output.drop_without_applying_deltas();
-        fitted
-    }
-
-    #[test]
-    fn the_measure_readout_fits_beside_the_toolbar_and_keeps_its_toggle() {
-        for (view, toolbar, metric, readout) in fitted_measures() {
-            let at = format!("{:?} metric {metric}: {:?} in {:?}", view.size(), readout.galley.text(), readout.rect);
-            // What shows of the box is in the view, off the toolbar, and
-            // so is the toggle, off the box.
-            let shown = readout.rect.intersect(readout.clip);
-            assert!(view.shrink(READOUT_MARGIN).contains_rect(shown) && !shown.intersects(toolbar), "{at}: shows {shown:?}");
-            let toggle = readout.toggle.unwrap_or_else(|| panic!("{at}: no toggle"));
-            assert!(view.contains_rect(toggle) && !toggle.intersects(toolbar) && !toggle.intersects(shown), "{at}: toggle {toggle:?}");
-            // All of it, with every distance.
-            assert_eq!(readout.clip, view, "{at}: cut off");
-            assert!(view.contains_rect(readout.rect), "{at}");
-            let text = readout.galley.text();
-            assert!(text.contains("2D:") && text.contains("3D:") && (text.contains("Difference:") || text.contains("Diff:")), "{at}");
-        }
-    }
-
-    #[test]
-    fn the_measure_readout_shrinks_and_wraps_before_it_drops_the_ends() {
-        let fitted = fitted_measures();
-        let readout = |size: Vec2, metric: bool| &fitted.iter().find(|(view, _, at_metric, _)| view.size() == size && *at_metric == metric).unwrap().3;
-        // Room for it all as it was: 12, unwrapped, blank lines kept.
-        let roomy = readout(Vec2::new(500.0, 500.0), false);
-        assert_eq!(roomy.galley.job.sections[0].format.font_id.size, 12.0);
-        assert!(roomy.galley.text().starts_with("0.227, 0.137, 0.000\n × \n0.427, 0.239, 0.000\n\nDistance 2D:"), "{:?}", roomy.galley.text());
-        // A narrow column keeps both ends, if smaller or wrapped.
-        for metric in [false, true] {
-            let narrow = readout(Vec2::new(121.0, 400.0), metric).galley.text().replace('\n', " ");
-            assert!(narrow.contains("Distance 2D:"), "{narrow:?}");
-            assert!(narrow.contains(if metric { "1132.8m, 683.6m," } else { "0.227, 0.137," }), "{narrow:?}");
-        }
-        // Too short for them beside the toolbar: the distances alone.
-        let short = readout(DOCKED_SIZES[0], false);
-        assert_eq!(short.galley.text().replace('\n', " "), "2D: 0.225 3D: 0.225 Diff: 0.000");
-    }
-
-    #[test]
-    fn the_measure_readout_is_drawn_under_the_handles_and_off_the_toolbar() {
-        for size in DOCKED_SIZES {
-            let context = egui::Context::default();
-            theme::apply(&context);
-            let editor = Editor::new(crate::document::Document::new());
-            let mut state = Viewport2DState::default();
-            state.open_at_launch("measure");
-            let view = Rect::from_min_size(Pos2::new(20.0, 30.0), size);
-            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(600.0))), ..Default::default() };
-            let mut output = context.run_ui(input, |ui| show_docked(ui, view, &editor, &mut state, &mut Vec::new()));
-            let shapes: Vec<_> = std::mem::take(&mut output.shapes).into_iter().collect();
-            output.drop_without_applying_deltas();
-            let toolbar = shapes.iter().find_map(|clipped| match &clipped.shape {
-                egui::Shape::Rect(rect) if rect.fill == theme::PANEL_CLADDING => Some(rect.rect),
-                _ => None,
-            });
-            let toolbar = toolbar.expect("the toolbar");
-            let (readout, text) = shapes
-                .iter()
-                .enumerate()
-                .find_map(|(index, clipped)| match &clipped.shape {
-                    egui::Shape::Text(text) if text.galley.text().contains("2D:") => Some((index, text.visual_bounding_rect().intersect(clipped.clip_rect))),
-                    _ => None,
-                })
-                .expect("the readout");
-            assert!(view.contains_rect(text) && !text.intersects(toolbar), "{size:?}: {text:?}");
-            let handle = shapes.iter().position(|clipped| matches!(clipped.shape, egui::Shape::Circle(_))).expect("a handle");
-            assert!(handle > readout, "{size:?}");
-        }
     }
 
     #[test]

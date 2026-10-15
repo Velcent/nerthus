@@ -20,24 +20,27 @@ use crate::ui::viewport_2d::Viewport2DState;
 use crate::ui::widgets::{check_item, checked_icon_item, icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator, toolbar_background, toolbar_button, toolbar_separator, vertical_toolbar};
 use crate::viewport_render::{MaskGradient, MASK_GRADIENTS};
 
-/// The toolbar's margin in its column, clear of the frame's 2. The graph
-/// toolbar keeps it too, to line up under this one.
-pub const TOOLBAR_MARGIN: f32 = 2.0;
+/// The frame (`Border`: 2 of #212121 on #050505, corners 6) and, inside
+/// it, the toolbar's column (`ColumnDefinition Width="54"`), the toolbar
+/// right in it (`CollapsedBorder`, margin 2).
+const FRAME: f32 = 2.0;
+const FRAME_FILL: egui::Color32 = egui::Color32::from_rgb(0x05, 0x05, 0x05);
+const TOOLBAR_COLUMN: f32 = 54.0;
+const TOOLBAR_MARGIN: f32 = 2.0;
 
-/// The toolbar column: a `Toolbar.ButtonSize` button, the toolbar's
-/// `Toolbar.Padding` and border 1.5, and its margin each side.
+/// The toolbar: a `Toolbar.ButtonSize` button, the toolbar's
+/// `Toolbar.Padding` and border 1.5.
 fn toolbar_width(sizes: &theme::Sizes) -> f32 {
-    sizes.toolbar_button + 2.0 * (sizes.toolbar_padding[0] + 1.5 + TOOLBAR_MARGIN)
+    sizes.toolbar_button + 2.0 * (sizes.toolbar_padding[0] + 1.5)
 }
 
 /// `ToggleSkyEditor`: the popup is 400 wide, its panel inset 24 (the
 /// border's margin), placed left of the sun button.
 const LIGHTING_POPUP_WIDTH: f32 = 400.0;
 const LIGHTING_POPUP_MARGIN: f32 = 24.0;
-/// The least the lighting panel is narrowed to where the window has less
-/// room beside the sun button: the dial and a slider's name and value
-/// still fit.
-const LIGHTING_PANEL_MIN_WIDTH: f32 = 200.0;
+/// The panel's `Padding="0,0,8,0"`, and its toolbar's `Toolbar` margin.
+const LIGHTING_PANEL_PADDING_RIGHT: f32 = 8.0;
+const LIGHTING_TOOLBAR_MARGIN: f32 = 4.0;
 /// `SunControl`: the dial, the sun's glow and how far past the dial the
 /// glow may be dragged (`MoveFactor`, three quarters of the glow).
 const SUN_DIAL: f32 = 96.0;
@@ -73,14 +76,17 @@ pub struct ViewOverlays<'a> {
 /// navigation hint and the lighting panel; returns where the 3D view goes.
 #[allow(clippy::too_many_arguments)]
 pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, settings: &mut ViewportSettings, sun_open: &mut bool, view_2d: &mut Viewport2DState, overlays: &ViewOverlays, commands: &mut Vec<Command>) -> Rect {
-    let frame_stroke = Stroke::new(2.0, egui::Color32::from_rgb(0x21, 0x21, 0x21));
+    let frame_stroke = Stroke::new(FRAME, egui::Color32::from_rgb(0x21, 0x21, 0x21));
     ui.painter().rect_stroke(rect, 6.0, frame_stroke, StrokeKind::Inside);
+    let inside = rect.shrink(FRAME);
 
     let sizes = theme::sizes(ui.ctx());
-    let toolbar_column = Rect::from_min_max(Pos2::new(rect.right() - toolbar_width(sizes), rect.top()), rect.max);
-    // The column has the frame's own dark fill behind the toolbar.
-    let toolbar_rect = toolbar_column.shrink(TOOLBAR_MARGIN);
-    ui.painter().rect_filled(toolbar_rect, 4.0, egui::Color32::from_rgb(0x05, 0x05, 0x05));
+    // The column has the frame's own dark fill round the toolbar.
+    let toolbar_column = Rect::from_min_max(Pos2::new(inside.right() - TOOLBAR_COLUMN, inside.top()), inside.max);
+    let column_corners = egui::CornerRadius { nw: 0, ne: 4, sw: 0, se: 4 };
+    ui.painter().rect_filled(toolbar_column, column_corners, FRAME_FILL);
+    let toolbar_left = inside.right() - TOOLBAR_MARGIN - toolbar_width(sizes);
+    let toolbar_rect = Rect::from_min_max(Pos2::new(toolbar_left, inside.top() + TOOLBAR_MARGIN), inside.max - Vec2::splat(TOOLBAR_MARGIN));
     toolbar_background(ui, toolbar_rect, theme::MENU_BORDER, 1.5);
     let [padding_across, padding_down] = sizes.toolbar_padding;
     let inner = toolbar_rect.shrink(1.5).shrink2(Vec2::new(padding_across, padding_down));
@@ -145,7 +151,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, settings: &mut ViewportSet
         sun_button
     });
 
-    let area = Rect::from_min_max(rect.min, Pos2::new(toolbar_column.left(), rect.bottom())).shrink(2.0);
+    let area = Rect::from_min_max(inside.min, Pos2::new(toolbar_column.left(), inside.bottom()));
     let host = crate::ui::viewport_2d::dock(ui, area, editor, view_2d, commands);
     if settings.compass {
         compass(ui, host, overlays.north_angle);
@@ -318,30 +324,20 @@ pub fn navigation_hint_text(navigation: &NavigationSettings) -> String {
 
 /// The viewport's status text (`Text (TMP)` in a 523.5 by 300 box 32 in
 /// from the view's bottom left): grey 16 px lines, bottom up, in Unity's
-/// pixels. A view narrower than the box wraps the lines to its width, as
-/// far in from its right as from its left; one too small for the hint's
-/// longest word, or for all of its lines, goes without it.
+/// pixels. Its canvas keeps a constant pixel size, so the box keeps its
+/// width in a narrow view, the text wrapping to the box and cut off at
+/// the view's edge.
 fn navigation_hint(ui: &Ui, host: Rect, hint: &str) {
     let pixel = 1.0 / ui.ctx().zoom_factor();
     let box_size = Vec2::new(NAVIGATION_HINT_BOX.0, NAVIGATION_HINT_BOX.1) * pixel;
-    let inset = NAVIGATION_HINT_INSET * pixel;
-    let bottom_left = Pos2::new(host.left() + inset, host.bottom() - inset);
-    let wrap_width = box_size.x.min(host.width() - 2.0 * inset);
+    let bottom_left = Pos2::new(host.left() + NAVIGATION_HINT_INSET * pixel, host.bottom() - NAVIGATION_HINT_INSET * pixel);
     let font = theme::interface(NAVIGATION_HINT_SIZE * pixel);
-    let painter = ui.painter().with_clip_rect(host);
-    // egui breaks a word wider than the row mid-word.
-    let longest_word = hint.split_whitespace().map(|word| painter.layout_no_wrap(word.to_string(), font.clone(), NAVIGATION_HINT_COLOUR).size().x).fold(0.0, f32::max);
-    if longest_word > wrap_width {
-        return;
-    }
-    let mut job = egui::text::LayoutJob::simple(hint.to_string(), font, NAVIGATION_HINT_COLOUR, wrap_width);
+    let mut job = egui::text::LayoutJob::simple(hint.to_string(), font, NAVIGATION_HINT_COLOUR, box_size.x);
     job.halign = Align::LEFT;
-    let galley = painter.layout_job(job);
+    let galley = ui.painter().layout_job(job);
     let height = galley.size().y.min(box_size.y);
     let position = Pos2::new(bottom_left.x, bottom_left.y - height);
-    if !host.contains_rect(Rect::from_min_size(position, galley.size())) {
-        return;
-    }
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(host));
     painter.galley(position, galley, NAVIGATION_HINT_COLOUR);
 }
 
@@ -372,30 +368,25 @@ fn clicked_outside(ui: &Ui, panel: Rect) -> bool {
     layer.is_none_or(|layer| layer.order == egui::Order::Background)
 }
 
-/// Where the lighting panel goes beside `sun_button` in `window`: its left
-/// and its width. The popup's margin stays clear round the panel, from the
-/// window's edges as from the button: left of the button, as
-/// `ToggleSkyEditor` opens it, where it fits there; else right of it, as a
-/// popup that does not fit flips; else on the side with more room,
-/// narrowed to it but no narrower than `LIGHTING_PANEL_MIN_WIDTH`. Only a
-/// window too narrow even for that has it over the button.
-fn lighting_panel_span(sun_button: Rect, window: Rect) -> (f32, f32) {
-    let full = LIGHTING_POPUP_WIDTH - 2.0 * LIGHTING_POPUP_MARGIN;
-    let leftmost = window.left() + LIGHTING_POPUP_MARGIN;
-    let rightmost = window.right() - LIGHTING_POPUP_MARGIN;
-    let left_room = sun_button.left() - LIGHTING_POPUP_MARGIN - leftmost;
-    let right_room = rightmost - (sun_button.right() + LIGHTING_POPUP_MARGIN);
-    let on_left = left_room >= full || (right_room < full && left_room >= right_room);
-    let width = if on_left { left_room } else { right_room }.clamp(LIGHTING_PANEL_MIN_WIDTH, full);
-    let left = if on_left { sun_button.left() - LIGHTING_POPUP_MARGIN - width } else { sun_button.right() + LIGHTING_POPUP_MARGIN };
-    (left.clamp(leftmost, (rightmost - width).max(leftmost)), width)
+/// Where the lighting popup (400 wide, its panel 24 in) goes beside
+/// `sun_button` in `window`, as a `Placement="Left"` popup goes on its
+/// screen: left of the button, or right of it when more of it shows
+/// there, then moved as little as keeps it whole in the window. Returns
+/// the popup's left.
+fn lighting_popup_left(sun_button: Rect, window: Rect) -> f32 {
+    let shown = |left: f32| (left + LIGHTING_POPUP_WIDTH).min(window.right()) - left.max(window.left());
+    let on_left = sun_button.left() - LIGHTING_POPUP_WIDTH;
+    let on_right = sun_button.right();
+    let left = if shown(on_right) > shown(on_left) { on_right } else { on_left };
+    left.min(window.right() - LIGHTING_POPUP_WIDTH).max(window.left())
 }
 
 /// `skyPopup`: the lighting panel (`PrivateSky` in an `EditorBase`) beside
-/// the sun button (`lighting_panel_span`): a toolbar with Reset Sky, the
+/// the sun button (`lighting_popup_left`): a toolbar with Reset Sky, the
 /// sun dial and the parameters. Returns where the panel is.
 fn lighting_panel(ui: &Ui, sun_button: Rect, editor: &Editor, settings: &mut ViewportSettings, commands: &mut Vec<Command>) -> Rect {
-    let (left, panel_width) = lighting_panel_span(sun_button, ui.ctx().content_rect());
+    let left = lighting_popup_left(sun_button, ui.ctx().content_rect()) + LIGHTING_POPUP_MARGIN;
+    let panel_width = LIGHTING_POPUP_WIDTH - 2.0 * LIGHTING_POPUP_MARGIN;
     let position = Pos2::new(left, sun_button.top() + LIGHTING_POPUP_MARGIN);
     let area = egui::Area::new(ui.id().with("lighting-panel")).fixed_pos(position).order(egui::Order::Foreground);
     let shown = area.show(ui.ctx(), |ui| {
@@ -403,9 +394,8 @@ fn lighting_panel(ui: &Ui, sun_button: Rect, editor: &Editor, settings: &mut Vie
         frame.fill = theme::PANEL_BACKGROUND;
         frame.stroke = Stroke::new(1.0, theme::PANEL_BORDER);
         frame.corner_radius = CornerRadius::same(4);
+        frame.inner_margin = egui::Margin { left: 0, right: LIGHTING_PANEL_PADDING_RIGHT as i8, top: 0, bottom: 0 };
         frame.shadow = ui.visuals().popup_shadow;
-        // No margin inside the border: the toolbar meets it on the right
-        // as on the left and top, the dial centred under it.
         let content_width = panel_width - frame.total_margin().sum().x;
         frame.show(ui, |ui| {
             ui.set_width(content_width);
@@ -431,12 +421,14 @@ fn lighting_panel(ui: &Ui, sun_button: Rect, editor: &Editor, settings: &mut Vie
     shown.response.rect
 }
 
-/// The panel's toolbar: Reset Sky (`restore`).
+/// The panel's toolbar (`Toolbar`: margin 4, padding 4, 2, a 1 border of
+/// `Panel-Border`, at least 36 high): Reset Sky (`restore`).
 fn lighting_toolbar(ui: &mut Ui, settings: &mut ViewportSettings, commands: &mut Vec<Command>) {
-    let height = toolbar_button(ui) + 2.0 * (4.0 + 1.5);
-    let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-    toolbar_background(ui, row, theme::MENU_BORDER, 1.5);
-    let inner = row.shrink(1.5 + 4.0);
+    let height = (toolbar_button(ui) + 2.0 * (2.0 + 1.0)).max(36.0);
+    let (outer, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height + 2.0 * LIGHTING_TOOLBAR_MARGIN), Sense::hover());
+    let row = outer.shrink(LIGHTING_TOOLBAR_MARGIN);
+    toolbar_background(ui, row, theme::PANEL_BORDER, 1.0);
+    let inner = row.shrink2(Vec2::new(1.0 + 4.0, 1.0 + 2.0));
     let mut toolbar = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
     if icon_button(&mut toolbar, "restore", "Reset Sky", None).clicked() {
         settings.skybox = false;
@@ -620,38 +612,28 @@ mod tests {
     }
 
     #[test]
-    fn the_lighting_panel_opens_left_of_the_sun_button_where_it_fits() {
+    fn the_lighting_popup_opens_left_of_the_sun_button_where_it_fits() {
         // 1600 by 960 at 120%.
         let (window, button) = window_and_sun_button(1333.0, 900.0);
-        assert_eq!(lighting_panel_span(button, window), (900.0 - 376.0, 352.0));
+        assert_eq!(lighting_popup_left(button, window), 900.0 - LIGHTING_POPUP_WIDTH);
     }
 
     #[test]
-    fn a_narrow_window_narrows_the_lighting_panel_clear_of_its_edge_and_the_toolbar() {
-        // 700 by 520 at 120%: the button 278 in, about as much room right
-        // of it, over the property panel.
-        let (window, button) = window_and_sun_button(583.0, 278.0);
-        let (left, width) = lighting_panel_span(button, window);
-        assert_eq!(left, LIGHTING_POPUP_MARGIN);
-        assert_eq!(left + width, button.left() - LIGHTING_POPUP_MARGIN);
-    }
-
-    #[test]
-    fn the_lighting_panel_flips_right_of_the_sun_button_where_only_that_side_fits_it() {
+    fn the_lighting_popup_flips_right_of_the_sun_button_where_more_of_it_shows() {
         // 1600 by 960 at 120% with the splitter dragged far left.
         let (window, button) = window_and_sun_button(1333.0, 262.0);
-        assert_eq!(lighting_panel_span(button, window), (button.right() + LIGHTING_POPUP_MARGIN, 352.0));
+        assert_eq!(lighting_popup_left(button, window), button.right());
     }
 
     #[test]
-    fn the_lighting_panel_keeps_inside_the_windows_margin_where_nothing_fits() {
-        // Less than the least width either side of the button.
-        for left in [40.0, 134.0, 230.0] {
-            let (window, button) = window_and_sun_button(300.0, left);
-            let (panel_left, width) = lighting_panel_span(button, window);
-            assert_eq!(width, LIGHTING_PANEL_MIN_WIDTH, "{left}");
-            assert!(panel_left >= LIGHTING_POPUP_MARGIN && panel_left + width <= 300.0 - LIGHTING_POPUP_MARGIN, "{left}: {panel_left}");
-        }
+    fn the_lighting_popup_keeps_its_width_and_moves_into_the_window() {
+        // 700 by 520 at 120%: less room either side than the popup, more on
+        // the left; it is moved to the window's edge, over the button.
+        let (window, button) = window_and_sun_button(583.0, 278.0);
+        assert_eq!(lighting_popup_left(button, window), 0.0);
+        // Narrower than the popup: from the window's left.
+        let (window, button) = window_and_sun_button(300.0, 134.0);
+        assert_eq!(lighting_popup_left(button, window), 0.0);
     }
 
     /// The lighting panel beside `sun_button` on a `screen` big screen,
@@ -696,14 +678,13 @@ mod tests {
         let narrow = (Vec2::new(583.0, 433.0), Rect::from_min_size(Pos2::new(278.0, 60.0), Vec2::splat(32.0)));
         for (screen, button) in [wide, narrow] {
             let (panel, toolbar) = lighting_panel_frames(screen, button);
-            // Clear of the window's edge and the toolbar it opened from.
             assert!(panel.left() >= LIGHTING_POPUP_MARGIN, "{screen:?}: {panel:?}");
-            assert_eq!(panel.right(), button.left() - LIGHTING_POPUP_MARGIN, "{screen:?}: {panel:?}");
-            // Reset Sky's toolbar the panel's width inside its border: as
-            // far from the right as from the left, at the top.
-            assert_eq!(toolbar.left() - panel.left(), 1.0, "{screen:?}: {toolbar:?} in {panel:?}");
-            assert_eq!(panel.right() - toolbar.right(), 1.0, "{screen:?}: {toolbar:?} in {panel:?}");
-            assert_eq!(toolbar.top() - panel.top(), 1.0, "{screen:?}: {toolbar:?} in {panel:?}");
+            assert_eq!(panel.width(), LIGHTING_POPUP_WIDTH - 2.0 * LIGHTING_POPUP_MARGIN, "{screen:?}: {panel:?}");
+            // Reset Sky's toolbar 4 inside the border, and the panel's
+            // padding of 8 on the right besides.
+            assert_eq!(toolbar.left() - panel.left(), 1.0 + LIGHTING_TOOLBAR_MARGIN, "{screen:?}: {toolbar:?} in {panel:?}");
+            assert_eq!(panel.right() - toolbar.right(), 1.0 + LIGHTING_PANEL_PADDING_RIGHT + LIGHTING_TOOLBAR_MARGIN, "{screen:?}: {toolbar:?} in {panel:?}");
+            assert_eq!(toolbar.top() - panel.top(), 1.0 + LIGHTING_TOOLBAR_MARGIN, "{screen:?}: {toolbar:?} in {panel:?}");
         }
     }
 
@@ -738,9 +719,9 @@ mod tests {
         theme::apply(&context);
         let rect = Rect::from_min_size(Pos2::new(300.0, 40.0), Vec2::new(700.0, 260.0));
         let sizes = theme::sizes(&context);
-        let x = rect.right() - toolbar_width(sizes) / 2.0;
-        let top = rect.top() + TOOLBAR_MARGIN + 1.5 + sizes.toolbar_padding[1];
-        let foot = rect.bottom() - TOOLBAR_MARGIN - 1.5 - sizes.toolbar_padding[1];
+        let x = rect.right() - FRAME - TOOLBAR_MARGIN - toolbar_width(sizes) / 2.0;
+        let top = rect.top() + FRAME + TOOLBAR_MARGIN + 1.5 + sizes.toolbar_padding[1];
+        let foot = rect.bottom() - FRAME - TOOLBAR_MARGIN - 1.5 - sizes.toolbar_padding[1];
         (context, Editor::new(Document::new()), Viewport2DState::default(), rect, x, top, foot)
     }
 
@@ -758,20 +739,24 @@ mod tests {
     }
 
     #[test]
-    fn a_short_toolbar_scrolls_to_its_bottom_group() {
-        let (context, editor, mut view_2d, rect, x, top, foot) = short_viewport();
-        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
-        viewport_frame(&context, rect, &editor, &mut view_2d, vec![egui::Event::PointerMoved(Pos2::new(x, top))]);
-        viewport_frame(&context, rect, &editor, &mut view_2d, vec![wheel]);
-        for _ in 0..60 {
-            viewport_frame(&context, rect, &editor, &mut view_2d, Vec::new());
-        }
-        // Viewport Options at the foot, a separator (8, 8), Measure and
-        // the docked 2D view's toggle.
+    fn a_short_toolbar_keeps_its_foot() {
+        // A row where the bottom group runs half a button under the top
+        // one: Viewport Options at the foot, a separator (8, 8), Measure
+        // and the docked 2D view's toggle, its lower half showing.
+        let (context, editor, mut view_2d, short, x, top, _) = short_viewport();
         let button = theme::sizes(&context).toolbar_button;
-        let toggle = Pos2::new(x, foot - 2.5 * button - 17.0);
-        let commands = click(&context, rect, &editor, &mut view_2d, toggle);
+        // Resolution, Lighting, Render Style, Helpers and Screenshot with
+        // their separators (11, 5 and 5); the three below and theirs (17).
+        let groups = (5.0 * button + 11.0 + 5.0 + 5.0) + (3.0 * button + 17.0);
+        let rect = Rect::from_min_size(short.min, Vec2::new(short.width(), short.height() + (groups - button / 2.0 - (short.height() - 2.0 * (top - short.top())))));
+        let foot = rect.bottom() - (top - short.top());
+        viewport_frame(&context, rect, &editor, &mut view_2d, Vec::new());
+        let lower_half = Pos2::new(x, foot - 2.0 * button - 17.0 - button / 4.0);
+        let commands = click(&context, rect, &editor, &mut view_2d, lower_half);
         assert!(commands.contains(&Command::Toggle2DViewport), "{commands:?}");
+        let upper_half = Pos2::new(x, foot - 3.0 * button - 17.0 + button / 4.0);
+        let commands = click(&context, rect, &editor, &mut view_2d, upper_half);
+        assert!(!commands.contains(&Command::Toggle2DViewport), "{commands:?}");
     }
 
     /// The navigation hint over a 3D view `size` big on a 1600 by 960
@@ -809,32 +794,23 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_view_wraps_the_navigation_hint_inside_it_by_whole_words() {
-        // The 3D view beside the docked 2D view at 760 by 560 and 800 by
-        // 600, and narrower.
+    fn a_narrow_view_cuts_the_navigation_hint_off_at_its_edge() {
+        // The canvas keeps a constant pixel size: the lines stay as the
+        // box wraps them, and what runs past the view is cut off there.
         let hint = navigation_hint_text(&NavigationSettings::default());
-        let inset = NAVIGATION_HINT_INSET / 1.2;
-        for width in [250.0, 200.0, 150.0, 120.0] {
-            let (host, rows) = navigation_hint_rows(Vec2::new(width, 400.0));
-            let lines = rows.iter().filter(|(_, text)| !text.trim().is_empty()).count();
-            assert!(lines > hint.lines().count(), "{width}: {rows:?}");
-            // egui lets a row run half a point past its wrap width.
-            for (rect, text) in &rows {
-                assert!(rect.left() >= host.left() + inset - 0.01 && rect.right() <= host.right() - inset + 0.5, "{width}: {text:?} at {rect:?} in {host:?}");
-                assert!(host.contains_rect(*rect), "{width}: {text:?} at {rect:?} in {host:?}");
-            }
-            let words: Vec<&str> = rows.iter().flat_map(|(_, text)| text.split_whitespace()).collect();
-            assert_eq!(words, hint.split_whitespace().collect::<Vec<_>>(), "{width}");
+        for width in [250.0, 120.0] {
+            let (_, rows) = navigation_hint_rows(Vec2::new(width, 400.0));
+            let lines: Vec<&str> = rows.iter().map(|(_, text)| text.trim_end()).filter(|text| !text.is_empty()).collect();
+            assert_eq!(lines, hint.lines().collect::<Vec<_>>(), "{width}");
         }
-    }
-
-    #[test]
-    fn a_view_too_small_for_the_navigation_hint_goes_without_it() {
-        // Too narrow for a word between the insets, and too short for the
-        // lines.
-        for size in [Vec2::new(70.0, 400.0), Vec2::new(400.0, 60.0)] {
-            let (_, rows) = navigation_hint_rows(size);
-            assert!(rows.is_empty(), "{size:?}: {rows:?}");
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let host = Rect::from_min_size(Pos2::new(10.0, 40.0), Vec2::new(120.0, 400.0));
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 960.0))), ..Default::default() };
+        let output = context.run_ui(input, |ui| navigation_hint(ui, host, &hint));
+        for clipped in &output.shapes {
+            assert!(host.contains_rect(clipped.clip_rect), "{:?} is not cut off at the view", clipped.clip_rect);
         }
+        output.drop_without_applying_deltas();
     }
 }

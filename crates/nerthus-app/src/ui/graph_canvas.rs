@@ -26,6 +26,7 @@ use crate::ui::graph_commands::{GraphCommand, NodeSource};
 use crate::ui::graph_groups::{self, GroupDrag, GroupState};
 use crate::ui::graph_popups::GraphPopup;
 use crate::ui::graph_search::{SearchMode, SearchPopup};
+use crate::ui::slider_popups;
 use crate::ui::widgets::{checked_icon_item, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, Tooltips};
 
 /// `NodeElement` template sizes (Standard, Compact, Small).
@@ -34,18 +35,25 @@ const STANDARD_MIN_HEIGHT: f32 = 80.0;
 const COMPACT_WIDTH: f32 = 170.0;
 const COMPACT_HEIGHT: f32 = 64.0;
 const SMALL_SIZE: f32 = 64.0;
-/// Port rows (`RowDefinition` 16) and the port grids' margins.
+/// Port rows (`RowDefinition` 16) and the port grids' margins: a
+/// standard node's 40 from the top, 20 from the foot and 8 from the side;
+/// a compact or small node's 14 from the top, centred in what that
+/// leaves, and 5 from the side.
 const PORT_ROW: f32 = 16.0;
 const PORTS_TOP: f32 = 40.0;
 const PORTS_BOTTOM: f32 = 20.0;
 const PORTS_SIDE: f32 = 8.0;
+const COMPACT_PORTS_TOP: f32 = 14.0;
+const COMPACT_PORTS_SIDE: f32 = 5.0;
 /// `PortElement` and its dot (`ControlBorder`).
 const PORT_WIDTH: f32 = 20.0;
 const PORT_HEIGHT: f32 = 12.0;
 const PORT_DOT: f32 = 8.0;
-/// How far past its dot, towards the middle, a small node's port takes
-/// the pointer.
-const PORT_HIT_INSIDE: f32 = 4.0;
+/// `PART_PortHitGrid`: 20 high, reaching 4 past the element's right; on a
+/// small node's ports 14 wide.
+const PORT_HIT_HEIGHT: f32 = 20.0;
+const PORT_HIT_REACH: f32 = 4.0;
+const SMALL_PORT_HIT_WIDTH: f32 = 14.0;
 /// `ConnectionElement.PortGap`.
 const PORT_GAP: f32 = 10.0;
 /// The circuit's horizontal run out of and into ports.
@@ -56,30 +64,29 @@ pub(crate) const SIMPLIFIED_ZOOM: f32 = 0.4;
 const SIMPLIFIED_PORT: Vec2 = Vec2::new(24.0, 16.0);
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 2.0;
-/// The room Extents and Selection leave around what they frame.
-const FRAME_MARGIN: f32 = 60.0;
-/// The gap Extents and Selection leave right of the toolbox (its own
-/// margin from the graph's edge).
-const TOOLBOX_GAP: f32 = 10.0;
+/// The room Extents and Selection leave round the elements' corners,
+/// then the room `FitRect` adds (`FitToScreenExtentMargin`).
+const EXTENTS_MARGIN: f32 = 200.0;
+const FIT_MARGIN: f32 = 30.0;
 /// How far from a port a dragged connection still snaps to it.
 const SNAP_DISTANCE: f32 = 18.0;
 /// `SnapToOtherShapes`: how near (canvas units) an edge or a centre snaps.
 const SNAP_ITEMS_DISTANCE: f32 = 36.0;
 /// `Line-SnapLine-Stroke`.
 const SNAP_LINE: Color32 = Color32::from_rgb(0x60, 0x53, 0x8f);
-/// The view scrolls under an element dragged within `AUTO_PAN_MARGIN`
-/// screen points of the graph's edge, or past it: `AUTO_PAN_RATE` points
-/// a second for each point the pointer is beyond the margin, counting no
-/// more than `AUTO_PAN_REACH` of them.
-const AUTO_PAN_MARGIN: f32 = 24.0;
-const AUTO_PAN_RATE: f32 = 12.0;
-const AUTO_PAN_REACH: f32 = 100.0;
-/// The inline name editors (F2): the text box's margin at zoom 1, the
-/// least room it leaves to type in however far the graph is zoomed out,
-/// and how far inside the graph's edges the view brings what is renamed.
-const RENAME_MARGIN: Vec2 = Vec2::new(4.0, 2.0);
-const RENAME_MIN_WIDTH: f32 = 48.0;
-const REVEAL_MARGIN: f32 = 10.0;
+/// `HandleAutoPanning`: how near a side of the graph (screen) a moved
+/// element's pointer steps the view that way (`AutoPanEdgeDistance`),
+/// and the step's speed (`AutoPanSpeed`; `AutoPanningTickRate` is 1).
+const AUTO_PAN_EDGE: f32 = 32.0;
+const AUTO_PAN_SPEED: f32 = 0.15;
+/// How far the canvas runs (`CanvasExtents`).
+const CANVAS_EXTENTS: f32 = 96000.0;
+/// The rename popup (F2): how far in from the element's top-left it
+/// opens (in the element's own units), its least width and its text's
+/// size (at 100%).
+const RENAME_OFFSET: f32 = 10.0;
+const RENAME_MIN_WIDTH: f32 = 96.0;
+const RENAME_FONT_SIZE: f32 = 12.0;
 /// `CreateCollapsedPortElement`: the port standing in for a compact or
 /// small node's ports past the first when it has more than two.
 pub const COLLAPSED_PORT: &str = "CollapsedPort";
@@ -97,9 +104,9 @@ pub enum ZoomRequest {
     CenterGroup(i32),
 }
 
-/// What a name editor (F2) is open on.
+/// What the rename popup (F2) is open on.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Renamed {
+pub(crate) enum Renamed {
     Node(i32),
     Group(i32),
 }
@@ -228,13 +235,12 @@ pub struct GraphState {
     pub snap_to_grid: bool,
     /// `GridUnit` (`Options.GridSize`): what nodes snap to.
     pub grid_unit: f32,
-    /// The node the inline name editor (F2) is open on and its name so
-    /// far; [`GraphState::start_renaming`] opens it.
-    renaming: Option<i32>,
-    rename_text: String,
-    /// What a name editor has just opened on, for the view to bring into
-    /// sight before the editor shows.
-    reveal: Option<Renamed>,
+    /// The node or group the rename popup (F2) is open on, and the name
+    /// it opens with until it has shown;
+    /// [`GraphState::start_renaming`] and
+    /// [`GraphState::start_renaming_group`] open it.
+    renaming: Option<Renamed>,
+    rename_start: Option<String>,
     pub zoom_request: Option<ZoomRequest>,
     /// Canvas point of the last right-click, where added nodes go.
     pub context_point: Option<Pos2>,
@@ -248,8 +254,6 @@ pub struct GraphState {
     pub editing_note: Option<(i32, String)>,
     /// The tab being renamed and its name so far.
     pub renaming_tab: Option<(usize, String)>,
-    /// The tab strip's scroll.
-    pub tab_strip: crate::ui::graph_area::TabStrip,
     /// The tab whose deletion awaits confirmation.
     pub confirm_delete_tab: Option<usize>,
     /// Nodes the Data View's filter leaves out, drawn at half strength.
@@ -267,8 +271,6 @@ pub struct GraphState {
     /// `Options.SnapToPorts`: a dragged connection takes a port near the
     /// pointer, not only one under it.
     snap_to_ports: bool,
-    /// The group being renamed and its name so far.
-    pub renaming_group: Option<(i32, String)>,
     /// A group being moved or resized.
     pub group_drag: Option<GroupDrag>,
     /// What each group shows while an element is dragged over or out of
@@ -309,8 +311,7 @@ impl Default for GraphState {
             snap_to_grid: false,
             grid_unit: 25.0,
             renaming: None,
-            rename_text: String::new(),
-            reveal: None,
+            rename_start: None,
             zoom_request: None,
             context_point: None,
             rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(400.0)),
@@ -319,7 +320,6 @@ impl Default for GraphState {
             note_drag: None,
             editing_note: None,
             renaming_tab: None,
-            tab_strip: crate::ui::graph_area::TabStrip::default(),
             confirm_delete_tab: None,
             dimmed: HashSet::new(),
             bookmark_removing: None,
@@ -328,7 +328,6 @@ impl Default for GraphState {
             pointer: None,
             shift_held: false,
             snap_to_ports: true,
-            renaming_group: None,
             group_drag: None,
             group_states: HashMap::new(),
             snap_lines: Vec::new(),
@@ -366,36 +365,38 @@ impl GraphState {
         self.editing_note = None;
         self.popup = None;
         self.create_connection = None;
-        self.renaming_group = None;
-        self.reveal = None;
         self.group_drag = None;
         self.group_states.clear();
         self.snap_lines.clear();
     }
 
-    /// Opens the inline name editor (F2) on `node`, holding the node's
-    /// own name: never text an earlier rename left, on this node or
-    /// another.
+    /// Opens the rename popup (F2, `RenameNode`) on `node`, holding the
+    /// node's own name: never text an earlier rename left, on this node
+    /// or another.
     pub fn start_renaming(&mut self, editor: &Editor, node: i32) {
         let Some(data) = editor.document.node(node) else {
             return;
         };
-        self.renaming = Some(node);
-        self.rename_text = data.name.clone();
-        self.reveal = Some(Renamed::Node(node));
+        self.renaming = Some(Renamed::Node(node));
+        self.rename_start = Some(data.name.clone());
     }
 
-    /// Opens the name editor on group `id`, holding `name`.
+    /// Opens the rename popup on group `id` (`RenameGroup`), holding
+    /// `name`.
     pub fn start_renaming_group(&mut self, id: i32, name: String) {
-        self.renaming_group = Some((id, name));
-        self.reveal = Some(Renamed::Group(id));
+        self.renaming = Some(Renamed::Group(id));
+        self.rename_start = Some(name);
     }
 
-    /// Closes the inline name editor (F2), dropping its text so the next
-    /// one opens on its own node's name.
+    /// What the rename popup (F2) is open on.
+    pub(crate) fn renaming(&self) -> Option<Renamed> {
+        self.renaming
+    }
+
+    /// Closes the rename popup (F2) without taking its text.
     fn stop_renaming(&mut self) {
         self.renaming = None;
-        self.rename_text.clear();
+        self.rename_start = None;
     }
 
     /// The connections, groups and note the graph has chosen go (the
@@ -472,7 +473,8 @@ pub(crate) struct PortLayout {
     /// The `PortElement` (20 by 12).
     element: Rect,
     dot: Rect,
-    hit: Rect,
+    /// Where it takes the pointer ([`port_hit`]).
+    hit: [Rect; 2],
     portal: Option<Portal>,
     /// `PortElement.FriendlyName`: what a portal pill reads.
     portal_name: String,
@@ -576,35 +578,27 @@ pub(crate) fn layout_node(node: &NodeData, default_size: &str) -> NodeLayout {
     let input_rows = side_rows(inputs.len(), compact);
     let output_rows = side_rows(outputs.len(), compact);
     let rows = input_rows.max(output_rows) as f32;
+    let compact_ports_top = |height: f32| COMPACT_PORTS_TOP + (height - COMPACT_PORTS_TOP - rows * PORT_ROW) / 2.0;
     let (width, height, ports_top) = match size {
         NodeSize::Standard => (STANDARD_WIDTH, (PORTS_TOP + rows * PORT_ROW + PORTS_BOTTOM).max(STANDARD_MIN_HEIGHT), PORTS_TOP),
-        NodeSize::Compact => (COMPACT_WIDTH, COMPACT_HEIGHT, (COMPACT_HEIGHT - rows * PORT_ROW) / 2.0),
-        NodeSize::Small => (SMALL_SIZE, SMALL_SIZE, (SMALL_SIZE - rows * PORT_ROW) / 2.0),
+        NodeSize::Compact => (COMPACT_WIDTH, COMPACT_HEIGHT, compact_ports_top(COMPACT_HEIGHT)),
+        NodeSize::Small => (SMALL_SIZE, SMALL_SIZE, compact_ports_top(SMALL_SIZE)),
     };
+    let ports_side = if compact { COMPACT_PORTS_SIDE } else { PORTS_SIDE };
     let origin = Pos2::new(node.position[0], node.position[1]);
     let rect = Rect::from_min_size(origin, Vec2::new(width, height));
 
     let place = |name: &str, row: usize, is_input: bool| {
         let row_top = rect.top() + ports_top + row as f32 * PORT_ROW;
         let element_top = row_top + (PORT_ROW - PORT_HEIGHT) / 2.0;
-        let element_left = if is_input { rect.left() + PORTS_SIDE } else { rect.right() - PORTS_SIDE - PORT_WIDTH };
+        let element_left = if is_input { rect.left() + ports_side } else { rect.right() - ports_side - PORT_WIDTH };
         let element = Rect::from_min_size(Pos2::new(element_left, element_top), Vec2::new(PORT_WIDTH, PORT_HEIGHT));
         let dot_left = if is_input { element.left() } else { element.right() - PORT_DOT };
         let dot = Rect::from_min_size(Pos2::new(dot_left, element.center().y - PORT_DOT / 2.0), Vec2::splat(PORT_DOT));
         // RefreshPoints: the element's centre, `PortGap` outwards.
         let anchor_x = if is_input { element.center().x - PORT_GAP } else { element.center().x + PORT_GAP };
         let anchor = Pos2::new(anchor_x, element.center().y);
-        let mut hit = element.expand2(Vec2::new(4.0, 2.0));
-        // On a small node the two sides' elements meet across the middle:
-        // there a port takes the pointer near its dot only, leaving the
-        // icon between them to the node.
-        if size == NodeSize::Small {
-            if is_input {
-                hit.max.x = dot.right() + PORT_HIT_INSIDE;
-            } else {
-                hit.min.x = dot.left() - PORT_HIT_INSIDE;
-            }
-        }
+        let hit = port_hit(element, size == NodeSize::Small, is_input);
         PortLayout {
             name: name.to_string(),
             label: String::new(),
@@ -636,8 +630,10 @@ pub(crate) fn layout_node(node: &NodeData, default_size: &str) -> NodeLayout {
             layouts.push(layout);
         }
         if collapsing {
+            // Added after the ports are tagged: never "small".
             let mut stand_in = place(COLLAPSED_PORT, 1, is_input);
             stand_in.collapsed = true;
+            stand_in.hit = port_hit(stand_in.element, false, is_input);
             layouts.push(stand_in);
         }
         layouts
@@ -656,7 +652,7 @@ pub(crate) fn layout_node(node: &NodeData, default_size: &str) -> NodeLayout {
             anchor,
             element,
             dot,
-            hit: element.expand(3.0),
+            hit: port_hit(element, false, true),
             portal: portal_state(port),
             portal_name: String::new(),
             hidden: false,
@@ -700,6 +696,32 @@ impl NodeLayout {
         let all = self.inputs.iter().chain(self.outputs.iter()).chain(self.mask.iter());
         all.filter(|port| !port.hidden)
     }
+}
+
+impl PortLayout {
+    /// Whether the port takes the pointer at `point` (canvas).
+    fn takes(&self, point: Pos2) -> bool {
+        self.hit.iter().any(|area| area.contains(point))
+    }
+}
+
+/// Where a port whose element is `element` takes the pointer: the element
+/// (`MainGrid`, its background transparent) and `PART_PortHitGrid`, 20
+/// high about the element's middle from its left to 4 past its right; on
+/// a small node's ports (`Tag` "small") only the 14 of that on the dot's
+/// side.
+fn port_hit(element: Rect, small: bool, is_input: bool) -> [Rect; 2] {
+    let top = element.center().y - PORT_HIT_HEIGHT / 2.0;
+    let bottom = top + PORT_HIT_HEIGHT;
+    let mut left = element.left();
+    let mut right = element.right() + PORT_HIT_REACH;
+    if small && is_input {
+        right = left + SMALL_PORT_HIT_WIDTH;
+    } else if small {
+        left = right - SMALL_PORT_HIT_WIDTH;
+    }
+    let grid = Rect::from_min_max(Pos2::new(left, top), Pos2::new(right, bottom));
+    [element, grid]
 }
 
 /// `PortElement.SetFriendlyName`: a publishing portal reads its node's
@@ -865,7 +887,6 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     let by_id: HashMap<i32, usize> = layouts.iter().enumerate().map(|(index, layout)| (layout.id, index)).collect();
 
     apply_zoom_request(state, &layouts, &frame, editor, rect);
-    reveal_renamed(ui.ctx(), state, &layouts, &frame.groups, rect);
 
     // The background takes clicks, drags and the context menu.
     let background_id = ui.id().with("graph-background");
@@ -937,12 +958,14 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     for index in order.iter().copied() {
         let layout = &layouts[index];
         for port in layout.ports() {
-            let screen = view.rect_to_screen(origin, port.hit);
-            if !screen.intersects(rect) {
+            let [element_area, grid_area] = port.hit.map(|area| view.rect_to_screen(origin, area));
+            if !element_area.union(grid_area).intersects(rect) {
                 continue;
             }
             let id = ui.id().with(("port", layout.id, &port.name, port.is_input));
-            let response = ui.interact(screen, id, Sense::click_and_drag());
+            let element_response = ui.interact(element_area, id, Sense::click_and_drag());
+            let grid_response = ui.interact(grid_area, id.with("hit-grid"), Sense::click_and_drag());
+            let response = element_response.union(grid_response);
             if response.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             }
@@ -1041,7 +1064,6 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &Gr
     let Some(request) = state.zoom_request.take() else {
         return;
     };
-    let fit = fit_rect(rect, state.toolbox_rect);
     let tab = state.tab;
     let view = state.view_mut();
     if request == ZoomRequest::Reset {
@@ -1061,64 +1083,35 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &Gr
         view.location = element.center().to_vec2() - visible / 2.0;
         return;
     }
-    // Extents takes in the tab's groups and the notes no collapsed group
-    // hides as well as its nodes; Selection the selected nodes.
-    let items: Vec<Rect> = match request {
-        ZoomRequest::Selection => layouts.iter().filter(|layout| editor.selection.contains(&layout.id)).map(|layout| layout.rect).collect(),
+    // `ZoomExtents` frames the tab's nodes, groups and notes, those
+    // collapsed groups hide too; `ZoomSelection` the selected nodes. Both
+    // go by the elements' top-left corners.
+    let tab_nodes = editor.document.terrain().nodes.values().filter(|node| node_tab(node) == tab);
+    let corners: Vec<Pos2> = match request {
+        ZoomRequest::Selection => {
+            let selected = tab_nodes.filter(|node| editor.selection.contains(&node.id));
+            selected.map(|node| Pos2::new(node.position[0], node.position[1])).collect()
+        }
         _ => {
-            let nodes = layouts.iter().map(|layout| layout.rect);
-            let groups = frame.groups.iter().map(GroupData::bounds);
-            let notes = crate::ui::graph_notes::note_rects(editor, tab).into_iter();
-            let shown_notes = notes.filter(|(id, _)| !frame.hidden_in.contains_key(id)).map(|(_, note)| note);
-            nodes.chain(groups).chain(shown_notes).collect()
+            let nodes = tab_nodes.map(|node| Pos2::new(node.position[0], node.position[1]));
+            let groups = frame.groups.iter().map(|group| group.bounds().min);
+            let notes = crate::ui::graph_notes::note_rects(editor, tab).into_iter().map(|(_, note)| note.min);
+            nodes.chain(groups).chain(notes).collect()
         }
     };
-    let reach = fit.size() / MIN_ZOOM - Vec2::splat(2.0 * FRAME_MARGIN);
-    let focus = view.location + (fit.center() - rect.min) / view.zoom;
-    let Some(bounds) = framed_bounds(&items, reach, focus.to_pos2()) else {
+    if corners.is_empty() {
         return;
-    };
-    let bounds = bounds.expand(FRAME_MARGIN);
-    let zoom_x = fit.width() / bounds.width();
-    let zoom_y = fit.height() / bounds.height();
-    let zoom = zoom_x.min(zoom_y).clamp(MIN_ZOOM, 1.0);
-    view.zoom = zoom;
-    view.location = bounds.center().to_vec2() - (fit.center() - rect.min) / zoom;
-}
-
-/// Where Extents and Selection fit what they frame on the graph `rect`:
-/// right of the toolbox floating over it, so nothing starts hidden under
-/// it, though never in less than the graph's right half.
-fn fit_rect(rect: Rect, toolbox: Rect) -> Rect {
-    if !toolbox.intersects(rect) {
-        return rect;
     }
-    let left = (toolbox.right() + TOOLBOX_GAP).clamp(rect.left(), rect.center().x);
-    Rect::from_min_max(Pos2::new(left, rect.top()), rect.max)
-}
-
-/// What Extents and Selection frame: the bounds of all `items` when they
-/// fit within `reach` (the canvas the graph shows at the least zoom).
-/// Items too far apart for that leave the view on the most of them that
-/// fit around any one, the one nearest `focus` on a tie, rather than on
-/// the empty canvas between them.
-fn framed_bounds(items: &[Rect], reach: Vec2, focus: Pos2) -> Option<Rect> {
-    let all = items.iter().copied().reduce(Rect::union)?;
-    if all.width() <= reach.x && all.height() <= reach.y {
-        return Some(all);
+    let framed = Rect::from_points(&corners).expand(EXTENTS_MARGIN + FIT_MARGIN);
+    // `FitRect` fits that to the whole graph, the toolbox floating over
+    // it or not. `ZoomAtPosition` leaves the zoom be when the fit would
+    // be under the least, and the view centres on it either way
+    // (`BringIntoView`). The zoom goes no further in than the wheel's.
+    let fitted = (rect.width() / framed.width()).min(rect.height() / framed.height());
+    if fitted >= MIN_ZOOM {
+        view.zoom = fitted.min(MAX_ZOOM);
     }
-    let mut best: Option<(usize, f32, Rect)> = None;
-    for seed in items {
-        let window = Rect::from_center_size(seed.center(), reach);
-        let near = items.iter().filter(|item| window.contains_rect(**item));
-        let (count, bounds) = near.fold((0, *seed), |(count, bounds), item| (count + 1, bounds.union(*item)));
-        let distance = bounds.center().distance_sq(focus);
-        let better = best.is_none_or(|(most, nearest, _)| count > most || (count == most && distance < nearest));
-        if better {
-            best = Some((count, distance, bounds));
-        }
-    }
-    best.map(|(_, _, bounds)| bounds)
+    view.location = framed.center().to_vec2() - rect.size() / (2.0 * view.zoom);
 }
 
 /// Pans with the middle button (anywhere on the graph) or a right drag on
@@ -1165,42 +1158,53 @@ fn handle_pan_and_zoom(ui: &Ui, background: &Response, state: &mut GraphState, r
     pan_started
 }
 
-/// While nodes, a group or a note are moved with the pointer near or past
-/// the graph's edge, the view scrolls that way, so what is dragged can go
-/// anywhere on the canvas (`drag_pointer` keeps it in sight meanwhile).
+/// `HandleAutoPanning`, on each move of the pointer while nodes, a group
+/// or a note are moved with it: [`auto_pan_step`] for each.
 fn auto_pan(ui: &Ui, state: &mut GraphState, rect: Rect) {
     let moving = matches!(state.drag, Some(Drag::Elements { .. })) || state.group_drag.is_some_and(|drag| drag.moves()) || state.note_drag.is_some_and(|drag| drag.moves());
-    let (held, pointer, dt) = ui.input(|input| (input.pointer.primary_down(), input.pointer.interact_pos(), input.stable_dt.min(0.1)));
-    let Some(pointer) = pointer.filter(|_| moving && held) else {
-        return;
-    };
-    let velocity = auto_pan_velocity(rect, pointer);
-    if velocity == Vec2::ZERO {
+    let held = ui.input(|input| input.pointer.primary_down());
+    if !moving || !held {
         return;
     }
-    let view = state.view_mut();
-    view.location += velocity * dt / view.zoom;
-    // The pointer may rest there: the view keeps scrolling without events.
-    ui.ctx().request_repaint();
+    let moves: Vec<Pos2> = ui.input(|input| {
+        let positions = input.events.iter().filter_map(|event| match event {
+            egui::Event::PointerMoved(position) => Some(*position),
+            _ => None,
+        });
+        positions.collect()
+    });
+    for pointer in moves {
+        auto_pan_step(state.view_mut(), rect, pointer);
+    }
 }
 
-/// How fast (screen points a second) the view scrolls with the pointer at
-/// `pointer`: towards each edge it is within `AUTO_PAN_MARGIN` of or past.
-fn auto_pan_velocity(rect: Rect, pointer: Pos2) -> Vec2 {
-    let axis = |low: f32, high: f32, at: f32| {
-        let margin = AUTO_PAN_MARGIN.min((high - low) / 4.0);
-        let past_low = (low + margin - at).clamp(0.0, AUTO_PAN_REACH);
-        let past_high = (at - (high - margin)).clamp(0.0, AUTO_PAN_REACH);
-        (past_high - past_low) * AUTO_PAN_RATE
-    };
-    Vec2::new(axis(rect.left(), rect.right(), pointer.x), axis(rect.top(), rect.bottom(), pointer.y))
-}
-
-/// Where a moved element's pointer counts (screen): kept inside the
-/// graph, so what is dragged past its edge stays in sight, at the edge,
-/// while `auto_pan` scrolls the view under it.
-pub(crate) fn drag_pointer(ui: &Ui, rect: Rect) -> Option<Pos2> {
-    ui.input(|input| input.pointer.interact_pos()).map(|point| point.clamp(rect.min, rect.max))
+/// One `HandleAutoPanning` step with the pointer at `pointer` (screen):
+/// within `AUTO_PAN_EDGE` of a side of the graph `rect`, or past it, the
+/// view moves `AUTO_PAN_SPEED / (zoom * 2)` canvas units that way on each
+/// axis; then it is kept on the canvas, the graph's size taken in screen
+/// points rather than canvas units, as Gaea does.
+fn auto_pan_step(view: &mut GraphView, rect: Rect, pointer: Pos2) {
+    let step = AUTO_PAN_SPEED / (view.zoom * 2.0);
+    let local = pointer - rect.min;
+    let mut location = view.location;
+    if local.x <= AUTO_PAN_EDGE {
+        location.x -= step;
+    } else if local.x >= rect.width() - AUTO_PAN_EDGE {
+        location.x += step;
+    }
+    if local.y <= AUTO_PAN_EDGE {
+        location.y -= step;
+    } else if local.y >= rect.height() - AUTO_PAN_EDGE {
+        location.y += step;
+    }
+    location = location.max(Vec2::ZERO);
+    if location.x + rect.width() > CANVAS_EXTENTS {
+        location.x = CANVAS_EXTENTS - rect.width();
+    }
+    if location.y + rect.height() > CANVAS_EXTENTS {
+        location.y = CANVAS_EXTENTS - rect.height();
+    }
+    view.location = location;
 }
 
 /// `SnapElementToGrid`: to the nearer multiple of the unit, halves down
@@ -1268,37 +1272,36 @@ pub(crate) fn line_height(ctx: &egui::Context, font: &egui::FontId) -> f32 {
 }
 
 /// Where `draw_node` writes a node's name on `screen` at `zoom`, and in
-/// what font: the line it starts on, as wide as it runs before it is cut
-/// short. A compact node's name is centred down the node; a simplified
-/// node's in the middle of it, between its port blocks
-/// ([`simplified_name`]); a small node's sits under the box.
-fn title_line(ctx: &egui::Context, layout: &NodeLayout, screen: Rect, zoom: f32) -> (Rect, egui::FontId) {
+/// what font (`PART_MainContent`): the line it starts on, as wide as it
+/// runs before it is cut short (its `MaxWidth`, or what its margins leave
+/// of the node). A standard node's starts 50, 14 in; a compact node's 80
+/// in, centred down the node; a small node's 4 in, its foot 16 below the
+/// box. Zoomed out (simplified) the name keeps its place in a 24 font.
+/// None on a small node with a Mask port: the name gives way to it.
+fn title_line(ctx: &egui::Context, layout: &NodeLayout, screen: Rect, zoom: f32) -> Option<(Rect, egui::FontId)> {
+    if layout.size == NodeSize::Small && layout.mask.is_some() {
+        return None;
+    }
     let simplified = zoom < SIMPLIFIED_ZOOM;
-    let font = match layout.size {
-        _ if simplified => simplified_font(zoom),
-        NodeSize::Standard | NodeSize::Compact => theme::semibold(13.0 * zoom),
-        NodeSize::Small => theme::semibold(10.0 * zoom),
+    let size = match layout.size {
+        _ if simplified => 24.0,
+        NodeSize::Standard | NodeSize::Compact => 13.0,
+        NodeSize::Small => 10.0,
     };
+    let font = theme::semibold(size * zoom);
     let height = line_height(ctx, &font);
     let line = match layout.size {
-        _ if simplified => {
-            let room = simplified_name_room(layout, screen, zoom);
-            Rect::from_center_size(room.center(), Vec2::new(room.width(), height))
-        }
         NodeSize::Standard => Rect::from_min_size(screen.min + Vec2::new(50.0, 14.0) * zoom, Vec2::new(100.0 * zoom, height)),
         NodeSize::Compact => {
             let left = screen.left() + 80.0 * zoom;
             Rect::from_min_size(Pos2::new(left, screen.center().y - height / 2.0), Vec2::new((COMPACT_WIDTH - 105.0) * zoom, height))
         }
         NodeSize::Small => {
-            // Under the box, where the Mask port sits too: the name starts
-            // past its dot, ending where it would without one.
-            let left = layout.mask.as_ref().map_or(4.0, |mask| mask.dot.right() - layout.rect.left() + 4.0);
-            let top_left = Pos2::new(screen.left() + left * zoom, screen.bottom() + 2.0 * zoom);
-            Rect::from_min_size(top_left, Vec2::new((SMALL_SIZE + 4.0 - left) * zoom, height))
+            let top_left = Pos2::new(screen.left() + 4.0 * zoom, screen.bottom() + 16.0 * zoom - height);
+            Rect::from_min_size(top_left, Vec2::new((SMALL_SIZE - 4.0) * zoom, height))
         }
     };
-    (line, font)
+    Some((line, font))
 }
 
 fn draw_node(ui: &Ui, painter: &egui::Painter, editor: &Editor, layout: &NodeLayout, screen: Rect, zoom: f32) {
@@ -1339,33 +1342,33 @@ fn draw_node(ui: &Ui, painter: &egui::Painter, editor: &Editor, layout: &NodeLay
         painter.rect_stroke(screen, radius, selection_stroke, StrokeKind::Inside);
     }
 
+    // Progress line while building (`PART_Progress`; margin 6 and 3 high
+    // when simplified).
     let simplified = zoom < SIMPLIFIED_ZOOM;
+    if status.building {
+        let (margin, height) = if simplified { (6.0, 3.0) } else { (3.0, 1.0) };
+        building_bar(ui, painter, screen, zoom, margin, height, layout.color);
+    }
+
+    // `PART_Icon`, hidden when simplified.
+    if !simplified {
+        let icon_offset = match layout.size {
+            NodeSize::Standard => Vec2::new(18.0, 14.0),
+            NodeSize::Compact => Vec2::new(45.0, (COMPACT_HEIGHT - 20.0) / 2.0),
+            NodeSize::Small => Vec2::new((SMALL_SIZE - 20.0) / 2.0, (SMALL_SIZE - 20.0) / 2.0),
+        };
+        let icon_rect = Rect::from_min_size(screen.min + icon_offset * zoom, Vec2::splat(20.0 * zoom));
+        icons::paint(ui, icon_rect, &layout.icon, title_color);
+    }
+
+    if let Some((title, title_font)) = title_line(painter.ctx(), layout, screen, zoom) {
+        let galley = elided_galley(painter, &node.name, title_font, title_color, title.width());
+        painter.galley(title.min, galley, title_color);
+    }
+    // Simplified, the icon stack hides too.
     if simplified {
-        if let Some((position, galley)) = simplified_name(painter, layout, &node.name, screen, zoom, title_color) {
-            painter.galley(position, galley, title_color);
-        }
-        if status.building {
-            building_bar(ui, painter, screen, zoom, 6.0, 3.0, layout.color);
-        }
         return;
     }
-
-    // Progress line while building (`PART_Progress`).
-    if status.building {
-        building_bar(ui, painter, screen, zoom, 3.0, 1.0, layout.color);
-    }
-
-    let icon_offset = match layout.size {
-        NodeSize::Standard => Vec2::new(18.0, 14.0),
-        NodeSize::Compact => Vec2::new(45.0, (COMPACT_HEIGHT - 20.0) / 2.0),
-        NodeSize::Small => Vec2::new((SMALL_SIZE - 20.0) / 2.0, (SMALL_SIZE - 20.0) / 2.0),
-    };
-    let icon_rect = Rect::from_min_size(screen.min + icon_offset * zoom, Vec2::splat(20.0 * zoom));
-    icons::paint(ui, icon_rect, &layout.icon, title_color);
-
-    let (title, title_font) = title_line(painter.ctx(), layout, screen, zoom);
-    let galley = elided_galley(painter, &node.name, title_font, title_color, title.width());
-    painter.galley(title.min, galley, title_color);
 
     // `PART_IconStack` (margin 0, 3, 1, 3), right-aligned at the bottom:
     // the build time (monospace 10, `ParamsN-Color6`, margin 4,
@@ -1398,6 +1401,45 @@ fn draw_node(ui: &Ui, painter: &egui::Painter, editor: &Editor, layout: &NodeLay
 
 /// `ParamsN-Color6`: a node's build time.
 const BUILD_TIME_COLOR: Color32 = Color32::from_rgb(0x49, 0x50, 0x57);
+
+/// The node's tooltip (`PART_MainGrid.ToolTip`, at the pointer): its name
+/// in semibold; "Build time:" and its time (`MillisecondsToTimeSpan`, the
+/// run's own space and the one between the runs before it); "Status:",
+/// its state in semibold (`EnumToString`, title case) and its error in
+/// `Accent-Orange`.
+fn node_tooltip(editor: &Editor, id: i32) -> egui::text::LayoutJob {
+    let status = editor.status(id);
+    let node = editor.document.node(id);
+    let name = node.map(|node| node.name.clone()).unwrap_or_default();
+    let bypassed = node.is_some_and(|node| node.base.get("StateOverride").and_then(Value::as_str) == Some("Bypassed"));
+    let state = if status.building {
+        "Is Building"
+    } else if bypassed {
+        "Bypassed"
+    } else {
+        match status.state {
+            NodeState::Unbuilt => "Unbuilt",
+            NodeState::Built => "Built",
+            NodeState::Error => "Error",
+            NodeState::Bypassed => "Bypassed",
+            NodeState::Baked => "Baked",
+        }
+    };
+    let time = crate::ui::data_view::stats::humanize_milliseconds(status.milliseconds);
+    let error = status.error.unwrap_or_default();
+    let plain = egui::TextFormat::simple(theme::interface(12.0), theme::LABEL_EMPHASIS);
+    let bold = egui::TextFormat::simple(theme::semibold(12.0), theme::LABEL_EMPHASIS);
+    let warning = egui::TextFormat::simple(theme::interface(12.0), theme::ACCENT_ORANGE);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(&name, 0.0, bold.clone());
+    job.append("\nBuild time:  ", 0.0, plain.clone());
+    job.append(&time, 0.0, plain.clone());
+    job.append("\nStatus: ", 0.0, plain.clone());
+    job.append(state, 0.0, bold);
+    job.append(" ", 0.0, plain);
+    job.append(&error, 0.0, warning);
+    job
+}
 
 /// How long a shine lasts (`ShineBoard`'s longest animation).
 const SHINE_SECONDS: f64 = 0.5;
@@ -1528,40 +1570,6 @@ pub(crate) fn elided_galley(painter: &egui::Painter, text: &str, font: egui::Fon
     painter.layout_job(job)
 }
 
-/// A simplified node's name and where it goes: one line in the middle of
-/// the node, between its port blocks, cut with an ellipsis; none when not
-/// a letter of it fits there.
-fn simplified_name(painter: &egui::Painter, layout: &NodeLayout, name: &str, screen: Rect, zoom: f32, color: Color32) -> Option<(Pos2, std::sync::Arc<egui::Galley>)> {
-    let room = simplified_name_room(layout, screen, zoom);
-    if room.width() <= 0.0 {
-        return None;
-    }
-    let galley = elided_galley(painter, name, simplified_font(zoom), color, room.width());
-    let glyphs: usize = galley.rows.iter().map(|row| row.glyphs.len()).sum();
-    let only_ellipsis = galley.elided && glyphs <= 1;
-    let fits = galley.size().x <= room.width() && galley.size().y <= room.height();
-    if only_ellipsis || !fits {
-        return None;
-    }
-    Some((room.center() - galley.size() / 2.0, galley))
-}
-
-/// A simplified node's name's font. The text stops shrinking at 6 while
-/// the node shrinks on: past that the name soon fits nowhere.
-fn simplified_font(zoom: f32) -> egui::FontId {
-    theme::semibold((24.0 * zoom).max(6.0))
-}
-
-/// The room for a simplified node's name (screen): the node less a margin
-/// and, on a side with ports, their blocks.
-fn simplified_name_room(layout: &NodeLayout, screen: Rect, zoom: f32) -> Rect {
-    let to_screen = |x: f32| screen.left() + (x - layout.rect.left()) * zoom;
-    let half_block = SIMPLIFIED_PORT.x / 2.0;
-    let left = layout.inputs.iter().map(|port| port.dot.center().x + half_block).fold(layout.rect.left(), f32::max);
-    let right = layout.outputs.iter().map(|port| port.dot.center().x - half_block).fold(layout.rect.right(), f32::min);
-    Rect::from_x_y_ranges(to_screen(left) + 4.0..=to_screen(right) - 4.0, screen.y_range())
-}
-
 fn draw_ports(painter: &egui::Painter, layouts: &[NodeLayout], view: &GraphView, origin: Pos2, state: &GraphState, pointer: Option<Pos2>) {
     let zoom = view.zoom;
     let simplified = zoom < SIMPLIFIED_ZOOM;
@@ -1574,8 +1582,7 @@ fn draw_ports(painter: &egui::Painter, layouts: &[NodeLayout], view: &GraphView,
         let painter = &painter;
         for port in layout.ports() {
             let dot = view.rect_to_screen(origin, port.dot);
-            let hit = view.rect_to_screen(origin, port.hit);
-            let hovered = pointer.is_some_and(|point| hit.contains(point));
+            let hovered = pointer.is_some_and(|point| port.takes(view.to_canvas(origin, point)));
             let snapping = snap_target.as_ref().is_some_and(|(node, name, is_input)| *node == layout.id && *name == port.name && *is_input == port.is_input);
             let is_mask = layout.mask.as_ref().is_some_and(|mask| mask.name == port.name) && port.is_input;
             let base = if is_mask { theme::ACCENT_MUTED_MAGENTA } else { layout.color };
@@ -1670,7 +1677,7 @@ fn snapping_port(layouts: &[NodeLayout], view: &GraphView, origin: Pos2, state: 
         for port in layout.ports() {
             let anchor = view.to_screen(origin, port.dot.center());
             let distance = anchor.distance(point);
-            let near = if state.snap_to_ports { distance <= SNAP_DISTANCE.max(12.0 * view.zoom) } else { view.rect_to_screen(origin, port.hit).contains(point) };
+            let near = if state.snap_to_ports { distance <= SNAP_DISTANCE.max(12.0 * view.zoom) } else { port.takes(view.to_canvas(origin, point)) };
             if !near {
                 continue;
             }
@@ -1836,7 +1843,8 @@ fn handle_port_drags(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layou
     };
     // Let go on one of its own node's ports: nothing (`IsConnectionValid`).
     let own_layout = layouts.iter().find(|layout| layout.id == dragged.node);
-    let on_own_port = own_layout.is_some_and(|layout| layout.ports().any(|port| view.rect_to_screen(origin, port.hit).contains(point)));
+    let canvas_point = view.to_canvas(origin, point);
+    let on_own_port = own_layout.is_some_and(|layout| layout.ports().any(|port| port.takes(canvas_point)));
     if on_own_port {
         return;
     }
@@ -1938,7 +1946,7 @@ fn drag_elements(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layouts: 
     };
     let view = state.view();
     let dragging = ui.input(|input| input.pointer.primary_down());
-    if let Some(pointer) = drag_pointer(ui, state.rect) {
+    if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
         let current = view.to_canvas(origin, pointer);
         let delta = current - pointer_start;
         let place = |start: [f32; 2]| {
@@ -2148,24 +2156,6 @@ fn snap_to_items(dragged: Rect, others: &[Rect]) -> (Vec2, Vec<[Pos2; 2]>) {
     (Vec2::new(shift_x, shift_y), lines)
 }
 
-/// The node's type, how long its last build took and why it failed.
-fn node_tooltip(editor: &Editor, id: i32) -> String {
-    let Some(node) = editor.document.node(id) else {
-        return String::new();
-    };
-    let spec = Catalogue::get().node(&node.type_name);
-    let type_name = spec.and_then(|spec| spec.display_name.clone()).unwrap_or_else(|| node.type_name.clone());
-    let status = editor.status(id);
-    let mut lines = vec![format!("{} ({type_name})", node.name)];
-    if status.state == NodeState::Built {
-        lines.push(format!("Built in {:.0} ms", status.milliseconds));
-    }
-    if let Some(error) = status.error {
-        lines.push(error);
-    }
-    lines.join("\n")
-}
-
 /// The node's right-click menu (`_ctxNodeMenu` as `PrepareNodeMenu`
 /// builds it). With several nodes selected only what applies to all shows
 /// (`RefreshNodeMenu`), and check marks stand for the selection
@@ -2296,7 +2286,6 @@ fn handle_background(
     let pushing = modifiers.command && modifiers.shift;
     let hovered = hovered_connection.map(|index| &connections[index]);
     if background.clicked() {
-        state.stop_renaming();
         match hovered {
             Some(connection) => {
                 let key = (connection.to, connection.to_port.clone());
@@ -2504,146 +2493,69 @@ fn draw_drag_overlay(ui: &Ui, painter: &egui::Painter, state: &GraphState, layou
     }
 }
 
-/// An inline name editor (F2): a text box with its text on `line`, where
-/// the name it stands in for is written, in that name's font, its margin
-/// zoomed with the graph too. Never narrower than `RENAME_MIN_WIDTH`: a
-/// `centred` line (its name centred on it) widens about its middle and
-/// centres the text, another widens to the right.
-pub(crate) struct NameEditor {
-    line: Rect,
-    font: egui::FontId,
-    margin: egui::Margin,
-    centred: bool,
+/// The graph's one rename popup (`editablePopup`), for nodes and groups.
+fn rename_popup_id() -> egui::Id {
+    egui::Id::new("graph-rename")
 }
 
-impl NameEditor {
-    pub(crate) fn new(ctx: &egui::Context, line: Rect, font: egui::FontId, zoom: f32, centred: bool) -> Self {
-        // A text box is a row of its font high at least.
-        let row_height = ctx.fonts_mut(|fonts| fonts.row_height(&font));
-        let size = Vec2::new(line.width().max(RENAME_MIN_WIDTH), line.height().max(row_height));
-        let line = if centred { Rect::from_center_size(line.center(), size) } else { Rect::from_min_size(line.min, size) };
-        let margin = egui::Margin::from(RENAME_MARGIN * zoom);
-        Self { line, font, margin, centred }
-    }
-
-    /// The box on screen, its margin round the line.
-    pub(crate) fn rect(&self) -> Rect {
-        Rect::from_min_max(self.line.min - self.margin.left_top(), self.line.max + self.margin.right_bottom())
-    }
-
-    /// The text box, editing `text`: on a layer of its own just above
-    /// the one `ui` paints the graph on, so the toolbox drawn over the
-    /// graph after it doesn't cover it (windows and menus still do), and
-    /// clipped to the graph as the rest of it is.
-    pub(crate) fn show(&self, ui: &mut Ui, text: &mut String, id: egui::Id) -> Response {
-        let rect = self.rect();
-        let graph_layer = ui.layer_id();
-        let layer = egui::LayerId::new(graph_layer.order, id.with("layer"));
-        ui.ctx().set_sublayer(graph_layer, layer);
-        let mut overlay = ui.new_child(UiBuilder::new().layer_id(layer).max_rect(rect));
-        overlay.set_clip_rect(ui.clip_rect());
-        let align = if self.centred { egui::Align::Center } else { egui::Align::Min };
-        let edit = egui::TextEdit::singleline(text).font(self.font.clone()).margin(self.margin).desired_width(rect.width()).horizontal_align(align).id(id);
-        overlay.put(rect, edit)
-    }
+/// Closes the rename popup (F2) without taking its text.
+pub(crate) fn close_rename_popup(ctx: &egui::Context, state: &mut GraphState) {
+    slider_popups::close_typing(ctx, rename_popup_id());
+    state.stop_renaming();
 }
 
-/// The inline name editor (F2) on a node: over its name, in its font
-/// ([`title_line`]); on a standard node, whose header has no ports, it
-/// runs on to the node's right side for room to type.
-fn node_name_editor(ctx: &egui::Context, layout: &NodeLayout, screen: Rect, zoom: f32) -> NameEditor {
-    let (mut line, font) = title_line(ctx, layout, screen, zoom);
-    let simplified = zoom < SIMPLIFIED_ZOOM;
-    if layout.size == NodeSize::Standard && !simplified {
-        line.max.x = screen.right() - PORTS_SIDE * zoom;
+/// The rename popup (F2, an `EditablePopup`) on an element at `screen`,
+/// `width` wide unzoomed: a text box at 100% (`RelativePoint`, 10 in
+/// from the element's top-left in the element's own units, so zoomed with
+/// it; as wide as the element is unzoomed, 96 at least), over everything
+/// and kept in the window as a popup is. Returns the text it closed
+/// taking ([`slider_popups::typing_box`] says when); the graph forgets
+/// the rename once it has closed.
+pub(crate) fn rename_popup(ui: &Ui, state: &mut GraphState, screen: Rect, width: f32, zoom: f32) -> Option<String> {
+    let id = rename_popup_id();
+    if let Some(text) = state.rename_start.take() {
+        slider_popups::open_typing(ui.ctx(), id, text);
     }
-    NameEditor::new(ctx, line, font, zoom, simplified)
-}
-
-/// The view brings the node or group a name editor (F2) has just opened
-/// on into sight first: the least pan that puts it and the editor inside
-/// the graph `rect`, clear of the toolbox floating over its corner (only
-/// the editor, when both together won't fit).
-fn reveal_renamed(ctx: &egui::Context, state: &mut GraphState, layouts: &[NodeLayout], groups: &[GroupData], rect: Rect) {
-    let Some(renamed) = state.reveal.take() else {
-        return;
+    let popup_scale = slider_popups::popup_scale(ui.ctx());
+    let look = slider_popups::TypingLook {
+        top_left: screen.min + Vec2::splat(RENAME_OFFSET * zoom),
+        width: slider_popups::BoxWidth::Fixed(width.max(RENAME_MIN_WIDTH) * popup_scale),
+        font: theme::interface(RENAME_FONT_SIZE),
     };
-    let view = state.view();
-    let origin = rect.min;
-    let shown = match renamed {
-        Renamed::Node(id) => layouts.iter().find(|layout| layout.id == id).map(|layout| {
-            let screen = view.rect_to_screen(origin, layout.rect);
-            (screen, node_name_editor(ctx, layout, screen, view.zoom).rect())
-        }),
-        Renamed::Group(id) => groups.iter().find(|group| group.id == id).map(|group| {
-            let screen = view.rect_to_screen(origin, group.bounds());
-            (screen, graph_groups::name_editor(ctx, group, screen, view.zoom).rect())
-        }),
-    };
-    let Some((element, name_editor)) = shown else {
-        return;
-    };
-    let shift = reveal_shift(rect, state.toolbox_rect, element, name_editor);
-    let view = state.view_mut();
-    view.location -= shift / view.zoom;
-}
-
-/// How far to move `element` and its `name_editor` (screen) to bring them
-/// inside the graph `rect`, `REVEAL_MARGIN` from its edges and clear of
-/// the `toolbox` over it; only the editor when the two won't fit there.
-fn reveal_shift(rect: Rect, toolbox: Rect, element: Rect, name_editor: Rect) -> Vec2 {
-    let room = rect.shrink(REVEAL_MARGIN);
-    let clear = fit_rect(room, toolbox);
-    let both = element.union(name_editor);
-    let target = if both.width() <= clear.width() && both.height() <= clear.height() { both } else { name_editor };
-    let mut shift = Vec2::new(span_shift(target.x_range(), room.x_range()), span_shift(target.y_range(), room.y_range()));
-    if toolbox.intersects(target.translate(shift)) {
-        shift.x = span_shift(target.x_range(), clear.x_range());
+    let typed = slider_popups::typing_box(ui, id, &look);
+    if !slider_popups::typing_open(ui.ctx(), id) {
+        state.renaming = None;
     }
-    shift
+    typed
 }
 
-/// How far to move `span` along an axis to bring it within `room`; to its
-/// start when it is the longer.
-fn span_shift(span: egui::Rangef, room: egui::Rangef) -> f32 {
-    if span.min < room.min || span.span() > room.span() {
-        room.min - span.min
-    } else if span.max > room.max {
-        room.max - span.max
-    } else {
-        0.0
-    }
-}
-
-/// The inline name editor (F2): an `EditablePopup`, closing as
-/// [`crate::ui::widgets::popup_outcome`] says; a blank name is no name.
-/// The name taken goes to [`GraphCommand::RenameNode`].
+/// `RenameNode`: the rename popup on the node it is open on; a blank name
+/// is no name. The name taken goes to [`GraphCommand::RenameNode`].
 fn rename_overlay(ui: &mut Ui, state: &mut GraphState, layouts: &[NodeLayout], origin: Pos2, commands: &mut Vec<Command>) {
-    let Some(id) = state.renaming else {
-        return;
+    let id = match state.renaming {
+        Some(Renamed::Node(id)) => id,
+        Some(Renamed::Group(_)) => return,
+        None => {
+            // Closed by the graph (a reset, another tab): the popup goes
+            // with it.
+            slider_popups::close_typing(ui.ctx(), rename_popup_id());
+            return;
+        }
     };
     let Some(layout) = layouts.iter().find(|layout| layout.id == id) else {
-        state.stop_renaming();
+        close_rename_popup(ui.ctx(), state);
         return;
     };
     let view = state.view();
     let screen = view.rect_to_screen(origin, layout.rect);
-    let name_editor = node_name_editor(ui.ctx(), layout, screen, view.zoom);
-    let response = name_editor.show(ui, &mut state.rename_text, egui::Id::new(("node-rename", id)));
-    // Enter and Escape let go of the keyboard; taking it back would keep
-    // the box open.
-    if !response.has_focus() && !response.lost_focus() {
-        response.request_focus();
-    }
-    let Some(accepted) = crate::ui::widgets::popup_outcome(ui, &response) else {
+    let Some(text) = rename_popup(ui, state, screen, layout.rect.width(), view.zoom) else {
         return;
     };
-    let name = state.rename_text.trim().to_string();
-    if accepted && !name.is_empty() {
+    let name = text.trim().to_string();
+    if !name.is_empty() {
         let rename = GraphCommand::RenameNode { node: id, name };
         commands.push(Command::Graph(rename));
     }
-    state.stop_renaming();
 }
 
 #[cfg(test)]
@@ -2806,40 +2718,86 @@ mod tests {
         state.view().to_screen(state.rect.min, dot)
     }
 
-    #[test]
-    fn extents_leave_room_for_the_toolbox() {
-        let mut document = Document::new();
-        let leftmost = document.add_node("Mountain", [20000.0, 26000.0]).unwrap();
-        let other = document.add_node("ErosionPro", [32000.0, 30000.0]).unwrap();
-        let mut editor = Editor::new(document);
-        let mut state = GraphState::default();
-        let context = themed_context();
-        // The menus' column down the graph's left edge.
-        state.toolbox_rect = Rect::from_min_size(Pos2::new(10.0, 45.0), Vec2::new(36.0, 400.0));
-        state.zoom_request = Some(ZoomRequest::Extents);
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        let shown = |id: i32| {
-            let layout = layout_node(editor.document.node(id).unwrap(), editor.user.options.default_node_size());
-            state.view().rect_to_screen(state.rect.min, layout.rect)
-        };
-        assert!(shown(leftmost).left() >= state.toolbox_rect.right() + TOOLBOX_GAP);
-        for id in [leftmost, other] {
-            assert!(SCREEN.contains_rect(shown(id)));
-        }
+    /// The view a fit of `framed` (canvas) gives on a graph at `rect`.
+    fn fitted_view(framed: Rect, rect: Rect, zoom: f32) -> GraphView {
+        let fitted = (rect.width() / framed.width()).min(rect.height() / framed.height());
+        let zoom = if fitted >= MIN_ZOOM { fitted.min(MAX_ZOOM) } else { zoom };
+        GraphView { location: framed.center().to_vec2() - rect.size() / (2.0 * zoom), zoom }
+    }
+
+    fn assert_view_near(view: GraphView, expected: GraphView) {
+        let off = (view.location - expected.location).length();
+        assert!(off < 0.01 && (view.zoom - expected.zoom).abs() < 1e-6, "{view:?} is not {expected:?}");
     }
 
     #[test]
-    fn fits_keep_to_the_right_of_the_toolbox() {
-        let graph = Rect::from_min_max(Pos2::new(4.0, 30.0), Pos2::new(1004.0, 630.0));
-        // No toolbox over the graph: all of it.
-        assert_eq!(fit_rect(graph, Rect::NOTHING), graph);
-        assert_eq!(fit_rect(graph, Rect::from_min_size(Pos2::new(1100.0, 30.0), Vec2::splat(40.0))), graph);
-        // The menus' column: past its right edge and the gap.
-        let column = Rect::from_min_size(Pos2::new(10.0, 45.0), Vec2::new(36.0, 400.0));
-        assert_eq!(fit_rect(graph, column), Rect::from_min_max(Pos2::new(56.0, 30.0), graph.max));
-        // A panel wider than half the graph leaves the right half.
-        let panel = Rect::from_min_max(graph.min, Pos2::new(700.0, graph.bottom()));
-        assert_eq!(fit_rect(graph, panel), Rect::from_min_max(Pos2::new(504.0, 30.0), graph.max));
+    fn extents_fit_the_corners_to_the_whole_graph() {
+        let mut document = Document::new();
+        document.add_node("Mountain", [20000.0, 26000.0]).unwrap();
+        document.add_node("ErosionPro", [32000.0, 30000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        // The toolbox floats over the graph's left edge: the fit takes no
+        // notice of it.
+        state.toolbox_rect = Rect::from_min_size(Pos2::new(10.0, 45.0), Vec2::new(36.0, 400.0));
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        // The nodes' top-left corners, 200 and then 30 round them.
+        let corners = Rect::from_min_max(Pos2::new(20000.0, 26000.0), Pos2::new(32000.0, 30000.0));
+        assert_view_near(state.view(), fitted_view(corners.expand(230.0), SCREEN, 1.0));
+    }
+
+    #[test]
+    fn extents_take_in_the_corners_of_notes_and_groups_too() {
+        let mut document = Document::new();
+        document.add_node("Mountain", [26100.0, 26100.0]).unwrap();
+        let note = document.add_note([26100.0, 29000.0], 0);
+        let group = document.add_group(&[], [22000.0, 26000.0], [400.0, 300.0], 0);
+        let mut editor = Editor::new(document);
+        let note_corner = crate::ui::graph_notes::note_rect(&editor, 0, note).unwrap().min;
+        let group_corner = editor.document.group(group).unwrap().bounds().min;
+        let mut state = GraphState::default();
+        let context = themed_context();
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let corners = Rect::from_points(&[Pos2::new(26100.0, 26100.0), note_corner, group_corner]);
+        assert_view_near(state.view(), fitted_view(corners.expand(230.0), SCREEN, 1.0));
+    }
+
+    #[test]
+    fn extents_too_wide_for_the_least_zoom_keep_the_zoom_and_centre() {
+        let mut document = Document::new();
+        document.add_node("Mountain", [26100.0, 26100.0]).unwrap();
+        document.add_node("Mountain", [1_000_000.0, 1_000_000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        state.view_mut().zoom = 0.5;
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let corners = Rect::from_min_max(Pos2::new(26100.0, 26100.0), Pos2::new(1_000_000.0, 1_000_000.0));
+        let expected = fitted_view(corners.expand(230.0), SCREEN, 0.5);
+        assert_eq!(expected.zoom, 0.5);
+        assert_view_near(state.view(), expected);
+    }
+
+    #[test]
+    fn selection_frames_the_selected_nodes_corners() {
+        let mut document = Document::new();
+        let chosen = document.add_node("Mountain", [26100.0, 26100.0]).unwrap();
+        document.add_node("Mountain", [30000.0, 30000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        editor.selection = vec![chosen];
+        state.zoom_request = Some(ZoomRequest::Selection);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        // One node: its corner, 460 square round it.
+        let corner = Rect::from_min_size(Pos2::new(26100.0, 26100.0), Vec2::ZERO);
+        assert_view_near(state.view(), fitted_view(corner.expand(230.0), SCREEN, 1.0));
+        assert!((state.view().zoom - 800.0 / 460.0).abs() < 1e-5);
     }
 
     #[test]
@@ -3116,23 +3074,34 @@ mod tests {
     }
 
     #[test]
-    fn the_view_scrolls_faster_the_further_past_the_edge() {
-        let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0));
-        assert_eq!(auto_pan_velocity(rect, Pos2::new(400.0, 300.0)), Vec2::ZERO);
-        assert_eq!(auto_pan_velocity(rect, Pos2::new(AUTO_PAN_MARGIN, 300.0)), Vec2::ZERO);
-        // Near the top right corner: up and to the right.
-        let near = auto_pan_velocity(rect, Pos2::new(790.0, 5.0));
-        assert!(near.x > 0.0 && near.y < 0.0);
-        let past = auto_pan_velocity(rect, Pos2::new(900.0, 300.0));
-        assert!(past.x > near.x && past.y == 0.0);
-        // Up to a point.
-        let fastest = AUTO_PAN_REACH * AUTO_PAN_RATE;
-        assert_eq!(auto_pan_velocity(rect, Pos2::new(5000.0, 300.0)), Vec2::new(fastest, 0.0));
-        assert_eq!(auto_pan_velocity(rect, Pos2::new(400.0, -5000.0)), Vec2::new(0.0, -fastest));
+    fn auto_pan_steps_towards_each_edge_the_pointer_is_near() {
+        let rect = Rect::from_min_max(Pos2::new(100.0, 50.0), Pos2::new(900.0, 650.0));
+        let stepped = |zoom: f32, pointer: Pos2| {
+            let mut view = GraphView { location: Vec2::splat(100.0), zoom };
+            auto_pan_step(&mut view, rect, pointer);
+            let step = view.location - Vec2::splat(100.0);
+            // To a thousandth, past the float's rounding.
+            (step * 1000.0).round() / 1000.0
+        };
+        // In the middle, or just over 32 from the edge: no step.
+        assert_eq!(stepped(1.0, rect.center()), Vec2::ZERO);
+        assert_eq!(stepped(1.0, Pos2::new(rect.left() + 32.5, 300.0)), Vec2::ZERO);
+        // Within 32 of the left edge, or past the right: 0.15 / (zoom * 2)
+        // canvas units that way, however far past.
+        assert_eq!(stepped(1.0, Pos2::new(rect.left() + 32.0, 300.0)), Vec2::new(-0.075, 0.0));
+        assert_eq!(stepped(0.5, Pos2::new(rect.right() + 500.0, 300.0)), Vec2::new(0.15, 0.0));
+        // In a corner, both ways.
+        assert_eq!(stepped(1.0, Pos2::new(rect.right() - 5.0, rect.top() + 5.0)), Vec2::new(0.075, -0.075));
+        // Kept on the canvas, the graph's size in screen points.
+        let mut view = GraphView { location: Vec2::new(0.02, CANVAS_EXTENTS), zoom: 0.25 };
+        auto_pan_step(&mut view, rect, rect.center());
+        assert_eq!(view.location, Vec2::new(0.02, CANVAS_EXTENTS - rect.height()));
+        auto_pan_step(&mut view, rect, Pos2::new(rect.left(), 300.0));
+        assert_eq!(view.location.x, 0.0);
     }
 
     #[test]
-    fn nodes_dragged_past_the_edge_scroll_the_view_and_stay_in_sight() {
+    fn a_node_dragged_near_the_edge_steps_the_view_on_each_move_only() {
         let mut editor = Editor::new(Document::new());
         let mut state = GraphState::default();
         let context = themed_context();
@@ -3150,29 +3119,22 @@ mod tests {
         frame_amid_panels(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(title + Vec2::new(40.0, 0.0))]);
         assert_eq!(state.view(), view);
 
-        // Held past the right edge, over the panel beside the graph: the
-        // view scrolls right frame after frame, the pointer still.
+        // Moved past the right edge, over the panel beside the graph: a
+        // step for each move, none while the pointer rests.
         let past = Pos2::new(GRAPH.right() + 60.0, title.y);
-        frame_amid_panels(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(past)]);
-        let mut location = state.view().location;
-        for _ in 0..30 {
-            frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-            let scrolled = state.view().location;
-            assert!(scrolled.x > location.x);
-            assert_eq!(scrolled.y, location.y);
-            location = scrolled;
-        }
+        let moves = vec![egui::Event::PointerMoved(past - Vec2::X), egui::Event::PointerMoved(past)];
+        frame_amid_panels(&context, &mut editor, &mut state, moves);
+        let stepped = state.view().location;
+        assert!((stepped - view.location - Vec2::new(0.15, 0.0)).length() < 0.01, "{stepped:?}");
+        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+        assert_eq!(state.view().location, stepped);
 
-        // Let go there, the node stays at the edge, in sight, and the
-        // view stops.
+        // Let go there, the node is where the pointer took it, past the
+        // graph's edge.
         frame_amid_panels(&context, &mut editor, &mut state, vec![button(past, false)]);
         let layout = layout_node(editor.document.node(node).unwrap(), editor.user.options.default_node_size());
         let screen = state.view().rect_to_screen(GRAPH.min, layout.rect);
-        assert!(screen.intersects(GRAPH), "{screen:?} is out of sight");
-        assert!(layout.rect.left() > corner.x + 500.0);
-        let stopped = state.view();
-        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-        assert_eq!(state.view(), stopped);
+        assert!(screen.left() > GRAPH.right() - 100.0 && screen.right() > GRAPH.right(), "{screen:?}");
     }
 
     #[test]
@@ -3300,7 +3262,7 @@ mod tests {
         let header = view.rect_to_screen(GRAPH.min, group_data.bounds());
         let note_box = view.rect_to_screen(GRAPH.min, crate::ui::graph_notes::note_rect(&editor, 0, note).unwrap());
         let rests = [
-            ("the node", node_box.center(), node_tooltip(&editor, erosion)),
+            ("the node", node_box.center(), node_tooltip(&editor, erosion).text),
             ("the group", Pos2::new(header.right() - 20.0, header.top() + 20.0), group_data.name.clone()),
             ("the note", note_box.max - Vec2::splat(10.0), "Carve the valley first".to_string()),
         ];
@@ -3311,60 +3273,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn small_node_names_clear_the_mask_port() {
-        let mut editor = Editor::new(Document::new());
-        let mut state = GraphState::default();
-        let context = themed_context();
-        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-
-        // A small Combine, which has a Mask port, and a small Mountain,
-        // which has none, well inside the graph.
-        let view = state.view();
-        let canvas_at = |x: f32, y: f32| {
-            let point = view.to_canvas(GRAPH.min, Pos2::new(x, y));
-            [point.x, point.y]
-        };
-        let combine = editor.document.add_node("Combine", canvas_at(400.0, 400.0)).unwrap();
-        let mountain = editor.document.add_node("Mountain", canvas_at(700.0, 400.0)).unwrap();
-        for node in [combine, mountain] {
-            editor.document.set_member(node, "NodeSize", serde_json::json!("Small"), "Node size", false);
-        }
-        let (shapes, _, _) = frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-
-        // The node's box, its name and its Mask dot on the screen.
-        let view = state.view();
-        let shown = |node: i32| {
-            let data = editor.document.node(node).unwrap();
-            let layout = layout_node(data, editor.user.options.default_node_size());
-            let name = shapes.iter().find_map(|clipped| match &clipped.shape {
-                Shape::Text(text) if text.galley.text() == data.name => Some(clipped.shape.visual_bounding_rect()),
-                _ => None,
-            });
-            let mask = layout.mask.as_ref().map(|mask| view.rect_to_screen(state.rect.min, mask.dot));
-            (view.rect_to_screen(state.rect.min, layout.rect), name.expect("the name shows"), mask)
-        };
-        let (combine_box, combine_name, mask_dot) = shown(combine);
-        let mask_dot = mask_dot.expect("Combine has a Mask port");
-        assert!(combine_name.top() >= combine_box.bottom(), "the name is under the box");
-        assert!(!combine_name.intersects(mask_dot), "{combine_name:?} is under the Mask dot {mask_dot:?}");
-        assert!(combine_name.left() >= mask_dot.right());
-        assert!(combine_name.right() <= combine_box.right() + 4.0 * view.zoom);
-
-        // Without a Mask port the name starts where it did.
-        let (mountain_box, mountain_name, no_mask) = shown(mountain);
-        assert!(no_mask.is_none());
-        assert!(mountain_name.left() < mask_dot.right() - combine_box.left() + mountain_box.left());
+    /// The names painted, each where its galley starts, how wide it is,
+    /// its rows and its font's size.
+    fn painted_names(shapes: &[egui::epaint::ClippedShape], name: &str) -> Vec<(Pos2, f32, usize, f32)> {
+        let texts = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            Shape::Text(text) if text.galley.text() == name => {
+                let size = text.galley.job.sections[0].format.font_id.size;
+                Some((text.pos, text.galley.size().x, text.galley.rows.len(), size))
+            }
+            _ => None,
+        });
+        texts.collect()
     }
 
     #[test]
-    fn simplified_names_stay_on_one_line_inside_their_nodes() {
-        // Zoomed out a small Combine with ports both sides (Final in Alpine
-        // Valley), a compact Mountain and a standard Erosion with a long
-        // name: each name is one line inside its node, clear of the port
-        // blocks, or none.
+    fn names_keep_their_place_zoomed_out_in_a_24_font() {
+        // A standard node with a long name, a compact one, a small one and
+        // a small one with a Mask port (Final in Alpine Valley), close in
+        // and zoomed out (simplified).
         let long_name = "A very long node name with spaces that goes on and on past the edge of any node box";
-        for zoom in [0.37, 0.2, 0.05] {
+        for zoom in [1.0, 0.37, 0.2, 0.05] {
             let mut editor = Editor::new(Document::new());
             let mut state = GraphState::default();
             let context = themed_context();
@@ -3375,58 +3303,60 @@ mod tests {
                 let point = view.to_canvas(GRAPH.min, Pos2::new(x, y));
                 [point.x, point.y]
             };
-            let final_node = editor.document.add_node("Combine", canvas_at(300.0, 400.0)).unwrap();
-            let white = editor.document.add_node("Mountain", canvas_at(500.0, 400.0)).unwrap();
-            let erosion = editor.document.add_node("ErosionPro", canvas_at(700.0, 400.0)).unwrap();
-            editor.document.set_member(final_node, "NodeSize", serde_json::json!("Small"), "Node size", false);
+            let erosion = editor.document.add_node("ErosionPro", canvas_at(300.0, 350.0)).unwrap();
+            let white = editor.document.add_node("Mountain", canvas_at(560.0, 350.0)).unwrap();
+            let peak = editor.document.add_node("Mountain", canvas_at(760.0, 350.0)).unwrap();
+            let final_node = editor.document.add_node("Combine", canvas_at(900.0, 350.0)).unwrap();
             editor.document.set_member(white, "NodeSize", serde_json::json!("Compact"), "Node size", false);
-            editor.document.rename(final_node, "Final");
-            editor.document.rename(white, "White");
+            for small in [peak, final_node] {
+                editor.document.set_member(small, "NodeSize", serde_json::json!("Small"), "Node size", false);
+            }
             editor.document.rename(erosion, long_name);
+            editor.document.rename(white, "White");
+            editor.document.rename(peak, "Peak");
+            editor.document.rename(final_node, "Final");
             let (shapes, _, _) = frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
 
-            let view = state.view();
-            let shown = |node: i32| {
-                let data = editor.document.node(node).unwrap();
-                let layout = layout_node(data, editor.user.options.default_node_size());
-                let names: Vec<_> = shapes
-                    .iter()
-                    .filter_map(|clipped| match &clipped.shape {
-                        Shape::Text(text) if text.galley.text() == data.name => Some((text.galley.clone(), clipped.shape.visual_bounding_rect())),
-                        _ => None,
-                    })
-                    .collect();
-                assert!(names.len() <= 1, "{} draws {} times at {zoom}", data.name, names.len());
-                let node_box = view.rect_to_screen(state.rect.min, layout.rect);
-                if let Some((galley, bounds)) = names.first() {
-                    assert_eq!(galley.rows.len(), 1, "{} wraps at {zoom}", data.name);
-                    assert!(node_box.expand(0.5).contains_rect(*bounds), "{} {bounds:?} leaves its node {node_box:?} at {zoom}", data.name);
-                    for port in layout.inputs.iter().chain(&layout.outputs) {
-                        let block = Rect::from_center_size(view.to_screen(state.rect.min, port.dot.center()), SIMPLIFIED_PORT * zoom);
-                        assert!(!bounds.intersects(block), "{} {bounds:?} is over the {} block {block:?} at {zoom}", data.name, port.name);
-                    }
-                }
-                names.into_iter().next().map(|(galley, _)| galley)
+            let simplified = zoom < SIMPLIFIED_ZOOM;
+            let screen_box = |node: i32| view.rect_to_screen(GRAPH.min, node_rect(&editor, node));
+            let size = |normal: f32| if simplified { 24.0 * zoom } else { normal * zoom };
+            let height = |font_size: f32| line_height(&context, &theme::semibold(font_size));
+            let one_name = |name: &str| {
+                let names = painted_names(&shapes, name);
+                assert_eq!(names.len(), 1, "{name} at {zoom}: {names:?}");
+                names[0]
             };
-            let final_name = shown(final_node);
-            let white_name = shown(white);
-            let long = shown(erosion);
-            // Just under the simplified zoom, the short name shows whole
-            // and the long one cut; the small node has no room left.
-            if zoom == 0.37 {
-                assert!(final_name.is_none(), "Final shows between its port blocks");
-                assert!(white_name.as_ref().is_some_and(|galley| !galley.elided), "White does not show whole");
-                assert!(long.as_ref().is_some_and(|galley| galley.elided), "the long name is not cut");
-            }
-            // At the least zoom no name fits.
-            if zoom == MIN_ZOOM {
-                assert!(final_name.is_none() && white_name.is_none() && long.is_none(), "a name shows at {zoom}");
-            }
+
+            // 50, 14 in, at most 100 wide, one line cut short.
+            let (start, width, rows, font_size) = one_name(long_name);
+            let node_box = screen_box(erosion);
+            assert_eq!((rows, font_size), (1, size(13.0)), "at {zoom}");
+            assert!(start.distance(node_box.min + Vec2::new(50.0, 14.0) * zoom) < 0.01, "at {zoom}: {start:?}");
+            assert!(width <= 100.0 * zoom + 0.01, "at {zoom}: {width}");
+
+            // 80 in and centred down the node, at most 65 wide.
+            let (start, width, rows, font_size) = one_name("White");
+            let node_box = screen_box(white);
+            assert_eq!((rows, font_size), (1, size(13.0)), "at {zoom}");
+            let top = node_box.center().y - height(font_size) / 2.0;
+            assert!(start.distance(Pos2::new(node_box.left() + 80.0 * zoom, top)) < 0.01, "at {zoom}: {start:?}");
+            assert!(width <= 65.0 * zoom + 0.01, "at {zoom}: {width}");
+
+            // 4 in, its foot 16 below the box, at most 60 wide.
+            let (start, width, rows, font_size) = one_name("Peak");
+            let node_box = screen_box(peak);
+            assert_eq!((rows, font_size), (1, size(10.0)), "at {zoom}");
+            let top = node_box.bottom() + 16.0 * zoom - height(font_size);
+            assert!(start.distance(Pos2::new(node_box.left() + 4.0 * zoom, top)) < 0.01, "at {zoom}: {start:?}");
+            assert!(width <= 60.0 * zoom + 0.01, "at {zoom}: {width}");
+
+            // A small node gives its name up to its Mask port.
+            assert!(painted_names(&shapes, "Final").is_empty(), "Final shows at {zoom}");
         }
     }
 
     #[test]
-    fn small_node_ports_leave_the_middle_to_the_node() {
+    fn small_node_ports_take_the_pointer_by_their_element_and_hit_grid() {
         // A small Combine, like Final in Alpine Valley: two inputs, which
         // fill both rows on the left, and an output.
         let mut document = Document::new();
@@ -3436,18 +3366,32 @@ mod tests {
         let layout = layout_node(editor.document.node(combine).unwrap(), editor.user.options.default_node_size());
         assert_eq!((layout.inputs.len(), layout.outputs.len()), (2, 1));
 
-        // Each port takes the pointer over its dot, but neither side reaches
-        // the icon in the middle or the other side.
-        let icon = Rect::from_center_size(layout.rect.center(), Vec2::splat(20.0));
-        for port in layout.ports() {
-            assert!(port.hit.contains_rect(port.dot), "{} {:?} misses its dot {:?}", port.name, port.hit, port.dot);
-            assert!(!port.hit.intersects(icon), "{} {:?} covers the icon {icon:?}", port.name, port.hit);
+        // The rows 14 down and centred in the rest, the elements 5 in.
+        let rect = layout.rect;
+        let first_row = rect.top() + 14.0 + (64.0 - 14.0 - 2.0 * 16.0) / 2.0;
+        let input = &layout.inputs[0];
+        let output = &layout.outputs[0];
+        assert_eq!(input.element, Rect::from_min_size(Pos2::new(rect.left() + 5.0, first_row + 2.0), Vec2::new(20.0, 12.0)));
+        assert_eq!(output.element, Rect::from_min_size(Pos2::new(rect.right() - 25.0, first_row + 2.0), Vec2::new(20.0, 12.0)));
+        // Each takes the pointer over its element and the 14 of its hit
+        // grid (20 high, to 4 past the element) on the dot's side.
+        let middle = input.element.center().y;
+        assert_eq!(input.hit, [input.element, Rect::from_min_max(Pos2::new(rect.left() + 5.0, middle - 10.0), Pos2::new(rect.left() + 19.0, middle + 10.0))]);
+        assert_eq!(output.hit, [output.element, Rect::from_min_max(Pos2::new(rect.right() - 15.0, middle - 10.0), Pos2::new(rect.right() - 1.0, middle + 10.0))]);
+        assert!(input.takes(input.dot.center()) && output.takes(output.dot.center()));
+        assert!(!input.takes(Pos2::new(rect.left() + 22.0, middle - 8.0)), "the grid's corner past its 14");
+        // The two sides leave the middle to the node.
+        assert!(!input.takes(rect.center()) && !output.takes(rect.center()));
+        // The collapsed stand-in and the Mask port are never "small".
+        let mut many = Document::new();
+        let mixer = many.add_node("Mixer", [26100.0, 26100.0]).unwrap();
+        many.set_member(mixer, "NodeSize", serde_json::json!("Small"), "Node size", false);
+        let many_layout = layout_node(many.node(mixer).unwrap(), "Standard");
+        if let Some(stand_in) = many_layout.inputs.iter().find(|port| port.collapsed) {
+            assert_eq!(stand_in.hit[1].width(), 24.0);
         }
-        for input in &layout.inputs {
-            for output in &layout.outputs {
-                assert!(!input.hit.intersects(output.hit), "{} {:?} meets {} {:?}", input.name, input.hit, output.name, output.hit);
-            }
-        }
+        let mask = layout.mask.as_ref().unwrap();
+        assert_eq!(mask.hit[1], Rect::from_min_max(Pos2::new(mask.element.left(), mask.element.center().y - 10.0), Pos2::new(mask.element.right() + 4.0, mask.element.center().y + 10.0)));
 
         // A right-click in the middle, beside it in the output's row, or
         // on a port's dot opens the node's menu.
@@ -3475,8 +3419,13 @@ mod tests {
         }
     }
 
+    /// The text in the rename popup.
+    fn rename_text(context: &egui::Context) -> Option<String> {
+        slider_popups::typing_text(context, rename_popup_id())
+    }
+
     #[test]
-    fn the_name_editor_takes_enter_and_escape() {
+    fn the_rename_popup_takes_enter_and_escape() {
         let mut editor = Editor::new(Document::new());
         let mut state = GraphState::default();
         let context = themed_context();
@@ -3494,14 +3443,15 @@ mod tests {
         let key = |key: Key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: none };
         let typed = |text: &str| egui::Event::Text(text.to_string());
 
-        // F2 opens the box on the name; Enter takes what was typed.
+        // F2 opens the popup on the name, all of it selected (`SelectAll`),
+        // so typing replaces it; Enter takes what was typed.
         state.start_renaming(&editor, mountain);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
-        assert_eq!(state.rename_text, mountain_name);
+        assert_eq!(rename_text(&context), Some(mountain_name.clone()));
         graph_frame(&context, &mut editor, &mut state, vec![typed("Q")], none);
-        assert_eq!(state.rename_text, format!("{mountain_name}Q"));
+        assert_eq!(rename_text(&context).as_deref(), Some("Q"));
         let commands = graph_frame(&context, &mut editor, &mut state, vec![key(Key::Enter)], none);
-        let renamed = GraphCommand::RenameNode { node: mountain, name: format!("{mountain_name}Q") };
+        let renamed = GraphCommand::RenameNode { node: mountain, name: "Q".to_string() };
         assert_eq!(commands, vec![Command::Graph(renamed)]);
         assert_eq!(state.renaming, None);
 
@@ -3509,52 +3459,51 @@ mod tests {
         state.start_renaming(&editor, blur);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         graph_frame(&context, &mut editor, &mut state, vec![typed("y")], none);
-        assert_eq!(state.rename_text, format!("{blur_name}y"));
+        assert_eq!(rename_text(&context).as_deref(), Some("y"));
         let commands = graph_frame(&context, &mut editor, &mut state, vec![key(Key::Escape)], none);
         assert!(commands.is_empty(), "{commands:?}");
         assert_eq!(state.renaming, None);
 
-        // Closed by a click on the graph, it leaves no text for the next.
-        state.start_renaming(&editor, mountain);
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
-        graph_frame(&context, &mut editor, &mut state, vec![typed("Zed")], none);
+        // A press on the graph closes it (`StaysOpen` off), taking the
+        // text only with Accept values when clicking outside of editable
+        // field.
         let background = Pos2::new(600.0, 600.0);
         let button = |pressed: bool| egui::Event::PointerButton { pos: background, button: PointerButton::Primary, pressed, modifiers: none };
-        graph_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(background)], none);
-        graph_frame(&context, &mut editor, &mut state, vec![button(true)], none);
-        graph_frame(&context, &mut editor, &mut state, vec![button(false)], none);
-        assert_eq!(state.renaming, None);
-        assert!(state.rename_text.is_empty());
+        for accept in [false, true] {
+            theme::set_settings(&context, theme::InterfaceSettings { accept_on_lost_focus: accept, ..Default::default() });
+            state.start_renaming(&editor, mountain);
+            graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+            graph_frame(&context, &mut editor, &mut state, vec![typed("Zed")], none);
+            graph_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(background)], none);
+            let commands = graph_frame(&context, &mut editor, &mut state, vec![button(true)], none);
+            graph_frame(&context, &mut editor, &mut state, vec![button(false)], none);
+            let expected = if accept { vec![Command::Graph(GraphCommand::RenameNode { node: mountain, name: "Zed".to_string() })] } else { Vec::new() };
+            assert_eq!(commands, expected, "accept on lost focus: {accept}");
+            assert_eq!(state.renaming, None);
+            assert_eq!(rename_text(&context), None);
+        }
+
+        // Renaming another node while the popup is still open starts on
+        // that node's name, not on what was typed for this one.
         state.start_renaming(&editor, blur);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
-        assert_eq!(state.rename_text, blur_name);
-
-        // Renaming another node while the box is still open starts on that
-        // node's name, not on what was typed for this one.
         graph_frame(&context, &mut editor, &mut state, vec![typed("Q")], none);
-        assert_eq!(state.rename_text, format!("{blur_name}Q"));
         state.start_renaming(&editor, mountain);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
-        assert_eq!(state.renaming, Some(mountain));
-        assert_eq!(state.rename_text, mountain_name);
+        assert_eq!(state.renaming, Some(Renamed::Node(mountain)));
+        assert_eq!(rename_text(&context), Some(mountain_name.clone()));
+        assert_ne!(blur_name, mountain_name);
 
-        // A name rubbed out stays rubbed out, ready for a new one.
-        let erase = vec![key(Key::Backspace); mountain_name.chars().count()];
-        graph_frame(&context, &mut editor, &mut state, erase, none);
-        assert!(state.rename_text.is_empty());
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
-        assert!(state.rename_text.is_empty());
-        graph_frame(&context, &mut editor, &mut state, vec![typed("Peak")], none);
-        assert_eq!(state.rename_text, "Peak");
-
-        // Nor does a reset.
+        // A reset closes it.
         state.reset();
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
         assert_eq!(state.renaming, None);
-        assert!(state.rename_text.is_empty());
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        assert_eq!(rename_text(&context), None);
     }
 
     #[test]
-    fn f2_opens_the_name_editor_on_the_selected_node_s_name() {
+    fn f2_opens_the_rename_popup_on_the_selected_node_s_name() {
         let mut editor = Editor::new(Document::new());
         let mut ui_state = crate::ui::UiState::default();
         let mut window = bevy::prelude::Window::default();
@@ -3574,15 +3523,16 @@ mod tests {
         editor.select(Some(erosion));
         crate::ui::commands::run(vec![Command::Rename], &mut editor, &mut ui_state, &mut window);
         graph_frame(&context, &mut editor, &mut ui_state.graph, Vec::new(), none);
+        assert_eq!(rename_text(&context), Some(erosion_name));
         graph_frame(&context, &mut editor, &mut ui_state.graph, vec![egui::Event::Text("Q".into())], none);
-        assert_eq!(ui_state.graph.rename_text, format!("{erosion_name}Q"));
+        assert_eq!(rename_text(&context).as_deref(), Some("Q"));
 
         // F2 on another node takes that node's name, whatever was typed.
         editor.select(Some(snow));
         crate::ui::commands::run(vec![Command::Rename], &mut editor, &mut ui_state, &mut window);
         graph_frame(&context, &mut editor, &mut ui_state.graph, Vec::new(), none);
-        assert_eq!(ui_state.graph.renaming, Some(snow));
-        assert_eq!(ui_state.graph.rename_text, snow_name);
+        assert_eq!(ui_state.graph.renaming, Some(Renamed::Node(snow)));
+        assert_eq!(rename_text(&context), Some(snow_name));
     }
 
     /// The text shapes painted that read `text`, in paint order: where
@@ -3596,114 +3546,47 @@ mod tests {
     }
 
     #[test]
-    fn the_name_editor_takes_the_zoomed_name_s_place_and_font() {
+    fn the_rename_popup_opens_ten_in_from_the_node_at_100_percent() {
         let mut editor = Editor::new(Document::new());
         let mut state = GraphState::default();
         let context = themed_context();
+        // At 120%, the popup's sizes are a sixth smaller in the editor's
+        // points; areas sit on whole pixels.
+        let scale = 1.2;
+        let pixel = 1.0 / scale;
+        context.set_zoom_factor(scale);
         frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-        let node = editor.document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
-        let name = editor.document.node(node).unwrap().name.clone();
-        let rect = node_rect(&editor, node);
-        for zoom in [0.25, 0.5, 1.0, 2.0] {
-            // The node in the middle of the graph, at this zoom.
-            let view = GraphView { location: rect.center().to_vec2() - GRAPH.size() / (2.0 * zoom), zoom };
-            state.views.insert(state.tab, view);
-            state.start_renaming(&editor, node);
-            frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-            let (shapes, _, _) = frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-            assert_eq!(state.view(), view, "at {zoom}: a node in sight stays put");
+        let standard = editor.document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let small = editor.document.add_node("Combine", [26400.0, 26000.0]).unwrap();
+        editor.document.set_member(small, "NodeSize", serde_json::json!("Small"), "Node size", false);
+        for (node, width) in [(standard, STANDARD_WIDTH), (small, RENAME_MIN_WIDTH)] {
+            let name = editor.document.node(node).unwrap().name.clone();
+            let rect = node_rect(&editor, node);
+            let id = rename_popup_id();
+            for zoom in [0.25, 0.5, 1.0, 2.0] {
+                // The node's corner a little way into the graph.
+                let view = GraphView { location: rect.min.to_vec2() - Vec2::splat(40.0) / zoom, zoom };
+                state.views.insert(state.tab, view);
+                state.start_renaming(&editor, node);
+                frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+                let (shapes, _, _) = frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+                assert_eq!(state.view(), view, "at {zoom}: the view stays put");
 
-            // The text box's text in the name's font: the name painted
-            // twice in it, once for the node and once in the box (zoomed
-            // out, the node's only where it fits).
-            let font_size = if zoom < SIMPLIFIED_ZOOM { (24.0 * zoom).max(6.0) } else { 13.0 * zoom };
-            let sizes: Vec<f32> = texts_reading(&shapes, &name).into_iter().map(|(_, size)| size).collect();
-            let painted = if zoom < SIMPLIFIED_ZOOM { 1..=2 } else { 2..=2 };
-            assert!(painted.contains(&sizes.len()) && sizes.iter().all(|size| *size == font_size), "at {zoom}: {sizes:?}");
-
-            // The box a line of it high, its margin zoomed too, with its
-            // text where the name starts and covering all of the name's
-            // line.
-            let name_box = context.read_response(egui::Id::new(("node-rename", node))).unwrap().rect;
-            let font = theme::semibold(font_size);
-            let text_height = context.fonts_mut(|fonts| fonts.layout_no_wrap(name.clone(), font.clone(), Color32::WHITE).size().y.max(fonts.row_height(&font)));
-            let margin = egui::Margin::from(RENAME_MARGIN * zoom);
-            assert!((name_box.height() - (text_height + margin.sum().y)).abs() < 0.01, "at {zoom}: {name_box:?}");
-            let layout = layout_node(editor.document.node(node).unwrap(), editor.user.options.default_node_size());
-            let (line, _) = title_line(&context, &layout, view.rect_to_screen(GRAPH.min, rect), zoom);
-            assert!(name_box.contains_rect(line), "at {zoom}: {name_box:?} leaves out {line:?}");
-            if zoom >= SIMPLIFIED_ZOOM {
-                assert!((name_box.min + margin.left_top()).distance(line.min) < 0.01, "at {zoom}: {name_box:?} starts away from {line:?}");
+                // 10 in from the node's corner in the node's units, as wide
+                // as the node unzoomed (96 at least), at 100%.
+                let popup = context.memory(|memory| memory.area_rect(id.with("area"))).expect("the popup shows");
+                let corner = view.to_screen(GRAPH.min, rect.min) + Vec2::splat(10.0 * zoom);
+                assert!(popup.min.distance(corner) <= 1.5 * pixel, "at {zoom}: {popup:?} is not at {corner:?}");
+                assert!((popup.width() - width / scale).abs() <= pixel, "at {zoom}: {popup:?}");
+                let (_, size) = *texts_reading(&shapes, &name).last().expect("the popup shows the name");
+                assert!((size - RENAME_FONT_SIZE / scale).abs() < 1e-4, "at {zoom}: {size}");
+                state.stop_renaming();
             }
-            state.stop_renaming();
         }
     }
 
     #[test]
-    fn the_name_editor_brings_its_node_into_sight_clear_of_the_toolbox() {
-        let mut editor = Editor::new(Document::new());
-        let mut state = GraphState::default();
-        let context = themed_context();
-        frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-        let toolbox = Rect::from_min_size(GRAPH.min, Vec2::new(150.0, GRAPH.height()));
-        state.toolbox_rect = toolbox;
-        let view = state.view();
-        let canvas_at = |screen: Pos2| {
-            let point = view.to_canvas(GRAPH.min, screen);
-            [point.x, point.y]
-        };
-        // Above the graph, at its right edge, under the toolbox and, at
-        // zoom 2, below the graph.
-        let corners = [
-            (Pos2::new(GRAPH.center().x, GRAPH.top() - 300.0), 1.0),
-            (Pos2::new(GRAPH.right() - 60.0, GRAPH.center().y), 1.0),
-            (Pos2::new(GRAPH.left() + 10.0, GRAPH.top() + 100.0), 1.0),
-            (Pos2::new(GRAPH.center().x, GRAPH.bottom() + 100.0), 2.0),
-        ];
-        for (corner, zoom) in corners {
-            let node = editor.document.add_node("Mountain", canvas_at(corner)).unwrap();
-            state.views.insert(state.tab, GraphView { zoom, ..view });
-            state.start_renaming(&editor, node);
-            frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-            assert_eq!(state.view().zoom, zoom, "revealing doesn't zoom");
-            // Only the first frame: the view is the user's to pan after.
-            let panned = state.view();
-            frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-            assert_eq!(state.view(), panned);
-            let node_box = state.view().rect_to_screen(GRAPH.min, node_rect(&editor, node));
-            let name_box = context.read_response(egui::Id::new(("node-rename", node))).unwrap().rect;
-            for shown in [node_box, name_box] {
-                assert!(GRAPH.shrink(REVEAL_MARGIN - 0.5).contains_rect(shown), "{corner:?}: {shown:?} is not inside the graph");
-                assert!(!shown.intersects(toolbox), "{corner:?}: {shown:?} is under the toolbox");
-            }
-            state.stop_renaming();
-        }
-    }
-
-    #[test]
-    fn reveal_pans_the_least_that_brings_the_name_editor_into_sight() {
-        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
-        let node = Rect::from_min_size(Pos2::new(300.0, 200.0), Vec2::new(230.0, 80.0));
-        let name = Rect::from_min_size(Pos2::new(346.0, 212.0), Vec2::new(180.0, 20.0));
-        let reveal = |toolbox: Rect, shift: Vec2| reveal_shift(rect, toolbox, node.translate(shift), name.translate(shift));
-        // In sight already: no pan.
-        assert_eq!(reveal(Rect::NOTHING, Vec2::ZERO), Vec2::ZERO);
-        // Above the top, or past the right edge: in, to the margin.
-        assert_eq!(reveal(Rect::NOTHING, Vec2::new(0.0, -400.0)), Vec2::new(0.0, 200.0 + REVEAL_MARGIN));
-        assert_eq!(reveal(Rect::NOTHING, Vec2::new(300.0, 0.0)), Vec2::new(rect.right() - REVEAL_MARGIN - node.right() - 300.0, 0.0));
-        // Under the toolbox: past it.
-        let toolbox = Rect::from_min_size(Pos2::ZERO, Vec2::new(120.0, 600.0));
-        assert_eq!(reveal(toolbox, Vec2::new(-280.0, 0.0)), Vec2::new(120.0 + TOOLBOX_GAP - 20.0, 0.0));
-        // A node too big for the graph: just its editor, which already
-        // shows.
-        let huge = Rect::from_min_size(Pos2::new(-500.0, -500.0), Vec2::new(2000.0, 2000.0));
-        assert_eq!(reveal_shift(rect, Rect::NOTHING, huge, name), Vec2::ZERO);
-        let off = name.translate(Vec2::new(0.0, -300.0));
-        assert_eq!(reveal_shift(rect, Rect::NOTHING, huge, off), Vec2::new(0.0, REVEAL_MARGIN - off.top()));
-    }
-
-    #[test]
-    fn the_name_editor_keeps_to_the_graph_above_the_toolbox() {
+    fn the_rename_popup_shows_over_the_toolbox_and_past_the_graph() {
         let mut editor = Editor::new(Document::new());
         let mut state = GraphState::default();
         let context = themed_context();
@@ -3726,143 +3609,78 @@ mod tests {
             output.drop_without_applying_deltas();
             (shapes, clicked)
         };
+        // A node whose corner is left of the graph: the popup starts
+        // outside it, over the panel beside it, and runs on over the
+        // toolbox.
         let view = state.view();
-        let middle = view.to_canvas(GRAPH.min, GRAPH.center());
-        let node = editor.document.add_node("Mountain", [middle.x, middle.y]).unwrap();
+        let corner = view.to_canvas(GRAPH.min, Pos2::new(GRAPH.left() - 60.0, GRAPH.top() + 100.0));
+        let node = editor.document.add_node("Mountain", [corner.x, corner.y]).unwrap();
         let name = editor.document.node(node).unwrap().name.clone();
-        let id = egui::Id::new(("node-rename", node));
+        let id = rename_popup_id();
         state.start_renaming(&editor, node);
         frame(&mut editor, &mut state, Vec::new());
-        frame(&mut editor, &mut state, Vec::new());
-
-        // Panned while open, so the box runs past the graph's left edge
-        // under the toolbox.
-        let name_box = context.read_response(id).unwrap().rect;
-        state.view_mut().location.x += name_box.left() - (GRAPH.left() - 20.0);
-        frame(&mut editor, &mut state, Vec::new());
         let (shapes, _) = frame(&mut editor, &mut state, Vec::new());
-        let name_box = context.read_response(id).unwrap().rect;
-        assert!(name_box.left() < GRAPH.left() && name_box.intersects(toolbox), "{name_box:?}");
+        assert_eq!(state.view(), view, "no pan to bring it into sight");
+        let popup = context.memory(|memory| memory.area_rect(id.with("area"))).unwrap();
+        assert!(popup.left() < GRAPH.left() && popup.intersects(toolbox), "{popup:?}");
+        let text = shapes.iter().rev().find(|clipped| matches!(&clipped.shape, Shape::Text(shape) if shape.galley.text() == name)).unwrap();
+        assert!(text.clip_rect.left() < GRAPH.left(), "the popup is cut off at the graph");
 
-        // Nothing of it shows outside the graph, and it is painted over the
-        // toolbox: the name in the box comes after the toolbox's fill.
-        for clipped in &shapes {
-            let shown = clipped.clip_rect.intersect(clipped.shape.visual_bounding_rect());
-            assert!(!shown.is_positive() || GRAPH.contains_rect(shown), "{shown:?} shows outside the graph");
-        }
+        // It is painted over the toolbox: the name in it comes after the
+        // toolbox's fill.
         let fill = shapes.iter().position(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == toolbox_fill)).unwrap();
         let (last_name, _) = *texts_reading(&shapes, &name).last().unwrap();
-        assert!(last_name > fill, "the toolbox covers the name editor");
+        assert!(last_name > fill, "the toolbox covers the popup");
 
-        // A click on it where it lies over the toolbox is the box's: it
+        // A click on it where it lies over the toolbox is the popup's: it
         // keeps the keyboard, and the toolbox takes no click.
-        let point = Pos2::new(GRAPH.left() + 30.0, name_box.center().y);
+        let point = Pos2::new(GRAPH.left() + 30.0, popup.center().y);
         let button = |pressed: bool| egui::Event::PointerButton { pos: point, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
         let mut toolbox_clicked = false;
         for events in [vec![egui::Event::PointerMoved(point)], vec![button(true)], vec![button(false)], Vec::new()] {
             toolbox_clicked |= frame(&mut editor, &mut state, events).1;
         }
         assert!(!toolbox_clicked);
-        assert_eq!(state.renaming, Some(node));
-        assert!(context.memory(|memory| memory.has_focus(id)));
+        assert_eq!(state.renaming, Some(Renamed::Node(node)));
+        assert!(context.memory(|memory| memory.has_focus(id.with("text"))));
     }
 
     #[test]
-    fn the_group_name_editor_takes_the_zoomed_name_s_place_in_sight() {
+    fn the_group_rename_popup_opens_ten_in_from_the_group() {
         let mut editor = Editor::new(Document::new());
         let mut state = GraphState::default();
         let context = themed_context();
         frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
-        // At zoom 2, a group whose name is above the graph.
         state.view_mut().zoom = 2.0;
         let view = state.view();
-        let corner = view.to_canvas(GRAPH.min, Pos2::new(GRAPH.center().x, GRAPH.top() - 120.0));
-        let group = editor.document.add_group(&[], [corner.x, corner.y], [300.0, 200.0], 0);
+        let corner = view.to_canvas(GRAPH.min, GRAPH.min + Vec2::splat(40.0));
+        let group = editor.document.add_group(&[], [corner.x, corner.y], [120.0, 100.0], 0);
         let name = editor.document.group(group).unwrap().name.clone();
         state.start_renaming_group(group, name.clone());
         frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
         let (shapes, _, _) = frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+        assert_eq!(state.view(), view, "no pan to bring it into sight");
 
-        let name_box = context.read_response(egui::Id::new(("group-rename", group))).unwrap().rect;
-        assert!(GRAPH.contains_rect(name_box), "{name_box:?} is not inside the graph");
-        let sizes: Vec<f32> = texts_reading(&shapes, &name).into_iter().map(|(_, size)| size).collect();
-        assert_eq!(sizes, vec![24.0; 2]);
-        let font = theme::interface(24.0);
-        let text_height = context.fonts_mut(|fonts| fonts.layout_no_wrap(name.clone(), font.clone(), Color32::WHITE).size().y.max(fonts.row_height(&font)));
-        let margin = egui::Margin::from(RENAME_MARGIN * 2.0);
-        assert!((name_box.height() - (text_height + margin.sum().y)).abs() < 0.01, "{name_box:?}");
-        let screen = state.view().rect_to_screen(GRAPH.min, editor.document.group(group).unwrap().bounds());
-        assert!((name_box.min + margin.left_top()).distance(screen.min + Vec2::new(55.0, 6.0) * 2.0) < 0.01, "{name_box:?}");
-    }
+        let id = rename_popup_id();
+        let popup = context.memory(|memory| memory.area_rect(id.with("area"))).expect("the popup shows");
+        let bounds = editor.document.group(group).unwrap().bounds();
+        let expected = view.to_screen(GRAPH.min, bounds.min) + Vec2::splat(20.0);
+        assert!(popup.min.distance(expected) < 1.0, "{popup:?} is not at {expected:?}");
+        assert!((popup.width() - bounds.width()).abs() < 1.0, "{popup:?}");
+        let (_, size) = *texts_reading(&shapes, &name).last().unwrap();
+        assert_eq!(size, RENAME_FONT_SIZE);
 
-    /// The canvas the graph shows.
-    fn shown_canvas(state: &GraphState) -> Rect {
-        let view = state.view();
-        Rect::from_min_size(view.location.to_pos2(), state.rect.size() / view.zoom)
+        // Enter takes the name.
+        let typed = egui::Event::Text("Ridges".to_string());
+        frame_amid_panels(&context, &mut editor, &mut state, vec![typed]);
+        let enter = egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        frame_amid_panels(&context, &mut editor, &mut state, vec![enter]);
+        assert_eq!(editor.document.group(group).unwrap().name, "Ridges");
+        assert_eq!(state.renaming, None);
     }
 
     fn node_rect(editor: &Editor, id: i32) -> Rect {
         layout_node(editor.document.node(id).unwrap(), editor.user.options.default_node_size()).rect
     }
 
-    #[test]
-    fn extents_frames_notes_and_groups_as_well_as_nodes() {
-        let mut document = Document::new();
-        let node = document.add_node("Mountain", [26100.0, 26100.0]).unwrap();
-        let note = document.add_note([26100.0, 29000.0], 0);
-        let group = document.add_group(&[], [22000.0, 26000.0], [400.0, 300.0], 0);
-        let mut editor = Editor::new(document);
-        let mut state = GraphState::default();
-        let context = themed_context();
-        state.zoom_request = Some(ZoomRequest::Extents);
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        let shown = shown_canvas(&state);
-        assert!(shown.contains_rect(node_rect(&editor, node)));
-        assert!(shown.contains_rect(crate::ui::graph_notes::note_rect(&editor, 0, note).unwrap()));
-        assert!(shown.contains_rect(editor.document.group(group).unwrap().bounds()));
-    }
-
-    #[test]
-    fn extents_too_wide_for_the_least_zoom_frames_the_bulk() {
-        let mut document = Document::new();
-        let bulk: Vec<i32> = [[26100.0, 26100.0], [26500.0, 26100.0], [26100.0, 26500.0]].into_iter().map(|at| document.add_node("Mountain", at).unwrap()).collect();
-        let stray = document.add_node("Mountain", [1_000_000.0, 1_000_000.0]).unwrap();
-        let mut editor = Editor::new(document);
-        let mut state = GraphState::default();
-        let context = themed_context();
-        state.zoom_request = Some(ZoomRequest::Extents);
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        let shown = shown_canvas(&state);
-        for node in &bulk {
-            assert!(shown.contains_rect(node_rect(&editor, *node)), "{shown:?}");
-        }
-        assert!(!shown.intersects(node_rect(&editor, stray)));
-        // Selection does the same with selected nodes.
-        editor.selection = vec![bulk[0], stray];
-        state.zoom_request = Some(ZoomRequest::Selection);
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        let shown = shown_canvas(&state);
-        assert!(shown.contains_rect(node_rect(&editor, bulk[0])));
-        assert!(!shown.intersects(node_rect(&editor, stray)));
-    }
-
-    #[test]
-    fn extents_of_lone_nodes_far_apart_frames_the_nearer() {
-        let mut document = Document::new();
-        let near = document.add_node("Mountain", [-100_000.0, -100_000.0]).unwrap();
-        let far = document.add_node("Mountain", [1_000_000.0, 1_000_000.0]).unwrap();
-        let mut editor = Editor::new(document);
-        let mut state = GraphState::default();
-        let context = themed_context();
-        state.zoom_request = Some(ZoomRequest::Extents);
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        let shown = shown_canvas(&state);
-        assert!(shown.contains_rect(node_rect(&editor, near)), "{shown:?}");
-        assert!(!shown.intersects(node_rect(&editor, far)));
-        // Asked again, it stays put.
-        let view = state.view();
-        state.zoom_request = Some(ZoomRequest::Extents);
-        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
-        assert_eq!(state.view(), view);
-    }
 }

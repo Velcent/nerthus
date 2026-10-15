@@ -234,7 +234,7 @@ impl<'a> ResampleFilter<'a> {
         let above = v0 + self.v_limit < 0.0;
         let below = v0 - self.v_limit > last_row;
         match self.image.virtual_pixel {
-            VirtualPixel::Black | VirtualPixel::White | VirtualPixel::Transparent => self.limit_reached || left || right || above || below,
+            VirtualPixel::Black | VirtualPixel::White | VirtualPixel::Transparent | VirtualPixel::Background => self.limit_reached || left || right || above || below,
             VirtualPixel::Edge => (left && above) || (left && below) || (right && above) || (right && below),
             VirtualPixel::Mirror | VirtualPixel::Tile => false,
         }
@@ -459,6 +459,77 @@ pub fn srt_coefficients(image: &Image, arguments: &[f64]) -> Result<[f64; 6], Di
 /// `Distort(DistortMethod.Affine-equivalent)` with explicit coefficients.
 pub fn distort_affine(image: &Image, coefficients: [f64; 6]) -> Image {
     distort_image(image, &Mapping::Affine(coefficients))
+}
+
+/// `RotateImage` by an angle off the right angles: `DistortImage` with
+/// ScaleRotateTranslate about the image's centre on its page and best fit,
+/// so the result covers the turned image; source coordinates are relative
+/// to the page offset `page_x`, `page_y`. Returns the image and its page
+/// offset.
+pub fn rotate_best_fit(image: &Image, page_x: i64, page_y: i64, degrees: f64) -> (Image, i64, i64) {
+    let center_x = image.width as f64 / 2.0 + page_x as f64;
+    let center_y = image.height as f64 / 2.0 + page_y as f64;
+    let radians = degrees_to_radians(degrees);
+    let cosine = radians.cos();
+    let sine = radians.sin();
+    let c0 = cosine / 1.0;
+    let c1 = sine / 1.0;
+    let c2 = center_x - center_x * c0 - center_y * c1;
+    let c3 = -sine / 1.0;
+    let c4 = cosine / 1.0;
+    let c5 = center_y - center_x * c3 - center_y * c4;
+
+    // The corners' forward mapping gives the bounds (`InvertAffineCoefficients`).
+    let determinant = perceptible_reciprocal(c0 * c4 - c1 * c3);
+    let inverse = [determinant * c4, determinant * (-c1), determinant * (c1 * c5 - c2 * c4), determinant * (-c3), determinant * c0, determinant * (c2 * c3 - c0 * c5)];
+    let page_left = page_x as f64;
+    let page_top = page_y as f64;
+    let corners = [
+        (page_left, page_top),
+        (page_left + image.width as f64, page_top),
+        (page_left, page_top + image.height as f64),
+        (page_left + image.width as f64, page_top + image.height as f64),
+    ];
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+    for (index, &(x, y)) in corners.iter().enumerate() {
+        let mapped_x = inverse[0] * x + inverse[1] * y + inverse[2];
+        let mapped_y = inverse[3] * x + inverse[4] * y + inverse[5];
+        if index == 0 {
+            (min_x, max_x, min_y, max_y) = (mapped_x, mapped_x, mapped_y, mapped_y);
+        } else {
+            min_x = min_x.min(mapped_x);
+            max_x = max_x.max(mapped_x);
+            min_y = min_y.min(mapped_y);
+            max_y = max_y.max(mapped_y);
+        }
+    }
+    let geometry_x = (min_x - 0.5).floor() as i64;
+    let geometry_y = (min_y - 0.5).floor() as i64;
+    let width = (max_x - geometry_x as f64 + 0.5).ceil().max(0.0) as usize;
+    let height = (max_y - geometry_y as f64 + 0.5).ceil().max(0.0) as usize;
+
+    let channels = image.channels;
+    let mut result = image.new_like(width, height);
+    let average = OnceLock::new();
+    let rows = result.data.par_chunks_mut((width * channels).max(1));
+    rows.enumerate().for_each(|(j, out_row)| {
+        let mut filter = ResampleFilter::new(image, &average);
+        filter.scale(c0, c1, c3, c4);
+        let destination_y = (geometry_y + j as i64) as f64 + 0.5;
+        for i in 0..width {
+            let destination_x = (geometry_x + i as i64) as f64 + 0.5;
+            let mut source_x = c0 * destination_x + c1 * destination_y + c2;
+            let mut source_y = c3 * destination_x + c4 * destination_y + c5;
+            source_x -= page_left;
+            source_y -= page_top;
+            let pixel = &mut out_row[i * channels..(i + 1) * channels];
+            filter.sample(source_x - 0.5, source_y - 0.5, pixel);
+        }
+    });
+    (result, geometry_x, geometry_y)
 }
 
 /// `Distort(DistortMethod.ScaleRotateTranslate, arguments)`.

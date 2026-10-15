@@ -4,8 +4,8 @@
 //! Exit asks whenever there are unsaved changes, `Shell_Closing`), and
 //! Open, New and Repair whether to close while nodes build
 //! (`PreventCloseWhileBuilding`; Open asks it first, New and Repair after
-//! the save question, in `SetupNewFile`). Repair then shows its file
-//! chooser; the project is replaced only once a file was picked and read.
+//! the save question, in `SetupNewFile`). Repair then closes the project
+//! for a new one and shows its file chooser (`RepairFile`).
 
 use std::path::Path;
 
@@ -214,8 +214,11 @@ fn perform(action: FileAction, editor: &mut Editor) {
         FileAction::OpenPath(path) => {
             files::open_project(editor, &path);
         }
-        // The chooser first: cancelling it leaves the project open.
-        FileAction::Repair => editor.files.dialog = Some(FileDialog::Repair),
+        // `CloseFile`, `SetupNewFile`, then the chooser.
+        FileAction::Repair => {
+            files::new_project(editor);
+            editor.files.dialog = Some(FileDialog::Repair);
+        }
         FileAction::Examples => editor.files.examples_open = true,
         // `CloseFile` as Nerthus closes: its previews written first when
         // the project keeps them.
@@ -321,23 +324,26 @@ mod tests {
     use crate::document::Document;
 
     #[test]
-    fn repair_shows_its_chooser_before_closing_the_project() {
+    fn repair_closes_the_project_for_a_new_one_before_its_chooser() {
         let mut document = Document::new();
         let mountain = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
         let mut editor = Editor::new(document);
         let mut ui_state = UiState::default();
-        // With unsaved changes, No to the save question goes on.
+        // With unsaved changes, No to the save question goes on: the
+        // project closes and a new one comes up under the chooser.
         run(FileCommand::RepairFile, &mut editor, &mut ui_state);
         assert!(ui_state.prompt.take().is_some());
         assert_eq!(editor.files.dialog, None);
+        assert!(editor.document.terrain().nodes.contains_key(&mountain));
         run(FileCommand::DiscardChanges, &mut editor, &mut ui_state);
         assert_eq!(editor.files.dialog.take(), Some(FileDialog::Repair));
-        assert!(editor.document.terrain().nodes.contains_key(&mountain));
-        // Without, the chooser shows straight away.
+        assert!(!editor.document.terrain().nodes.contains_key(&mountain));
+        // Without, straight away.
+        let mountain = editor.document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
         editor.document.dirty = false;
         run(FileCommand::RepairFile, &mut editor, &mut ui_state);
         assert!(ui_state.prompt.is_none());
         assert_eq!(editor.files.dialog, Some(FileDialog::Repair));
-        assert!(editor.document.terrain().nodes.contains_key(&mountain));
+        assert!(!editor.document.terrain().nodes.contains_key(&mountain));
     }
 }

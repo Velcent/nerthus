@@ -4,12 +4,11 @@
 //! post-build script, the terrain's size, its regions and the build
 //! profiles.
 
-use egui::{Align, Color32, Id, Layout, Pos2, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align, Color32, Id, Layout, RichText, Sense, Stroke, Ui, Vec2};
 use nerthus_engine::region::portion_json;
 use nerthus_engine::Region;
 use nerthus_export::build::{preview_destination, BuildDefinition, OutputType, Subdivision};
 use nerthus_export::destination::{TEMPLATE_PRESETS, TOKEN_HELP};
-use nerthus_export::swarm::PROFILE_SEPARATOR;
 use nerthus_export::tiles::{tile_suffix, OrganizeFiles, TILE_PATTERN_PRESETS};
 use nerthus_export::FileFormat;
 use serde_json::{json, Value};
@@ -22,7 +21,7 @@ use crate::ui::input_box::{InputAnswer, InputBox};
 use crate::ui::regions::{self, RegionsState};
 use crate::ui::tool_commands::ToolCommand;
 use crate::ui::tool_window;
-use crate::ui::widgets::{dialog, icon_menu, link_button, menu_item, menu_separator, scroll_bar_gutter, selectable_label, selectable_text, Tooltips};
+use crate::ui::widgets::{dialog, icon_menu, link_button, menu_item, menu_separator, scroll_bar_gutter, selectable_label, tab_list_item, Tooltips, TAB_ITEM_SIZE};
 
 /// `BuildSettingsWindow`'s tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,15 +37,15 @@ pub enum SettingsTab {
 }
 
 /// The tabs; Tiles is enabled with tiled output (`TileControlsVisibility`).
-const TABS: [(SettingsTab, &str, bool); 8] = [
-    (SettingsTab::Resolution, "Resolution", true),
-    (SettingsTab::Build, "Build", true),
-    (SettingsTab::Tiles, "Tiles", true),
-    (SettingsTab::Nodes, "Nodes", true),
-    (SettingsTab::Script, "Script", true),
-    (SettingsTab::Terrain, "Terrain", true),
-    (SettingsTab::Regions, "Regions", true),
-    (SettingsTab::Profiles, "Profiles", true),
+const TABS: [(SettingsTab, &str, bool, Color32); 8] = [
+    (SettingsTab::Resolution, "Resolution", true, theme::ACCENT_MUTED_PURPLE),
+    (SettingsTab::Build, "Build", true, theme::ACCENT_MUTED_PURPLE),
+    (SettingsTab::Tiles, "Tiles", true, theme::ACCENT_MUTED_PURPLE),
+    (SettingsTab::Nodes, "Nodes", true, theme::ACCENT_TRANSPARENT_BLUE),
+    (SettingsTab::Script, "Script", true, theme::ACCENT_TRANSPARENT_GREEN),
+    (SettingsTab::Terrain, "Terrain", true, theme::ACCENT_TRANSPARENT_BLUE),
+    (SettingsTab::Regions, "Regions", true, theme::ACCENT_TRANSPARENT_GREEN),
+    (SettingsTab::Profiles, "Profiles", true, theme::ACCENT_TRANSPARENT_GREEN),
 ];
 
 /// `cboBlend`: the margin each side of a bucket, as a share of it.
@@ -213,14 +212,18 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSe
             if settings.tab == SettingsTab::Tiles && !tiled {
                 settings.tab = SettingsTab::Resolution;
             }
+            // `tabs` (`TabList`): each tab on its own brush when chosen, an
+            // empty, disabled tab between Script and Terrain.
             ui.vertical(|ui| {
-                ui.set_width(120.0);
-                for (tab, name, enabled) in TABS {
+                ui.set_width(TAB_ITEM_SIZE.x);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (tab, name, enabled, brush) in TABS {
+                    if tab == SettingsTab::Terrain {
+                        ui.add_space(TAB_ITEM_SIZE.y + 2.0);
+                    }
                     let selected = settings.tab == tab;
                     let enabled = if tab == SettingsTab::Tiles { tiled } else { enabled };
-                    let text = selectable_text(ui, selected, name);
-                    let response = ui.add_enabled(enabled, egui::Button::selectable(selected, text));
-                    if response.clicked() {
+                    if tab_list_item(ui, name, selected, enabled, brush).clicked() {
                         settings.tab = tab;
                     }
                 }
@@ -275,11 +278,13 @@ fn profiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsSt
         settings.profile = None;
     }
     let list_height = (ui.available_height() - 48.0).max(240.0);
-    // The names are short and the settings long: a third for the list.
-    let list_width = (ui.available_width() - ui.spacing().item_spacing.x) / 3.0;
+    // Two even columns (`Width="*"`): the list 4 short of the middle, the
+    // box 4 past it.
+    let column_width = ui.available_width() / 2.0;
     ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
         let column = Layout::top_down(Align::Min);
-        ui.allocate_ui_with_layout(Vec2::new(list_width, list_height), column, |ui| {
+        ui.allocate_ui_with_layout(Vec2::new(column_width - 4.0, list_height), column, |ui| {
             let list = egui::Frame::new().stroke(Stroke::new(1.0, theme::BUTTON_BORDER)).inner_margin(4.0);
             list.show(ui, |ui| {
                 ui.set_min_height(list_height);
@@ -292,6 +297,7 @@ fn profiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsSt
                 }
             });
         });
+        ui.add_space(8.0);
         let summary = settings.profile.as_deref().and_then(|name| editor.document.build_profile(name)).map(|definition| nerthus_export::swarm::profile_summary(&definition));
         ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), list_height), column, |ui| {
             profile_summary(ui, &summary.unwrap_or_default(), list_height);
@@ -325,40 +331,31 @@ fn profiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsSt
     });
 }
 
-/// `ShowProfile`'s box beside the list, as tall as the list's `height`:
-/// the profile's settings a line each, in a text box. A line longer than
-/// the box scrolls sideways rather than wrapping, and the dashed lines
-/// between the groups are drawn as rules across it.
+/// `ShowProfile`'s box beside the list (`txtBuildProfile`, a text box),
+/// as tall as the list's `height`: the profile's settings a line each. A
+/// line longer than the box is cut off at its edge (no wrapping, and its
+/// sideways scroll bar hidden); the box scrolls down when it must.
 fn profile_summary(ui: &mut Ui, summary: &str, height: f32) {
-    let visuals = &ui.visuals().widgets.noninteractive;
     let mut frame = egui::Frame::new();
-    frame = frame.fill(ui.visuals().text_edit_bg_color());
-    frame = frame.stroke(visuals.bg_stroke);
-    frame = frame.corner_radius(visuals.corner_radius);
+    frame = frame.fill(theme::TEXTBOX_BACKGROUND);
+    frame = frame.stroke(Stroke::new(1.0, theme::TEXTBOX_BORDER));
+    frame = frame.corner_radius(3.0);
     frame = frame.inner_margin(4.0);
     frame.show(ui, |ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let mut box_ui = tool_window::part(ui, "profile-summary", rect, Layout::top_down(Align::Min));
         scroll_bar_gutter(&mut box_ui);
-        let mut scroll = egui::ScrollArea::both();
+        let mut scroll = egui::ScrollArea::vertical();
         scroll = scroll.auto_shrink([false, false]);
         scroll.show(&mut box_ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             let font = theme::monospace(14.0);
             let color = theme::ACCENT_MUTED_GREEN;
-            let rows: Vec<_> = summary.lines().map(|line| (line == PROFILE_SEPARATOR, ui.painter().layout_no_wrap(line.to_string(), font.clone(), color))).collect();
-            let longest = rows.iter().filter(|(rule, _)| !rule).map(|(_, galley)| galley.size().x).fold(ui.available_width(), f32::max);
-            let rows_height = rows.iter().map(|(_, galley)| galley.size().y).sum();
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(longest, rows_height), Sense::hover());
-            let painter = ui.painter();
-            let mut top = rect.top();
-            for (rule, galley) in rows {
-                let row_height = galley.size().y;
-                if rule {
-                    painter.hline(rect.x_range(), painter.round_to_pixel_center(top + row_height / 2.0), Stroke::new(1.0, color));
-                } else {
-                    painter.galley(Pos2::new(rect.left(), top), galley, color);
-                }
-                top += row_height;
+            for line in summary.lines() {
+                let galley = ui.painter().layout_no_wrap(line.to_string(), font.clone(), color);
+                let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), galley.size().y), Sense::hover());
+                let row_painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(row));
+                row_painter.galley(row.min, galley, color);
             }
         });
     });
@@ -1041,7 +1038,8 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use egui::epaint::{ClippedShape, TextShape};
-    use egui::{AreaState, Event, Modifiers, MouseWheelUnit, RawInput, Rect, Shape, TouchPhase};
+    use egui::{AreaState, Event, Modifiers, MouseWheelUnit, Pos2, RawInput, Rect, Shape, TouchPhase};
+    use nerthus_export::swarm::PROFILE_SEPARATOR;
 
     /// The screen, in points, of 1600 × 960 at the default 120%.
     const LARGE: Vec2 = Vec2::new(1333.0, 800.0);
@@ -1147,15 +1145,14 @@ mod tests {
             let summary = nerthus_export::swarm::profile_summary(&definition);
             let font = theme::monospace(14.0);
             let painted: Vec<&TextShape> = texts(&shapes).filter(|text| text.galley.job.sections.iter().all(|section| section.format.font_id == font)).collect();
-            for line in summary.lines().filter(|line| !line.is_empty() && *line != PROFILE_SEPARATOR) {
+            // Every line whole on a row of its own, the dashed separators
+            // too, cut off at the box's edge rather than wrapped.
+            for line in summary.lines().filter(|line| !line.is_empty()) {
                 let shown = painted.iter().find(|text| text.galley.text() == line);
                 let shown = shown.unwrap_or_else(|| panic!("{line:?} is not a line of its own at {screen:?}"));
                 assert_eq!(shown.galley.rows.len(), 1, "{line:?} wraps at {screen:?}");
             }
-            // The separators are rules across the box, not dashes.
-            assert!(painted.iter().all(|text| !text.galley.text().contains("--")), "dashes are drawn at {screen:?}");
-            let rules = shapes.iter().filter(|clipped| matches!(&clipped.shape, Shape::LineSegment { stroke, .. } if stroke.color == theme::ACCENT_MUTED_GREEN)).count();
-            assert_eq!(rules, summary.lines().filter(|line| *line == PROFILE_SEPARATOR).count(), "the rules at {screen:?}");
+            assert!(summary.lines().any(|line| line == PROFILE_SEPARATOR));
         }
     }
 }

@@ -845,13 +845,13 @@ mod tests {
     fn end_shows(shapes: &[ClippedShape], window: Rect, tab: usize) -> bool {
         let page = page(window);
         let held = shapes.iter().filter(|clipped| page.expand(1.0).contains_rect(clipped.clip_rect));
-        let last = held.filter(|clipped| match (&clipped.shape, tab) {
+        let mut last = held.filter(|clipped| match (&clipped.shape, tab) {
             (Shape::Text(text), 0) => text.galley.text().starts_with("Projects are usually small"),
             (Shape::Rect(rect), 1) => rect.fill == theme::WINDOW_BACKGROUND,
             (Shape::Text(text), 2) => text.galley.text().starts_with("Nerthus is in CPU-only mode"),
             _ => false,
         });
-        last.last().is_some_and(|clipped| clipped.clip_rect.expand(0.5).contains_rect(clipped.shape.visual_bounding_rect()))
+        last.next_back().is_some_and(|clipped| clipped.clip_rect.expand(0.5).contains_rect(clipped.shape.visual_bounding_rect()))
     }
 
     #[test]

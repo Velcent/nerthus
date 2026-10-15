@@ -11,7 +11,6 @@ use crate::files::{self, FileCommand, OpenMode};
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::elided_galley;
 use crate::ui::options_window::OptionsState;
 use crate::ui::tool_commands::{self, ToolCommand};
 use crate::ui::tool_window;
@@ -27,13 +26,14 @@ const START_COLUMN_HEIGHT: f32 = 4.0 + 28.0 + 8.0 + 28.0 + 8.0 + 4.0 + 24.0 + 8.
 const START_LIST: f32 = 250.0;
 /// The least room the dialog's parts leave to its edges (the settings').
 const START_EDGE: f32 = 24.0;
-/// The examples window (`Width="1280" Height="660"`, six columns), and
-/// the narrowest a card gets before a row holds one fewer.
+/// The examples window (`Width="1280" Height="660"`, a `UniformGrid` of
+/// six columns at any width).
 const EXAMPLES_SIZE: Vec2 = Vec2::new(1280.0, 660.0);
 const EXAMPLE_COLUMNS: usize = 6;
-const EXAMPLE_MIN_WIDTH: f32 = 150.0;
-/// The room between cards.
+/// The room between cards (their margins of 4), and a card's padding (its
+/// `StackPanel`'s margin), the least a card shrinks to.
 const EXAMPLE_SPACING: f32 = 8.0;
+const EXAMPLE_PADDING: f32 = 8.0;
 /// Thumbnails are kept at most this wide.
 const THUMBNAIL_WIDTH: u32 = 400;
 /// `CreateMRUButton(…, attemptThumbnail: count < 20)`.
@@ -420,11 +420,11 @@ fn examples_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut Vec<
             return;
         }
         ScrollArea::vertical().id_salt("examples").show(ui, |ui| {
-            let (columns, cell_width) = example_columns(ui.available_width());
+            let cell_width = example_width(ui.available_width());
             egui::Grid::new("examples-grid").spacing(Vec2::splat(EXAMPLE_SPACING)).show(ui, |ui| {
                 for (index, path) in projects.iter().enumerate() {
                     example_button(ui, ctx, &mut memory, path, index + 1, cell_width, commands);
-                    if (index + 1) % columns == 0 {
+                    if (index + 1) % EXAMPLE_COLUMNS == 0 {
                         ui.end_row();
                     }
                 }
@@ -437,13 +437,9 @@ fn examples_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut Vec<
     store(ctx, memory);
 }
 
-/// How many cards a row `width` wide holds (six, fewer when they would
-/// be narrower than `EXAMPLE_MIN_WIDTH`) and how wide each is.
-fn example_columns(width: f32) -> (usize, f32) {
-    let fitting = (width / (EXAMPLE_MIN_WIDTH + EXAMPLE_SPACING)).floor() as usize;
-    let columns = fitting.clamp(1, EXAMPLE_COLUMNS);
-    let cell_width = (width / columns as f32 - EXAMPLE_SPACING).max(80.0);
-    (columns, cell_width)
+/// How wide each of a row's six cards is in a row `width` wide.
+fn example_width(width: f32) -> f32 {
+    (width / EXAMPLE_COLUMNS as f32 - EXAMPLE_SPACING).max(2.0 * EXAMPLE_PADDING)
 }
 
 fn example_button(ui: &mut Ui, ctx: &egui::Context, memory: &mut WindowMemory, path: &Path, number: usize, width: f32, commands: &mut Vec<Command>) {
@@ -457,7 +453,7 @@ fn example_button(ui: &mut Ui, ctx: &egui::Context, memory: &mut WindowMemory, p
     let fill = if response.hovered() { theme::BUTTON_HOVER } else { theme::BUTTON_BACKGROUND };
     ui.painter().rect_filled(rect, 2.0, fill);
     ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, theme::BUTTON_BORDER), egui::StrokeKind::Inside);
-    let inner = rect.shrink(8.0);
+    let inner = rect.shrink(EXAMPLE_PADDING);
     let number_text = format!("{number:02}");
     let number_color = Color32::from_white_alpha(26);
     ui.painter().text(inner.left_top() + Vec2::new(0.0, -8.0), Align2::LEFT_TOP, number_text, theme::semibold(48.0), number_color);
@@ -465,10 +461,11 @@ fn example_button(ui: &mut Ui, ctx: &egui::Context, memory: &mut WindowMemory, p
         let image_rect = egui::Rect::from_min_size(inner.left_top() + Vec2::new(0.0, 16.0), Vec2::new(inner.width(), image_height - 16.0));
         egui::Image::new((picture.id(), image_rect.size())).paint_at(ui, image_rect);
     }
-    // The name is cut with an ellipsis to the card; the tooltip has it whole.
+    // The name, cut off where the card's padding starts.
     let name = path.file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_default();
-    let galley = elided_galley(ui.painter(), &name, theme::semibold(12.0), theme::LABEL_EMPHASIS, inner.width());
-    ui.painter().galley(egui::Pos2::new(inner.left(), inner.bottom() - galley.size().y), galley, theme::LABEL_EMPHASIS);
+    let galley = ui.painter().layout_no_wrap(name, theme::semibold(12.0), theme::LABEL_EMPHASIS);
+    let name_painter = ui.painter().with_clip_rect(inner.intersect(ui.clip_rect()));
+    name_painter.galley(egui::Pos2::new(inner.left(), inner.bottom() - galley.size().y), galley, theme::LABEL_EMPHASIS);
     let file_name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
     let folder = path.parent().map(|folder| folder.display().to_string()).unwrap_or_default();
     let response = response.tooltip(format!("{file_name}\n\n{folder}"));
@@ -828,23 +825,18 @@ mod tests {
     }
 
     #[test]
-    fn narrow_windows_show_fewer_columns() {
-        // The default width (less the window's margins) holds six.
-        assert_eq!(example_columns(EXAMPLES_SIZE.x - 16.0).0, EXAMPLE_COLUMNS);
-        for width in [1600.0, 1264.0, 1000.0, 837.0, 651.0, 520.0, 300.0, 170.0, 100.0] {
-            let (columns, cell_width) = example_columns(width);
-            assert!((1..=EXAMPLE_COLUMNS).contains(&columns), "{width}: {columns}");
-            // The row fits, its cards no narrower than they may be.
-            assert!(columns as f32 * (cell_width + EXAMPLE_SPACING) <= width + 0.01, "{width}: {columns} of {cell_width}");
-            assert!(columns == 1 || cell_width >= EXAMPLE_MIN_WIDTH, "{width}: {columns} of {cell_width}");
-            // One more would be too narrow.
-            assert!(columns == EXAMPLE_COLUMNS || width / (columns + 1) as f32 - EXAMPLE_SPACING < EXAMPLE_MIN_WIDTH, "{width}: {columns}");
+    fn the_examples_keep_six_columns_at_any_width() {
+        for width in [1600.0, 1264.0, 651.0, 300.0] {
+            let cell_width = example_width(width);
+            assert!((EXAMPLE_COLUMNS as f32 * (cell_width + EXAMPLE_SPACING) - width).abs() < 0.01, "{width}: {cell_width}");
         }
+        // Down to their padding.
+        assert_eq!(example_width(60.0), 2.0 * EXAMPLE_PADDING);
     }
 
-    /// A card `width` wide for `name`: its rect, where its name is drawn
-    /// and what shows of it.
-    fn card_name(context: &egui::Context, name: &str, width: f32) -> (egui::Rect, egui::Rect, String) {
+    /// A card `width` wide for `name`: its rect, and the name's text and
+    /// where it is cut off.
+    fn card_name(context: &egui::Context, name: &str, width: f32) -> (egui::Rect, String, egui::Rect) {
         let path = PathBuf::from(format!("{name}.terrain"));
         let mut memory = WindowMemory::default();
         let mut commands = Vec::new();
@@ -857,38 +849,27 @@ mod tests {
             _ => None,
         });
         let label = output.shapes.iter().find_map(|clipped| match &clipped.shape {
-            egui::Shape::Text(text) if text.galley.text() == name => Some(text.clone()),
+            egui::Shape::Text(text) if text.galley.text() == name => Some((text.clone(), clipped.clip_rect)),
             _ => None,
         });
         output.drop_without_applying_deltas();
-        let label = label.expect("the name");
-        // The galley keeps the job's text; the glyphs show what is drawn.
+        let (label, clip) = label.expect("the name");
         let drawn = label.galley.rows.iter().flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr)).collect();
-        (card.expect("the card"), label.visual_bounding_rect(), drawn)
+        (card.expect("the card"), drawn, clip)
     }
 
     #[test]
-    fn example_names_stay_inside_their_cards() {
+    fn example_names_are_cut_off_at_their_card_s_padding() {
         let context = egui::Context::default();
         theme::apply(&context);
         let name = "Height and Slope Masks";
-        for (width, whole) in [(80.0, false), (120.0, false), (EXAMPLE_MIN_WIDTH, true), (400.0, true)] {
-            let (card, label, drawn) = card_name(&context, name, width);
-            // Inside the card, and across, inside its padding.
-            assert!(card.contains_rect(label), "{width}: {label:?} in {card:?}");
-            let inner = card.shrink(8.0).expand(0.5);
-            assert!(inner.left() <= label.left() && label.right() <= inner.right(), "{width}: {label:?} in {card:?}");
-            if whole {
-                assert_eq!(drawn, name);
-            } else {
-                assert!(drawn.ends_with('…'), "{width}: {drawn}");
-            }
-        }
-        // The examples' names fit whole on the narrowest cards.
-        for (file, _) in BUNDLED_EXAMPLES {
-            if let Some(name) = file.strip_suffix(".terrain") {
-                assert_eq!(card_name(&context, name, EXAMPLE_MIN_WIDTH).2, name);
-            }
+        for width in [80.0, 120.0, 400.0] {
+            let (card, drawn, clip) = card_name(&context, name, width);
+            // Laid out whole, with no ellipsis, and cut off inside the
+            // card's padding.
+            assert_eq!(drawn, name, "{width}");
+            let inner = card.shrink(EXAMPLE_PADDING);
+            assert!(clip.left() >= inner.left() - 0.01 && clip.right() <= inner.right() + 0.01, "{width}: {clip:?} in {card:?}");
         }
     }
 }

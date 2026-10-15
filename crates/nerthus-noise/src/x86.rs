@@ -120,6 +120,24 @@ pub fn divss(first: f32, second: f32) -> f32 {
     nan_rules(first / second, first, second)
 }
 
+/// `VFMADD…SS`: `a * b + c` rounded once. A NaN source passes through
+/// quieted (`a`'s, then `b`'s, then `c`'s), so an infinity times zero
+/// plus a NaN gives that NaN; any other NaN result is the default NaN.
+pub fn fmadd(a: f32, b: f32, c: f32) -> f32 {
+    let result = a.mul_add(b, c);
+    if !result.is_nan() {
+        result
+    } else if a.is_nan() {
+        quiet(a)
+    } else if b.is_nan() {
+        quiet(b)
+    } else if c.is_nan() {
+        quiet(c)
+    } else {
+        DEFAULT_NAN
+    }
+}
+
 /// `SQRTSS`: a NaN passes through, negative numbers give the default NaN.
 pub fn sqrtss(x: f32) -> f32 {
     nan_rules(x.sqrt(), x, x)
@@ -167,6 +185,10 @@ mod tests {
         assert_eq!(subss(f32::INFINITY, f32::INFINITY).to_bits(), 0xFFC0_0000);
         assert_eq!(divss(0.0, 0.0).to_bits(), 0xFFC0_0000);
         assert_eq!(sqrtss(-1.0).to_bits(), 0xFFC0_0000);
+        assert_eq!(fmadd(f32::INFINITY, 0.0, 1.0).to_bits(), 0xFFC0_0000);
+        // An invalid product passes a NaN addend through.
+        assert_eq!(fmadd(f32::INFINITY, 0.0, positive).to_bits(), 0x7FC0_0000);
+        assert_eq!(fmadd(2.0, 3.0, 1.0), 7.0);
         // Signalling NaNs come back quiet; numbers are untouched.
         assert_eq!(addss(f32::from_bits(0x7F80_0001), 1.0).to_bits(), 0x7FC0_0001);
         assert_eq!(libm_nan(f32::NAN, f32::from_bits(0xFFC0_1234)).to_bits(), 0xFFC0_1234);

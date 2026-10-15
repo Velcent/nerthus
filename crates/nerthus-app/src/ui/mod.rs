@@ -9,6 +9,7 @@ pub mod batch_build;
 mod bound_variable;
 mod build_settings;
 mod build_window;
+mod colour_button;
 mod colour_picker;
 mod command_line_window;
 mod commands;
@@ -1035,21 +1036,44 @@ fn node_key(command: &Command) -> bool {
     graph_editing || node_editing
 }
 
-/// Whether `shortcut` was pressed, its key press consumed if so. egui's
-/// `consume_shortcut` lets extra Shift and Alt through, so a key bound
-/// with no modifier needs none held: Alt+F is not F.
+/// Whether `shortcut` was pressed, its key press consumed if so, as
+/// `Shell_KeyUp` takes keys: Ctrl (Command) held as bound and an extra
+/// Shift let through (egui's logical match), but nothing while Alt is
+/// held without Ctrl, which makes the key a system key (`Key.System`):
+/// Alt+F is not F.
 fn consume_shortcut(input: &mut egui::InputState, shortcut: &KeyboardShortcut) -> bool {
-    if !shortcut.modifiers.is_none() {
-        return input.consume_shortcut(shortcut);
-    }
+    consume_key(input, shortcut, false)
+}
+
+/// [`consume_shortcut`], taking no press with Shift held when
+/// `refuse_shift` is set.
+fn consume_key(input: &mut egui::InputState, shortcut: &KeyboardShortcut, refuse_shift: bool) -> bool {
     let before = input.events.len();
-    input.events.retain(|event| !matches!(event, egui::Event::Key { key, modifiers, pressed: true, .. } if *key == shortcut.logical_key && modifiers.is_none()));
+    input.events.retain(|event| {
+        let egui::Event::Key { key, modifiers, pressed: true, .. } = event else {
+            return true;
+        };
+        let system_key = modifiers.alt && !modifiers.command;
+        let shift_refused = refuse_shift && modifiers.shift;
+        let taken = *key == shortcut.logical_key && modifiers.matches_logically(shortcut.modifiers) && !system_key && !shift_refused;
+        !taken
+    });
     input.events.len() != before
 }
 
-/// The keyboard shortcuts. Graph keys only act when no text field has
-/// the keyboard, and the node keys only when `node_keys` allows them.
+/// The keys `Shell_KeyUp` takes only with Shift up: Ctrl 1, Ctrl 2 and
+/// the Lazy Menu's F1.
+fn refuses_shift(command: &Command) -> bool {
+    matches!(command, Command::ZoomReset | Command::ZoomSelection | Command::Graph(GraphCommand::LazyMenu))
+}
+
+/// The keyboard shortcuts: none while a text field has the keyboard, and
+/// the node keys only when `node_keys` allows them.
 fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
+    // `Shell_KeyUp` takes no keys while a text box has the keyboard.
+    if ctx.egui_wants_keyboard_input() {
+        return;
+    }
     let command = Modifiers::COMMAND;
     let command_shift = Modifiers::COMMAND | Modifiers::SHIFT;
     let command_alt = Modifiers::COMMAND | Modifiers::ALT;
@@ -1078,24 +1102,16 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
         (KeyboardShortcut::new(command, Key::F6), Command::ShowLocked2DViewport),
         (KeyboardShortcut::new(command, Key::M), Command::Show2DView),
     ];
-    let typing = ctx.egui_wants_keyboard_input();
     for (shortcut, action) in bindings {
-        let text_editing = matches!(action, Command::Undo | Command::Redo | Command::SelectAll);
-        if typing && text_editing {
-            continue;
-        }
         if !node_keys && node_key(&action) {
             continue;
         }
-        if ctx.input_mut(|input| consume_shortcut(input, &shortcut)) {
+        let refuse_shift = refuses_shift(&action);
+        if ctx.input_mut(|input| consume_key(input, &shortcut, refuse_shift)) {
             pending.push(action);
         }
     }
-    if typing {
-        return;
-    }
-    // The graph's (`Shell.OnPreviewKeyDown`); Shift and Ctrl together come
-    // first.
+    // The graph's; Shift and Ctrl together come first.
     let graph_bindings = [
         (KeyboardShortcut::new(command, Key::X), GraphCommand::Cut),
         (KeyboardShortcut::new(command, Key::C), GraphCommand::Copy),
@@ -1107,11 +1123,14 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
         (KeyboardShortcut::new(command_shift, Key::F8), GraphCommand::Combine(CombineKind::Layers)),
         (KeyboardShortcut::new(command, Key::F8), GraphCommand::Combine(CombineKind::Mixer)),
         (KeyboardShortcut::new(Modifiers::NONE, Key::F8), GraphCommand::Combine(CombineKind::Inputs)),
+        // F4 and Tab go by no Ctrl check: they take Ctrl too.
         (KeyboardShortcut::new(Modifiers::NONE, Key::F4), GraphCommand::AutoLayout),
+        (KeyboardShortcut::new(command, Key::F4), GraphCommand::AutoLayout),
         (KeyboardShortcut::new(Modifiers::NONE, Key::F1), GraphCommand::LazyMenu),
         (KeyboardShortcut::new(Modifiers::NONE, Key::T), GraphCommand::CycleRenderIntent),
         (KeyboardShortcut::new(Modifiers::NONE, Key::P), GraphCommand::ManagePortals),
         (KeyboardShortcut::new(Modifiers::NONE, Key::Tab), GraphCommand::NodeSearch),
+        (KeyboardShortcut::new(command, Key::Tab), GraphCommand::NodeSearch),
         (KeyboardShortcut::new(Modifiers::NONE, Key::Comma), GraphCommand::QuickNavigation),
         (KeyboardShortcut::new(Modifiers::NONE, Key::F), GraphCommand::LockSelection),
     ];
@@ -1120,7 +1139,8 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
         if !node_keys && node_key(&command) {
             continue;
         }
-        if ctx.input_mut(|input| consume_shortcut(input, &shortcut)) {
+        let refuse_shift = refuses_shift(&command);
+        if ctx.input_mut(|input| consume_key(input, &shortcut, refuse_shift)) {
             pending.push(command);
         }
     }
@@ -1183,15 +1203,32 @@ mod tests {
     }
 
     #[test]
-    fn bare_keys_need_no_modifier() {
+    fn bare_keys_take_shift_but_not_alt() {
         let lock = Command::Graph(GraphCommand::LockSelection);
-        assert_eq!(pressed(vec![key(Key::F, Modifiers::NONE)], true), vec![lock]);
-        // Alt+F is the File menu's key, not Lock Preview to Node.
-        for modifiers in [Modifiers::ALT, Modifiers::SHIFT, Modifiers::ALT | Modifiers::SHIFT] {
-            for bare in [Key::F, Key::G, Key::B, Key::Delete, Key::Tab, Key::F8] {
+        assert_eq!(pressed(vec![key(Key::F, Modifiers::NONE)], true), vec![lock.clone()]);
+        // `Shell_KeyUp` checks Ctrl only: Shift is let through.
+        assert_eq!(pressed(vec![key(Key::F, Modifiers::SHIFT)], true), vec![lock]);
+        let combine = Command::Graph(GraphCommand::Combine(CombineKind::Inputs));
+        assert_eq!(pressed(vec![key(Key::F8, Modifiers::SHIFT)], true), vec![combine]);
+        assert_eq!(pressed(vec![key(Key::Delete, Modifiers::SHIFT)], true), vec![Command::Delete]);
+        // Alt without Ctrl makes a system key: Alt+F is the File menu's,
+        // not Lock Preview to Node.
+        for modifiers in [Modifiers::ALT, Modifiers::ALT | Modifiers::SHIFT] {
+            for bare in [Key::F, Key::G, Key::B, Key::Delete, Key::Tab, Key::F8, Key::F4] {
                 assert!(pressed(vec![key(bare, modifiers)], true).is_empty(), "{modifiers:?} {bare:?}");
             }
         }
+        // With Ctrl too it is no system key: Ctrl Alt S saves.
+        assert_eq!(pressed(vec![key(Key::S, Modifiers::COMMAND | Modifiers::ALT)], true), vec![Command::Save]);
+        // Ctrl 1, Ctrl 2 and the Lazy Menu's F1 want Shift up.
+        let shifted = [(Key::Num1, Modifiers::COMMAND | Modifiers::SHIFT), (Key::Num2, Modifiers::COMMAND | Modifiers::SHIFT), (Key::F1, Modifiers::SHIFT)];
+        for (bare, modifiers) in shifted {
+            assert!(pressed(vec![key(bare, modifiers)], true).is_empty(), "{modifiers:?} {bare:?}");
+        }
+        assert_eq!(pressed(vec![key(Key::Num0, Modifiers::COMMAND | Modifiers::SHIFT)], true), vec![Command::ZoomExtents]);
+        // F4 and Tab take Ctrl too.
+        assert_eq!(pressed(vec![key(Key::F4, Modifiers::COMMAND)], true), vec![Command::Graph(GraphCommand::AutoLayout)]);
+        assert_eq!(pressed(vec![key(Key::Tab, Modifiers::COMMAND)], true), vec![Command::Graph(GraphCommand::NodeSearch)]);
         // The shortcuts with a modifier still take their own.
         assert_eq!(pressed(vec![key(Key::S, Modifiers::COMMAND | Modifiers::SHIFT)], true), vec![Command::SaveAs]);
         assert_eq!(pressed(vec![key(Key::O, Modifiers::COMMAND | Modifiers::ALT)], true), vec![Command::ShowOptions(None)]);
@@ -1206,7 +1243,9 @@ mod tests {
             output.drop_without_applying_deltas();
             pending
         };
-        assert_eq!(console(Modifiers::NONE), vec![Command::Tools(tool_commands::ToolCommand::ShowConsole)]);
+        let show_console = vec![Command::Tools(tool_commands::ToolCommand::ShowConsole)];
+        assert_eq!(console(Modifiers::NONE), show_console);
+        assert_eq!(console(Modifiers::SHIFT), show_console);
         assert!(console(Modifiers::ALT).is_empty());
     }
 
@@ -1238,9 +1277,7 @@ mod tests {
     /// splitters where `split_x` and `split_y` put them.
     fn areas_at(size: Vec2, split_x: f32, split_y: f32) -> Areas {
         let context = egui::Context::default();
-        let mut state = UiState::default();
-        state.split_x = split_x;
-        state.split_y = split_y;
+        let mut state = UiState { split_x, split_y, ..Default::default() };
         let mut areas = None;
         let output = context.run_ui(egui::RawInput::default(), |ui| {
             let top = Pos2::new(0.0, title_bar::HEIGHT);
@@ -1277,11 +1314,11 @@ mod tests {
     fn the_least_window_grows_with_the_scale_up_to_the_screen() {
         // As tall as the property area needs, more than the two rows.
         let at_one = min_window_size(1.0, None);
-        assert_eq!(at_one, Vec2::new(568.0, 336.0));
+        assert_eq!(at_one, Vec2::new(568.0, 332.0));
         // 120%, the scale Nerthus starts at: the 517 by 403 of the issue
-        // is too small.
+        // is too narrow.
         let at_default = min_window_size(1.2, None);
-        assert!((at_default.x - 681.6).abs() < 0.01 && (at_default.y - 403.2).abs() < 0.01);
+        assert!((at_default.x - 681.6).abs() < 0.01 && (at_default.y - 398.4).abs() < 0.01);
         assert_eq!(min_window_size(1.75, None), at_one * 1.75);
         // A screen too small for it keeps the window to its own size.
         let small_screen = Vec2::new(1366.0, 768.0);
@@ -1308,7 +1345,7 @@ mod tests {
         assert_eq!((shown.resize_constraints.min_width, shown.resize_constraints.min_height), (least.x, least.y));
         assert!(shown.resize_constraints.max_width.is_infinite());
         // Grown to fit, in whole pixels.
-        assert_eq!((shown.physical_width(), shown.physical_height()), (682, 404));
+        assert_eq!((shown.physical_width(), shown.physical_height()), (682, 403));
 
         // A window manager that keeps it smaller is not asked again.
         world.get_mut::<Window>(window).unwrap().resolution.set_physical_resolution(600, 400);
@@ -1320,7 +1357,7 @@ mod tests {
         run(&mut world);
         let shown = window_of(&world);
         assert_eq!(shown.resize_constraints.min_width, min_window_size(1.75, None).x);
-        assert_eq!((shown.physical_width(), shown.physical_height()), (994, 588));
+        assert_eq!((shown.physical_width(), shown.physical_height()), (994, 581));
 
         // Then no larger than the screen it is on.
         world.resource_mut::<Editor>().user.options.set_ui_scale(3.0);

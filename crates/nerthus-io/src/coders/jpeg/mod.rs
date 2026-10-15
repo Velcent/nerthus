@@ -1214,10 +1214,15 @@ fn quantum(value: u16, precision: i32) -> f32 {
 /// `ReadJPEGImage`: what the pixel cache holds after reading a JPEG.
 pub fn read(path: &Path) -> Result<PixelCache> {
     let file = std::fs::read(path).with_context(|| format!("cannot open {}", path.display()))?;
+    decode_bytes(&file)
+}
+
+/// `ReadJPEGImage` on a blob (a JPEG inside another format).
+pub(crate) fn decode_bytes(file: &[u8]) -> Result<PixelCache> {
     if file.len() < 107 {
         anyhow::bail!("InsufficientImageDataInFile");
     }
-    let decoded = decode(&file).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let decoded = decode(file).map_err(|error| anyhow::anyhow!("{error}"))?;
     Ok(to_pixel_cache(&decoded))
 }
 

@@ -22,10 +22,27 @@ pub fn read(path: &Path) -> Result<PixelCache> {
     bail!("cannot decode {}: JPEG 2000 images cannot be read in the web version", path.display())
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn decode_bytes(_bytes: &[u8]) -> Result<PixelCache> {
+    bail!("JPEG 2000 images cannot be read in the web version")
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read(path: &Path) -> Result<PixelCache> {
     let bytes = std::fs::read(path).with_context(|| format!("cannot open {}", path.display()))?;
     let image = jpeg2k::Image::from_bytes(&bytes).map_err(|error| anyhow::anyhow!("cannot decode {}: {error}", path.display()))?;
+    to_pixel_cache(&image)
+}
+
+/// A JPEG 2000 file or bare codestream in memory.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn decode_bytes(bytes: &[u8]) -> Result<PixelCache> {
+    let image = jpeg2k::Image::from_bytes(bytes).map_err(|error| anyhow::anyhow!("{error}"))?;
+    to_pixel_cache(&image)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn to_pixel_cache(image: &jpeg2k::Image) -> Result<PixelCache> {
     let components = image.components();
     let Some(first) = components.first() else {
         bail!("the JPEG 2000 image has no components");

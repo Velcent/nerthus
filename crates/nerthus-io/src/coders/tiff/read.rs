@@ -189,9 +189,9 @@ impl Tiff<'_> {
     /// `tif_decodestrip`/`tif_decodetile` into `output`, then the
     /// predictor; false when the codec stopped short without an error.
     /// `row` is the image row the data starts at, `offset` where the raw
-    /// data lies in the file.
+    /// data lies in the file, `index` the strip or tile.
     #[allow(clippy::too_many_arguments)]
-    fn decode(&self, decoder: &mut Decoder, raw: &[u8], output: &mut [u8], plane: u16, is_tile: bool, row: u32, offset: u64) -> Result<bool> {
+    fn decode(&self, decoder: &mut Decoder, raw: &[u8], output: &mut [u8], plane: u16, is_tile: bool, row: u32, offset: u64, index: u32) -> Result<bool> {
         let compression = self.dir.compression;
         let size = output.len();
         match compression {
@@ -226,7 +226,9 @@ impl Tiff<'_> {
             }
             COMPRESSION_OJPEG => {
                 let old_jpeg = decoder.old_jpeg.as_mut().expect("OJPEG decoder set up");
-                old_jpeg.decode(self, raw, output, plane)?;
+                if !old_jpeg.decode(self, output, plane, index)? {
+                    return Ok(false);
+                }
             }
             COMPRESSION_CCITTRLE | COMPRESSION_CCITTRLEW | COMPRESSION_CCITTFAX3 | COMPRESSION_CCITTFAX4 => {
                 let mode = decoder.fax_mode.get_or_insert(super::fax::initial_mode(compression));
@@ -357,16 +359,22 @@ impl Tiff<'_> {
         {
             size = limit;
         }
-        let Some(raw) = self.fill(strip, false)? else {
-            buffer[..size as usize].fill(0);
-            return Ok(Outcome::FillFailed);
+        // The old-style JPEG codec reads the file itself (`TIFF_NOREADRAW`).
+        let raw = if dir.compression == COMPRESSION_OJPEG {
+            Vec::new()
+        } else {
+            let Some(raw) = self.fill(strip, false)? else {
+                buffer[..size as usize].fill(0);
+                return Ok(Outcome::FillFailed);
+            };
+            raw
         };
         self.setup_decode(decoder)?;
         // `TIFFStartStrip`: the strip's first row.
         let row = (strip % dir.strips_per_image.max(1)) * dir.rows_per_strip;
         let offset = dir.strip_offsets[strip as usize];
         let output = &mut buffer[..size as usize];
-        if !self.decode(decoder, &raw, output, plane, false, row, offset)? {
+        if !self.decode(decoder, &raw, output, plane, false, row, offset, strip)? {
             return Ok(Outcome::DecodeFailed);
         }
         if let Some(bits) = self.post_decode_bits() {
@@ -410,9 +418,14 @@ impl Tiff<'_> {
             bail!("{tile}: Tile out of range, max {}", dir.strip_count);
         }
         let size = self.tile_size()? as usize;
-        let Some(raw) = self.fill(tile, true)? else {
-            buffer[..size].fill(0);
-            return Ok(Outcome::FillFailed);
+        let raw = if dir.compression == COMPRESSION_OJPEG {
+            Vec::new()
+        } else {
+            let Some(raw) = self.fill(tile, true)? else {
+                buffer[..size].fill(0);
+                return Ok(Outcome::FillFailed);
+            };
+            raw
         };
         self.setup_decode(decoder)?;
         let tile_plane = (tile / dir.strips_per_image.max(1)) as u16;
@@ -421,7 +434,7 @@ impl Tiff<'_> {
         let row = (tile % across) * dir.tile_length;
         let offset = dir.strip_offsets[tile as usize];
         let output = &mut buffer[..size];
-        if !self.decode(decoder, &raw, output, tile_plane, true, row, offset)? {
+        if !self.decode(decoder, &raw, output, tile_plane, true, row, offset, tile)? {
             return Ok(Outcome::DecodeFailed);
         }
         if let Some(bits) = self.post_decode_bits() {

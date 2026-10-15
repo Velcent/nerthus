@@ -24,8 +24,11 @@ impl<'a> Blob<'a> {
         self.offset as u64
     }
 
-    /// `ReadBlob`: up to `length` bytes.
+    /// `ReadBlob`: up to `length` bytes (none asked for reads nothing).
     pub fn read(&mut self, length: usize) -> &'a [u8] {
+        if length == 0 {
+            return &[];
+        }
         if self.offset >= self.bytes.len() {
             self.eof = true;
             return &[];
@@ -78,6 +81,47 @@ impl<'a> Blob<'a> {
     /// `ReadBlobMSBLong`.
     pub fn msb_u32(&mut self) -> u32 {
         self.array::<4>().map_or(0, u32::from_be_bytes)
+    }
+
+    /// `ReadBlobString`: a line, its newline (or one carriage return)
+    /// dropped; `None` at the end of the file. Files up to
+    /// `MagickMaxBufferExtent` are read with `fgets` (4095 bytes at most, cut
+    /// at a NUL); bigger ones are memory mapped and read a byte at a time
+    /// (4094 bytes at most, and a last line that strips to nothing is none).
+    pub fn string(&mut self) -> Option<Vec<u8>> {
+        const MAX_BUFFER_EXTENT: usize = 524288;
+        let mapped = self.bytes.len() > MAX_BUFFER_EXTENT;
+        let limit = if mapped { 4094 } else { 4095 };
+        let mut line = Vec::new();
+        while line.len() < limit {
+            let Some(byte) = self.byte() else {
+                break;
+            };
+            line.push(byte);
+            if byte == b'\n' {
+                break;
+            }
+        }
+        if !mapped {
+            if line.is_empty() {
+                return None;
+            }
+            if let Some(nul) = line.iter().position(|&byte| byte == 0) {
+                line.truncate(nul);
+            }
+        }
+        if matches!(line.last(), Some(b'\r' | b'\n')) {
+            line.pop();
+        }
+        if mapped {
+            if let Some(nul) = line.iter().position(|&byte| byte == 0) {
+                line.truncate(nul);
+            }
+            if line.is_empty() && self.eof {
+                return None;
+            }
+        }
+        Some(line)
     }
 
     /// `SeekBlob(SEEK_SET)`: `None` for a negative offset.

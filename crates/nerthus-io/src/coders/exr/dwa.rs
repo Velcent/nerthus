@@ -334,7 +334,7 @@ fn rle_decompress(output: &mut [u8], input: &[u8]) -> usize {
 }
 
 /// `half_to_float`.
-fn half_to_float(half: u16) -> f32 {
+pub(super) fn half_to_float(half: u16) -> f32 {
     let mut exponent_mantissa = ((half as u32) << 17) >> 4;
     let mut bits = ((half >> 15) as u32) << 31;
     if exponent_mantissa >= 0x0080_0000 {
@@ -356,7 +356,7 @@ fn half_to_float(half: u16) -> f32 {
 
 /// `float_to_half`: rounded to nearest even, values below the smallest
 /// half denormal's half flushed to zero.
-fn float_to_half(value: f32) -> u16 {
+pub(super) fn float_to_half(value: f32) -> u16 {
     let bits = value.to_bits();
     let mut magnitude = bits & !0x8000_0000;
     let mut half = ((bits >> 16) & 0x8000) as u16;
@@ -943,7 +943,7 @@ pub fn decompress(input: &[u8], channels: &[Channel], area: &ChunkArea, output_s
 /// OpenEXR's Huffman coding of 16-bit values (`internal_huf.c`): a header
 /// of the symbol range and bit count, the code lengths run-length packed,
 /// then the codes, with one symbol standing for runs of the last value.
-mod huffman {
+pub(super) mod huffman {
     use anyhow::Result;
 
     use super::corrupt;

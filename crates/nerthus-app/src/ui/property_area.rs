@@ -18,15 +18,16 @@ use crate::theme;
 use crate::ui::bound_variable::{self, Bound};
 use crate::ui::commands::Command;
 use crate::ui::editors::{self, palette_color, Edit, EditorContext};
-use crate::ui::graph_canvas::{elided_galley, node_color, node_icon};
+use crate::ui::graph_canvas::{node_color, node_icon};
 use crate::ui::modifier_list::modifier_list;
 use crate::ui::node_states::{self, StateAction};
 use crate::ui::tool_commands::ToolCommand;
 use crate::ui::widgets::{check_item, dialog, icon_menu, icon_menu_sized, link_button, menu_caption, menu_item, menu_item_enabled, menu_separator, submenu, toolbar_background, Tooltips};
 use nerthus_engine::automation::VarType;
 
-/// The modifier toolbar's `WrapPanel` margin.
-const MODIFIER_PANEL_MARGIN: f32 = 4.0;
+/// `ModifierStack`'s margin (0.2, 0, 0, 0) and its `WrapPanel`'s (4).
+const STACK_MARGIN_LEFT: f32 = 0.2;
+const WRAP_MARGIN: f32 = 4.0;
 /// `ToggleButton-Expander-DownHeader`'s first column: the chevron's.
 const GROUP_CHEVRON_COLUMN: f32 = 26.0;
 /// `EditorBase.CONTROL_THICKNESS`: every editor row's margin.
@@ -41,11 +42,9 @@ const GROUP_MARGIN: f32 = 4.0;
 const MODIFIER_BUTTON: f32 = 24.0;
 /// `btnAddModifier`: 32 by 24.
 const ADD_BUTTON_WIDTH: f32 = 32.0;
-/// The node-state menu: 32 square, 8 from the toolbar's top and 12 from
-/// its right.
-const STATE_MENU: f32 = 32.0;
-const STATE_MENU_TOP: f32 = 8.0;
-const STATE_MENU_RIGHT: f32 = 12.0;
+/// The node-state menu's `Border` (margin 8, 8, 12, 8) round its menu: a
+/// `Toolbar.ButtonSize` icon item within `Toolbar.MenuMargin`.
+const STATE_BORDER_MARGIN: [f32; 4] = [8.0, 8.0, 12.0, 8.0];
 /// The Gate's and a baked node's panels, remembered apart from the
 /// parameters' groups.
 const GATE_PANEL_KEY: usize = usize::MAX - 1;
@@ -53,28 +52,22 @@ const BAKED_PANEL_KEY: usize = usize::MAX - 2;
 /// Their buttons' padding and margin (16 across, 8 down).
 const PANEL_BUTTON_PADDING: f32 = 8.0;
 const PANEL_BUTTON_MARGIN: Vec2 = Vec2::new(16.0, 8.0);
-/// A tinted note box (`DescendantAlert`): its text's padding all round,
-/// and the box's height when the text fits in less.
-const NOTICE_PADDING: f32 = 6.0;
-const NOTICE_MIN_HEIGHT: f32 = 40.0;
-/// A note with links on its right (`InfoPortAdd`, `InfoHeightRef`): its
-/// content's inset (across, down), the gap between its message and its
-/// links, and the least the message wraps in beside them; with less it
-/// goes above them.
-const NOTE_PADDING: Vec2 = Vec2::new(6.0, 4.0);
-const NOTE_GAP: f32 = 8.0;
-const NOTE_MIN_MESSAGE: f32 = 80.0;
-/// The port note: its height when its content fits in less, its close
-/// button, and its "More Info" link (`Button-Link`, padding 2, 4 before
-/// the close button).
-const PORT_NOTE_HEIGHT: f32 = 30.0;
-const PORT_NOTE_CLOSE: f32 = 16.0;
+/// The tinted notes (`DescendantAlert`, `InfoPortAdd`, `InfoHeightRef`):
+/// margin 16, 4; a 1.5 border and padding 2 round their content; the
+/// message's padding 4, 2.
+const NOTE_MARGIN: Vec2 = Vec2::new(16.0, 4.0);
+const NOTE_INSET: f32 = 1.5 + 2.0;
+const NOTE_TEXT_PADDING: Vec2 = Vec2::new(4.0, 2.0);
+/// The port note's close button (`Button-IconOnly`: a 20 icon, padding 2)
+/// and its "More Info" link (`Button-Link`, padding 2, margin 0, 0, 4, 0),
+/// docked right in that order.
+const PORT_NOTE_CLOSE_ICON: f32 = 20.0;
+const PORT_NOTE_CLOSE: f32 = PORT_NOTE_CLOSE_ICON + 2.0 * 2.0;
 const PORT_NOTE_LINK_PADDING: Vec2 = Vec2::splat(2.0);
 const PORT_NOTE_LINK_GAP: f32 = 4.0;
-/// The Height note: its height when its content fits in less, and its
-/// link's padding.
-const HEIGHT_NOTE_HEIGHT: f32 = 26.0;
+/// The Height note's link (`Button-Link`: padding 4, 2, at least 87 wide).
 const HEIGHT_NOTE_LINK_PADDING: Vec2 = Vec2::new(4.0, 2.0);
+const HEIGHT_NOTE_LINK_MIN_WIDTH: f32 = 87.0;
 
 /// The modifier toggles: icon, tooltip, modifier type, their gaps (left
 /// margins in `ModifierStack`) and accent (`Accent-Muted-Green`, else the
@@ -112,22 +105,8 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
     crate::ui::math_editor::show(ui.ctx(), editor);
     crate::ui::painter::show(ui.ctx(), editor);
     ui.painter().rect_filled(rect, 4.0, theme::PANEL_BACKGROUND);
-    // Shorter than its parts need, the area scrolls as a whole, its
-    // modifier toolbar below the parameters rather than drawn over them
-    // and what is above them.
-    let mut area_ui = ui.new_child(UiBuilder::new().id_salt("property-area").max_rect(rect));
-    let mut scroll = ScrollArea::vertical();
-    scroll = scroll.id_salt("property-area");
-    scroll = scroll.auto_shrink([false, false]);
     let mut actions: Vec<StateAction> = Vec::new();
-    let shown = scroll.show(&mut area_ui, |ui| {
-        // Laid out as tall as the area, or what its parts need.
-        let area = Rect::from_min_size(ui.max_rect().min, rect.size());
-        let (node_id, bottom) = area_parts(ui, area, editor, commands, &mut actions)?;
-        ui.expand_to_include_rect(Rect::from_min_max(area.min, Pos2::new(area.right(), bottom)));
-        Some(node_id)
-    });
-    let Some(node_id) = shown.inner else {
+    let Some(node_id) = area_parts(ui, rect, editor, commands, &mut actions) else {
         return;
     };
     parameter_dialogs(ui, editor);
@@ -136,13 +115,13 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, commands: &mut Vec<Com
     }
 }
 
-/// The area's parts laid out in `area`: the header, then for the active
-/// node its command row, a warning, notes and parameters, and the
-/// modifier toolbar at the foot. The parameters keep room for a group
-/// panel's header and first row (`least_body`); where `area` is too short
-/// for that, the toolbar goes below it. Returns the node shown, and how
-/// far down its parts go.
-fn area_parts(ui: &mut Ui, area: Rect, editor: &mut Editor, commands: &mut Vec<Command>, actions: &mut Vec<StateAction>) -> Option<(i32, f32)> {
+/// The area's parts laid out in `area`, as its `DockPanel`s dock them: the
+/// header, then for the active node its command row and a warning at the
+/// top; in the rest, the modifier stack at the foot, the locked-preview
+/// alert at the top, the port note at the foot over the stack, the Height
+/// note under the alert, and the parameters in what is left. Returns the
+/// node shown.
+fn area_parts(ui: &mut Ui, area: Rect, editor: &mut Editor, commands: &mut Vec<Command>, actions: &mut Vec<StateAction>) -> Option<i32> {
     // `PropertyBorder`: a `Toolbar` (margin `Toolbar.Margin`, at least
     // `Toolbar.MinHeight` high).
     let sizes = theme::sizes(ui.ctx());
@@ -166,34 +145,19 @@ fn area_parts(ui: &mut Ui, area: Rect, editor: &mut Editor, commands: &mut Vec<C
         body_top = warning_row(ui, area, body_top, &error);
     }
 
-    let panel_height = modifier_panel_height(area.width());
-    let mut body = Rect::from_min_max(Pos2::new(area.left(), body_top), Pos2::new(area.right(), area.bottom() - panel_height));
+    let stack_height = modifier_stack_height(area.width(), sizes);
+    let stack_rect = Rect::from_min_max(Pos2::new(area.left(), area.bottom() - stack_height), area.max);
+    let mut body = Rect::from_min_max(Pos2::new(area.left(), body_top), Pos2::new(area.right(), stack_rect.top()));
+    let note_width = (body.width() - 2.0 * NOTE_MARGIN.x).max(0.0);
     if let Some(alert) = descendant_alert(editor, node_id) {
-        let alert_rect = notice(ui, body.min + Vec2::new(16.0, 4.0), body.width() - 32.0, alert, theme::ACCENT_TRANSPARENT_ORANGE, theme::ACCENT_STRONG_ORANGE);
-        body.min.y = alert_rect.bottom() + 4.0;
+        let alert_rect = notice(ui, body.min + NOTE_MARGIN, note_width, alert, theme::ACCENT_TRANSPARENT_ORANGE, theme::ACCENT_STRONG_ORANGE);
+        body.min.y = alert_rect.bottom() + NOTE_MARGIN.y;
     }
-    let needs_height = editor.document.node(node_id).is_some_and(node_states::needs_height);
-    if needs_height {
-        let (note_rect, clicked) = height_note(ui, body.min + Vec2::new(16.0, 4.0), (body.width() - 32.0).max(0.0));
-        if clicked {
-            actions.push(StateAction::ConnectHeight);
-        }
-        body.min.y = note_rect.bottom() + 4.0;
-    }
-
-    // However short the area, the toolbar keeps under the parameters' room.
-    let overflow = (body.min.y + least_body(sizes) - body.max.y).max(0.0);
-    body.max.y += overflow;
-    let bottom = area.bottom() + overflow;
-    let modifiers_rect = Rect::from_min_max(Pos2::new(area.left() + MODIFIER_PANEL_MARGIN, body.max.y), Pos2::new(area.right(), bottom) - Vec2::splat(MODIFIER_PANEL_MARGIN));
     let can_add_ports = editor.document.node(node_id).is_some_and(|node| nerthus_engine::editing::can_add_ports(&node.type_name));
     let port_note_id = ui.id().with("port-note-dismissed");
     let port_note_dismissed: bool = ui.data(|data| data.get_temp(port_note_id)).unwrap_or(false);
-    let note_width = (body.width() - 32.0).max(0.0);
-    // Where it would leave the parameters no room, the note steps aside.
-    let note_fits = || body.height() - (port_note_layout(ui, note_width).size.y + 8.0) >= least_body(sizes);
-    if can_add_ports && !port_note_dismissed && note_fits() {
-        let (note_rect, click) = port_note(ui, Pos2::new(body.left() + 16.0, body.bottom() - 4.0), note_width);
+    if can_add_ports && !port_note_dismissed {
+        let (note_rect, click) = port_note(ui, Pos2::new(body.left() + NOTE_MARGIN.x, body.bottom() - NOTE_MARGIN.y), note_width);
         match click {
             Some(PortNoteClick::Dismiss) => {
                 ui.data_mut(|data| data.insert_temp(port_note_id, true));
@@ -203,15 +167,26 @@ fn area_parts(ui: &mut Ui, area: Rect, editor: &mut Editor, commands: &mut Vec<C
             }
             None => {}
         }
-        body.max.y = note_rect.top() - 4.0;
+        body.max.y = note_rect.top() - NOTE_MARGIN.y;
+    }
+    let needs_height = editor.document.node(node_id).is_some_and(node_states::needs_height);
+    if needs_height {
+        let (note_rect, clicked) = height_note(ui, body.min + NOTE_MARGIN, note_width);
+        if clicked {
+            actions.push(StateAction::ConnectHeight);
+        }
+        body.min.y = note_rect.bottom() + NOTE_MARGIN.y;
     }
 
+    // `editorContainer` fills what is left, nothing when nothing is.
+    body.max.y = body.max.y.max(body.min.y);
     let builder = UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min));
     let mut body_ui = ui.new_child(builder);
+    body_ui.shrink_clip_rect(body);
     let mut scroll = ScrollArea::vertical();
     scroll = scroll.id_salt(("properties", node_id));
     scroll = scroll.auto_shrink([false, false]);
-    // Not egui's least of 64 past the body, over the modifier toolbar.
+    // Not egui's least of 64 past the body, over the modifier stack.
     scroll = scroll.min_scrolled_height(0.0);
     let area_width = area.width();
     scroll.show(&mut body_ui, |ui| {
@@ -220,37 +195,27 @@ fn area_parts(ui: &mut Ui, area: Rect, editor: &mut Editor, commands: &mut Vec<C
         parameters(ui, editor, node_id, area_width, commands);
     });
 
-    modifier_toolbar(ui, modifiers_rect, editor, node_id, commands, actions);
-    Some((node_id, bottom))
+    modifier_toolbar(ui, stack_rect, editor, node_id, commands, actions);
+    Some(node_id)
 }
 
-/// The least height the area is laid out in `width` wide without
-/// scrolling, at the default sizes (the larger): its header, a command
-/// row and the modifier toolbar, and between them room for the parameters
-/// to show a group panel's header and first row (`least_body`). The port
-/// note steps aside for that room; a warning and the other notes add to
-/// it.
+/// The least height the window keeps the area at, `width` wide, at the
+/// default sizes (the larger): its header, a command row and the modifier
+/// stack, and between them room for the parameters to show a group
+/// panel's header and first row. A warning and the notes take from that.
 pub fn least_height(width: f32) -> f32 {
     let sizes = &theme::DEFAULT_SIZES;
     let header = sizes.toolbar_margin + sizes.toolbar_min_height + sizes.toolbar_margin;
     let [_, above, _, below] = sizes.property_border;
     let command_row = above + sizes.toolbar_min_height + below;
-    header + command_row + least_body(sizes) + modifier_panel_height(width)
+    let parameters = sizes.expander_margin[1] + sizes.expander_header + sizes.slider_height + 2.0 * f32::from(ROW_MARGIN);
+    header + command_row + parameters + modifier_stack_height(width, sizes)
 }
 
-/// The least the parameters are given: a group panel's header and its
-/// first row.
-fn least_body(sizes: &theme::Sizes) -> f32 {
-    sizes.expander_margin[1] + sizes.expander_header + sizes.slider_height + 2.0 * f32::from(ROW_MARGIN)
-}
-
-/// The modifier toolbar's height at the foot of an area `width` wide,
-/// with its margin.
-fn modifier_panel_height(width: f32) -> f32 {
-    let modifiers_width = width - 2.0 * MODIFIER_PANEL_MARGIN;
-    let measure = Rect::from_min_size(Pos2::ZERO, Vec2::new(modifiers_width, 0.0));
-    let (_, modifiers_height) = layout_modifier_groups(measure);
-    MODIFIER_PANEL_MARGIN + modifiers_height
+/// The modifier stack's height at the foot of an area `width` wide.
+fn modifier_stack_height(width: f32, sizes: &theme::Sizes) -> f32 {
+    let measure = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 0.0));
+    stack_layout(measure, sizes.toolbar_button, sizes.toolbar_menu_margin).height
 }
 
 /// The command row (`CommandBorder`, a toolbar with the margins
@@ -377,19 +342,20 @@ fn descendant_alert(editor: &Editor, node_id: i32) -> Option<&'static str> {
     Some(DESCENDANT_ALERT)
 }
 
-/// A tinted note box (`Accent-Transparent-…` fill, `Accent-Strong-…` border)
-/// `width` wide from `top_left`: its text wrapped `NOTICE_PADDING` in, the
-/// box as high as the text and that padding, but at least
-/// `NOTICE_MIN_HEIGHT`. Returns the box.
+/// `DescendantAlert`: a tinted note box (`Accent-Transparent-…` fill,
+/// `Accent-Strong-…` border) `width` wide from `top_left`, its text
+/// (10, centred, wrapped) `NOTE_INSET` and `NOTE_TEXT_PADDING` in, the box
+/// as high as that. Returns the box.
 fn notice(ui: &mut Ui, top_left: Pos2, width: f32, text: &str, fill: egui::Color32, border: egui::Color32) -> Rect {
-    let mut job = egui::text::LayoutJob::simple(text.to_string(), theme::interface(10.0), theme::LABEL_EMPHASIS, width - 2.0 * NOTICE_PADDING);
+    let wrap_width = (width - 2.0 * (NOTE_INSET + NOTE_TEXT_PADDING.x)).max(0.0);
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), theme::interface(10.0), theme::LABEL_EMPHASIS, wrap_width);
     job.halign = Align::Center;
     let galley = ui.painter().layout_job(job);
-    let height = (galley.size().y + 2.0 * NOTICE_PADDING).max(NOTICE_MIN_HEIGHT);
+    let height = galley.size().y + 2.0 * (NOTE_INSET + NOTE_TEXT_PADDING.y);
     let rect = Rect::from_min_size(top_left, Vec2::new(width, height));
     ui.painter().rect_filled(rect, 4.0, fill);
     ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.5, border), egui::StrokeKind::Inside);
-    let position = Pos2::new(rect.center().x, rect.center().y - galley.size().y / 2.0);
+    let position = Pos2::new(rect.center().x, rect.top() + NOTE_INSET + NOTE_TEXT_PADDING.y);
     ui.painter().galley(position, galley, theme::LABEL_EMPHASIS);
     rect
 }
@@ -400,10 +366,10 @@ enum PortNoteClick {
     MoreInfo,
 }
 
-/// Where a note's parts go (`InfoPortAdd`, `InfoHeightRef`), from its
-/// top left: the message wrapped beside the links on its right, or above
-/// them when that leaves it less than `NOTE_MIN_MESSAGE` across, and the
-/// note as high as both and `NOTE_PADDING` (at least its least height).
+/// Where a note's parts go (`InfoPortAdd`, `InfoHeightRef`), from its top
+/// left, as its `DockPanel` lays them out: its links docked right, and the
+/// message (padding 4, 2) wrapped in what they leave, centred down; the
+/// note as high as the taller, inside its border and padding.
 struct NoteLayout {
     size: Vec2,
     galley: Arc<Galley>,
@@ -413,39 +379,32 @@ struct NoteLayout {
 
 /// `text` in `font` laid out in a note `width` wide whose links take
 /// `links` on the right.
-fn note_layout(ui: &Ui, text: &str, font: FontId, width: f32, links: Vec2, min_height: f32) -> NoteLayout {
-    let inner_width = (width - 2.0 * NOTE_PADDING.x).max(0.0);
-    let beside = inner_width - links.x - NOTE_GAP;
-    let stacked = beside < NOTE_MIN_MESSAGE;
-    // Whole points: egui rounds the wrap width to them, which could
-    // otherwise take the message half a point into the gap.
-    let wrap_width = if stacked { inner_width } else { beside }.floor();
+fn note_layout(ui: &Ui, text: &str, font: FontId, width: f32, links: Vec2) -> NoteLayout {
+    let inner_width = (width - 2.0 * NOTE_INSET).max(0.0);
+    let slot = (inner_width - links.x).max(0.0);
+    let wrap_width = (slot - 2.0 * NOTE_TEXT_PADDING.x).max(0.0);
     let galley = ui.painter().layout(text.to_string(), font, theme::LABEL_EMPHASIS, wrap_width);
     let message_size = galley.size();
-    let content = if stacked { message_size.y + NOTE_PADDING.y + links.y } else { message_size.y.max(links.y) };
-    let size = Vec2::new(width, (content + 2.0 * NOTE_PADDING.y).max(min_height));
-    let inner = Rect::from_min_size(Pos2::ZERO, size).shrink2(NOTE_PADDING);
-    let (message, links) = if stacked {
-        // The message at the top, the links under it on the right.
-        let message = Rect::from_min_size(inner.min, message_size);
-        (message, Rect::from_min_size(Pos2::new(inner.right() - links.x, inner.bottom() - links.y), links))
-    } else {
-        let message = Rect::from_min_size(Pos2::new(inner.left(), inner.center().y - message_size.y / 2.0), message_size);
-        (message, Rect::from_min_size(Pos2::new(inner.right() - links.x, inner.center().y - links.y / 2.0), links))
-    };
+    let content = (message_size.y + 2.0 * NOTE_TEXT_PADDING.y).max(links.y);
+    let size = Vec2::new(width, content + 2.0 * NOTE_INSET);
+    let inner = Rect::from_min_size(Pos2::ZERO, size).shrink(NOTE_INSET);
+    let message = Rect::from_min_size(Pos2::new(inner.left() + NOTE_TEXT_PADDING.x, inner.center().y - message_size.y / 2.0), message_size);
+    let links = Rect::from_min_size(Pos2::new(inner.right() - links.x, inner.center().y - links.y / 2.0), links);
     NoteLayout { size, galley, message, links }
 }
 
 /// Paints a note laid out as `layout` from `top_left`: the box (`fill`,
-/// a 1.5 `border`) and its message. Returns the box and where its links
-/// go.
+/// a 1.5 `border`) and its message, cut to the message's slot. Returns the
+/// box and where its links go.
 fn paint_note(ui: &Ui, top_left: Pos2, layout: NoteLayout, fill: Color32, border: Color32) -> (Rect, Rect) {
     let offset = top_left.to_vec2();
     let rect = Rect::from_min_size(top_left, layout.size);
+    let links = layout.links.translate(offset);
     ui.painter().rect_filled(rect, 4.0, fill);
     ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.5, border), StrokeKind::Inside);
-    ui.painter().galley(layout.message.min + offset, layout.galley, theme::LABEL_EMPHASIS);
-    (rect, layout.links.translate(offset))
+    let slot = Rect::from_min_max(rect.min + Vec2::splat(NOTE_INSET), Pos2::new(links.left(), rect.bottom() - NOTE_INSET));
+    ui.painter().with_clip_rect(slot.intersect(ui.clip_rect())).galley(layout.message.min + offset, layout.galley, theme::LABEL_EMPHASIS);
+    (rect, links)
 }
 
 /// The port note `width` wide: its close button and "More Info" link on
@@ -453,12 +412,13 @@ fn paint_note(ui: &Ui, top_left: Pos2, layout: NoteLayout, fill: Color32, border
 fn port_note_layout(ui: &Ui, width: f32) -> NoteLayout {
     let link = ui.painter().layout_no_wrap("More Info".to_string(), theme::interface(12.0), theme::ACCENT_BLUE).size() + 2.0 * PORT_NOTE_LINK_PADDING;
     let links = Vec2::new(link.x + PORT_NOTE_LINK_GAP + PORT_NOTE_CLOSE, link.y.max(PORT_NOTE_CLOSE));
-    note_layout(ui, "This node can add additional input ports.", theme::interface(10.0), width, links, PORT_NOTE_HEIGHT)
+    note_layout(ui, "This node can add additional input ports.", theme::interface(10.0), width, links)
 }
 
 /// `InfoPortAdd`: the node can add inputs, in a note `width` wide that
-/// ends at `bottom_left`; its close button dismisses it, "More Info" opens
-/// the documentation about adding ports. Returns the note and what was
+/// ends at `bottom_left`; its close button (`Button-Background`, the hover
+/// fill under the pointer) dismisses it, "More Info" opens the
+/// documentation about adding ports. Returns the note and what was
 /// clicked.
 fn port_note(ui: &mut Ui, bottom_left: Pos2, width: f32) -> (Rect, Option<PortNoteClick>) {
     let layout = port_note_layout(ui, width);
@@ -469,9 +429,11 @@ fn port_note(ui: &mut Ui, bottom_left: Pos2, width: f32) -> (Rect, Option<PortNo
     row.spacing_mut().item_spacing.x = 0.0;
     let mut clicked = None;
     let (close_rect, close) = row.allocate_exact_size(Vec2::splat(PORT_NOTE_CLOSE), Sense::click());
-    let color = if close.hovered() { theme::LABEL_EMPHASIS } else { theme::BUTTON_BACKGROUND };
-    icons::paint(&row, close_rect.shrink(2.0), "x", color);
-    if close.clicked() {
+    if close.hovered() {
+        row.painter().rect_filled(close_rect, 2.0, theme::BUTTON_HOVER);
+    }
+    icons::paint(&row, Rect::from_center_size(close_rect.center(), Vec2::splat(PORT_NOTE_CLOSE_ICON)), "x", theme::BUTTON_BACKGROUND);
+    if close.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         clicked = Some(PortNoteClick::Dismiss);
     }
     row.add_space(PORT_NOTE_LINK_GAP);
@@ -485,20 +447,22 @@ fn port_note(ui: &mut Ui, bottom_left: Pos2, width: f32) -> (Rect, Option<PortNo
 /// semibold, `Accent-Bright`) for the right.
 fn height_note_layout(ui: &Ui, width: f32) -> (NoteLayout, Arc<Galley>) {
     let link = ui.painter().layout_no_wrap("Connect for me!".to_string(), theme::semibold(10.0), theme::ACCENT_BRIGHT);
-    let links = link.size() + 2.0 * HEIGHT_NOTE_LINK_PADDING;
-    let layout = note_layout(ui, "A Height connection is required.", theme::interface(9.0), width, links, HEIGHT_NOTE_HEIGHT);
+    let size = link.size() + 2.0 * HEIGHT_NOTE_LINK_PADDING;
+    let links = Vec2::new(size.x.max(HEIGHT_NOTE_LINK_MIN_WIDTH), size.y);
+    let layout = note_layout(ui, "A Height connection is required.", theme::interface(9.0), width, links);
     (layout, link)
 }
 
 /// `InfoHeightRef`: a green note `width` wide from `top_left` that a
 /// Height connection is needed, with its "Connect for me!" link on the
-/// right. Returns the note, and whether the link was clicked.
+/// right (its text centred in the link's least width). Returns the note,
+/// and whether the link was clicked.
 fn height_note(ui: &mut Ui, top_left: Pos2, width: f32) -> (Rect, bool) {
     let (layout, link_galley) = height_note_layout(ui, width);
     let (rect, links) = paint_note(ui, top_left, layout, theme::ACCENT_TRANSPARENT_GREEN, theme::ACCENT_STRONG_GREEN);
+    // Its own `Accent-Bright` outranks `Button-Link`'s hover colour.
     let link = ui.interact(links, ui.id().with("height-note-link"), Sense::click());
-    let color = if link.hovered() { theme::LABEL_EMPHASIS } else { theme::ACCENT_BRIGHT };
-    ui.painter().galley(links.min + HEIGHT_NOTE_LINK_PADDING, link_galley, color);
+    ui.painter().galley(links.center() - link_galley.size() / 2.0, link_galley, theme::ACCENT_BRIGHT);
     if link.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -524,9 +488,8 @@ fn header_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, commands: &mut Vec<C
 
     // `mnuIcon` (margin 8, 0, 4, 0), `mnuText` (margin 4, 3, 4, 4) and the
     // 8px `chevron-down-right` (margin 8, 1, 1, 1) at the bottom, in what
-    // the menus leave of the frame: the name is cut with "…"
-    // (`TextTrimming.CharacterEllipsis`) to keep the chevron clear of the
-    // presets menu, and nothing of them is drawn past it.
+    // the menus leave of the frame: a long name runs on to its edge, where
+    // it and the chevron after it are cut off.
     let (icon_name, icon_color, name) = match node {
         // `mnuText`: the name, and the type when the name is not it.
         Some(node) if node.name == node.type_name => (node_icon(&node.type_name), node_color(node), node.name.clone()),
@@ -540,9 +503,7 @@ fn header_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, commands: &mut Vec<C
     let icon_rect = Rect::from_min_size(Pos2::new(inner.left() + 8.0, inner.center().y - 8.0), Vec2::splat(icons::DEFAULT_SIZE));
     icons::paint(&family_ui, icon_rect, &icon_name, icon_color);
     let name_left = icon_rect.right() + 8.0;
-    let name_width = (family_rect.right() - (4.0 + 8.0 + 8.0 + 1.0) - name_left).max(0.0);
-    let name_galley = elided_galley(family_ui.painter(), &name, theme::interface(11.0), theme::MENU_FOREGROUND, name_width);
-    let elided = name_galley.elided;
+    let name_galley = family_ui.painter().layout_no_wrap(name, theme::interface(11.0), theme::MENU_FOREGROUND);
     let name_rect = Rect::from_min_size(Pos2::new(name_left, inner.center().y - name_galley.size().y / 2.0), name_galley.size());
     family_ui.painter().galley(name_rect.min, name_galley, theme::MENU_FOREGROUND);
     let arrow_rect = Rect::from_min_size(Pos2::new(name_rect.right() + 4.0 + 8.0, inner.bottom() - 1.0 - 8.0 - 4.0), Vec2::splat(8.0));
@@ -553,9 +514,7 @@ fn header_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, commands: &mut Vec<C
         let description = spec.and_then(|spec| spec.description.clone()).unwrap_or_default();
         let name_area = Rect::from_min_max(icon_rect.min, Pos2::new(arrow_rect.right(), inner.bottom())).intersect(family_rect);
         let response = ui.interact(name_area, ui.id().with("family-menu"), Sense::click());
-        // The whole name leads the tooltip when it is cut.
-        let tooltip = if elided { format!("{name}\n\n{family}\n\n{description}") } else { format!("{family}\n\n{description}") };
-        let response = response.tooltip(tooltip);
+        let response = response.tooltip(format!("{family}\n\n{description}"));
         crate::ui::graph_popups::family_menu(&response, editor, node, commands);
     }
 
@@ -963,11 +922,8 @@ fn convert_to_int32(value: f32) -> Option<i32> {
 }
 
 /// An editor row (`DockPanel`, margin 4): the editor, then its parameter
-/// menu docked right and centred down the row. The tooltip is `help`, led
-/// by the editor's name when it is cut short.
+/// menu docked right and centred down the row. The tooltip is `help`.
 fn editor_row(ui: &mut Ui, enabled: bool, help: Option<&str>, bind_type: BindType, automated: &Automated, control: impl FnOnce(&mut Ui) -> Edit) -> Edit {
-    // A name cut before this row is not its own.
-    editors::take_cut_name(ui.ctx());
     let mut frame = egui::Frame::new();
     frame.inner_margin = egui::Margin::same(ROW_MARGIN);
     let row = frame.show(ui, |ui| {
@@ -986,21 +942,10 @@ fn editor_row(ui: &mut Ui, enabled: bool, help: Option<&str>, bind_type: BindTyp
         ui.allocate_rect(Rect::from_min_size(top_left, Vec2::new(control_width + MENU_BUTTON_WIDTH, height)), Sense::hover());
         menu_edit.unwrap_or(control_edit)
     });
-    let cut_name = editors::take_cut_name(ui.ctx());
-    if let Some(tooltip) = row_tooltip(cut_name, help) {
-        row.response.tooltip(tooltip);
+    if let Some(help) = help {
+        row.response.tooltip(help);
     }
     row.inner
-}
-
-/// A row's tooltip: the whole name when its editor cut it short, then the
-/// help.
-fn row_tooltip(cut_name: Option<String>, help: Option<&str>) -> Option<String> {
-    match (cut_name, help) {
-        (Some(name), Some(help)) => Some(format!("{name}\n\n{help}")),
-        (Some(name), None) => Some(name),
-        (None, help) => help.map(str::to_string),
-    }
 }
 
 /// Parameters with a `[CustomEditor]`: the SatelliteMap library list, the curve
@@ -1278,38 +1223,53 @@ fn modifier_group_widths() -> [f32; 4] {
     inner.map(|width| width + 2.0 * GROUP_PADDING + 2.0)
 }
 
-/// The node-state menu's place in `area`: docked at its top right.
-fn state_menu_rect(area: Rect) -> Rect {
-    let min = Pos2::new(area.right() - STATE_MENU_RIGHT - STATE_MENU, area.top() + STATE_MENU_TOP);
-    Rect::from_min_size(min, Vec2::splat(STATE_MENU))
+/// `ModifierStack` laid out: the groups, the node-state menu and the part
+/// of the stack its `Border` has, and the stack's height.
+struct StackLayout {
+    groups: Vec<Rect>,
+    state_menu: Rect,
+    state_border: Rect,
+    height: f32,
 }
 
-/// Places the groups in `area` as a `WrapPanel` (margin 4) does: the
-/// first row wraps short of the state menu, kept as far from it as from
-/// each other, the rows under it at the full width; returns them and the
-/// height they need.
-fn layout_modifier_groups(area: Rect) -> (Vec<Rect>, f32) {
-    let left = area.left() + GROUP_MARGIN;
-    let right = area.right() - GROUP_MARGIN;
+/// `ModifierStack` from `area`'s top left across its width, as its
+/// `DockPanel` (`LastChildFill="False"`) lays it out: the groups'
+/// `WrapPanel` (margin 4) docked left and measured in the whole width, as
+/// wide as its widest row; the node-state menu's `Border` docked right in
+/// what that leaves, cut off there when that is less than it needs, the
+/// menu (`button` square, its item spilling `menu_margin` past the menu)
+/// right in it and centred down the stack.
+fn stack_layout(area: Rect, button: f32, menu_margin: f32) -> StackLayout {
+    let stack_left = area.left() + STACK_MARGIN_LEFT;
+    let wrap_left = stack_left + WRAP_MARGIN;
+    let wrap_right = area.right() - WRAP_MARGIN;
     let group_height = MODIFIER_BUTTON + 2.0 * GROUP_PADDING + 2.0;
     let row_height = group_height + 2.0 * GROUP_MARGIN;
-    let mut x = left;
-    let mut y = area.top() + GROUP_MARGIN;
-    let mut row_right = state_menu_rect(area).left() - GROUP_MARGIN;
+    let mut x = wrap_left;
+    let mut y = area.top() + WRAP_MARGIN;
+    let mut widest: f32 = 0.0;
     let mut groups = Vec::new();
     for width in modifier_group_widths() {
         let outer = width + 2.0 * GROUP_MARGIN;
-        if x > left && x + outer > row_right {
-            x = left;
+        if x > wrap_left && x + outer > wrap_right {
+            x = wrap_left;
             y += row_height;
-            row_right = right;
         }
-        let group = Rect::from_min_size(Pos2::new(x + GROUP_MARGIN, y + GROUP_MARGIN), Vec2::new(width, group_height));
-        groups.push(group);
+        groups.push(Rect::from_min_size(Pos2::new(x + GROUP_MARGIN, y + GROUP_MARGIN), Vec2::new(width, group_height)));
         x += outer;
+        widest = widest.max(x - wrap_left);
     }
-    let height = y + row_height + GROUP_MARGIN - area.top();
-    (groups, height)
+    let wrap_height = y + row_height + WRAP_MARGIN - area.top();
+    let wrap_width = WRAP_MARGIN + widest + WRAP_MARGIN;
+    let [margin_left, margin_top, margin_right, margin_bottom] = STATE_BORDER_MARGIN;
+    let height = wrap_height.max(margin_top + button + margin_bottom);
+    let border_wanted = margin_left + button + 2.0 * menu_margin + margin_right;
+    let border_width = (area.right() - stack_left - wrap_width).clamp(0.0, border_wanted);
+    let state_border = Rect::from_min_max(Pos2::new(area.right() - border_width, area.top()), Pos2::new(area.right(), area.top() + height));
+    let menu_right = state_border.right() - margin_right - menu_margin;
+    let menu_center = area.top() + margin_top + (height - margin_top - margin_bottom) / 2.0;
+    let state_menu = Rect::from_min_size(Pos2::new(menu_right - button, menu_center - button / 2.0), Vec2::splat(button));
+    StackLayout { groups, state_menu, state_border, height }
 }
 
 /// `ModifierToggleButton-IconX`: 24 square, a 14px icon; on, a pressed
@@ -1342,8 +1302,10 @@ fn modifier_toggle_button(ui: &mut Ui, toggle: &ModifierToggle, on: bool) -> egu
 fn modifier_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, node_id: i32, commands: &mut Vec<Command>, actions: &mut Vec<StateAction>) {
     let modifiers = editor.document.node(node_id).map(|node| node.modifiers.as_slice()).unwrap_or_default();
     let present: Vec<&str> = modifiers.iter().map(nerthus_engine::editing::modifier_name).collect();
-    let (groups, _) = layout_modifier_groups(rect);
-    for group in &groups {
+    let sizes = theme::sizes(ui.ctx());
+    let stack = stack_layout(rect, sizes.toolbar_button, sizes.toolbar_menu_margin);
+    let groups = &stack.groups;
+    for group in groups {
         toolbar_background(ui, *group, theme::PANEL_BORDER, 1.0);
     }
 
@@ -1395,10 +1357,14 @@ fn modifier_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, node_id: i32, comm
         }
     }
 
-    // The node-state menu, in the room the groups' first row leaves it.
-    let state_rect = state_menu_rect(rect);
+    // The node-state menu, cut off with its `Border` where the groups
+    // leave it too little.
+    if stack.state_border.width() <= 0.0 {
+        return;
+    }
     let saved_state = node_states::has_saved_state(ui);
-    let mut state_ui = ui.new_child(UiBuilder::new().max_rect(state_rect));
+    let mut state_ui = ui.new_child(UiBuilder::new().max_rect(stack.state_menu));
+    state_ui.shrink_clip_rect(stack.state_border);
     icon_menu(&mut state_ui, "arrow-back-up", "Node State", None, |ui| {
         state_items(ui, true, saved_state, commands, actions);
     });
@@ -1430,15 +1396,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_cut_name_leads_the_row_tooltip() {
-        let help = "Forces linear gamma correction.";
-        assert_eq!(row_tooltip(Some("Enforce Linear Gamma".to_string()), Some(help)).as_deref(), Some("Enforce Linear Gamma\n\nForces linear gamma correction."));
-        assert_eq!(row_tooltip(Some("Enforce Linear Gamma".to_string()), None).as_deref(), Some("Enforce Linear Gamma"));
-        assert_eq!(row_tooltip(None, Some(help)).as_deref(), Some(help));
-        assert_eq!(row_tooltip(None, None), None);
-    }
-
-    #[test]
     fn a_modifier_close_button_asks_unless_shift_is_held() {
         let mut document = Document::new();
         let perlin = document.add_node("Perlin", [26000.0, 26000.0]).unwrap();
@@ -1462,12 +1419,13 @@ mod tests {
     }
 
     #[test]
-    fn modifier_boxes_line_up_with_the_group_panels() {
+    fn modifier_boxes_keep_their_lists_own_margin() {
         let mut document = Document::new();
         let perlin = document.add_node("Perlin", [26000.0, 26000.0]).unwrap();
         document.toggle_modifier(perlin, "Blur");
         let node = document.node(perlin).unwrap().clone();
-        // Each size theme has its own `Expander.Margin`.
+        // The items host is 4 in from the list in both size themes, not
+        // the group panels' `Expander.Margin`.
         for compact in [false, true] {
             let context = egui::Context::default();
             theme::apply(&context);
@@ -1476,23 +1434,15 @@ mod tests {
             let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 600.0));
             let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
             let mut boxes = Vec::new();
-            let mut output = context.run_ui(input, |ui| {
+            let output = context.run_ui(input, |ui| {
                 let mut column = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 600.0))));
                 column.spacing_mut().item_spacing = Vec2::ZERO;
-                group_panel(&mut column, (perlin, 0), "Perlin", true, |ui| {
-                    ui.allocate_space(Vec2::new(ui.available_width(), 26.0));
-                });
                 boxes = modifier_list(&mut column, &node, perlin, 0, 300.0).boxes;
             });
-            let shapes = std::mem::take(&mut output.shapes);
             output.drop_without_applying_deltas();
-            let group = shapes.iter().find_map(|clipped| match &clipped.shape {
-                egui::Shape::Rect(rect) if rect.fill == theme::EXPANDER_BACKGROUND => Some(rect.rect),
-                _ => None,
-            });
-            let group = group.expect("the group panel is drawn");
             assert_eq!(boxes.len(), 1);
-            assert_eq!((boxes[0].left(), boxes[0].right()), (group.left(), group.right()), "compact: {compact}");
+            let sides = (boxes[0].left(), boxes[0].top(), boxes[0].right());
+            assert_eq!(sides, (4.0, 4.0, 296.0), "compact: {compact}");
         }
     }
 
@@ -1552,42 +1502,55 @@ mod tests {
     }
 
     #[test]
-    fn modifier_groups_leave_the_state_menu_its_slot() {
-        // From the add menu's group beside the menu (102) to well past one
-        // row, off the origin as the toolbar is.
+    fn the_state_menu_takes_what_the_groups_leave() {
+        let (button, menu_margin) = (32.0, -5.0);
         for tenth in 1020..=8000 {
             let width = tenth as f32 / 10.0;
             let area = Rect::from_min_size(Pos2::new(37.5, 610.25), Vec2::new(width, 0.0));
-            let (groups, height) = layout_modifier_groups(area);
-            let state = state_menu_rect(area);
-            assert_eq!(groups.len(), 4);
-            for group in &groups {
-                // As far from the menu as from each other, or wholly under
-                // it.
-                let beside = group.right() + 2.0 * GROUP_MARGIN <= state.left() + 1e-3;
-                assert!(beside || group.top() >= state.bottom(), "width {width}: {group:?} meets the state menu {state:?}");
-                assert!(group.bottom() + 2.0 * GROUP_MARGIN <= area.top() + height + 1e-3, "width {width}: the measured height leaves out {group:?}");
+            let stack = stack_layout(area, button, menu_margin);
+            assert_eq!(stack.groups.len(), 4);
+            let border = stack.state_border;
+            assert_eq!(border.right(), area.right(), "width {width}");
+            // A group wider than the panel runs past it, cut off there.
+            let widest = modifier_group_widths().into_iter().fold(0.0, f32::max) + 2.0 * GROUP_MARGIN;
+            if width < STACK_MARGIN_LEFT + 2.0 * WRAP_MARGIN + widest {
+                continue;
             }
+            for group in &stack.groups {
+                // The `WrapPanel` ends where the `Border` starts.
+                assert!(group.right() + GROUP_MARGIN + WRAP_MARGIN <= border.left() + 1e-3, "width {width}: {group:?} meets the menu's border {border:?}");
+                assert!(group.bottom() + GROUP_MARGIN + WRAP_MARGIN <= area.top() + stack.height + 1e-3, "width {width}: the height leaves out {group:?}");
+            }
+            // With room, the menu 12 (less the item's spill of 5) in from
+            // the right and centred down the stack; otherwise cut off.
+            if border.width() >= 8.0 + 22.0 + 12.0 - 1e-3 {
+                assert_eq!(stack.state_menu.right(), area.right() - 7.0, "width {width}");
+            }
+            let middle = area.top() + 8.0 + (stack.height - 16.0) / 2.0;
+            assert!((stack.state_menu.center().y - middle).abs() < 1e-3, "width {width}");
         }
     }
 
     #[test]
-    fn modifier_groups_wrap_by_the_state_menu_only_on_the_first_row() {
+    fn the_groups_wrap_in_the_whole_width() {
         let rows = |width: f32| {
-            let (groups, _) = layout_modifier_groups(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 0.0)));
-            let mut tops: Vec<f32> = groups.iter().map(|group| group.top()).collect();
+            let stack = stack_layout(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 0.0)), 32.0, -5.0);
+            let mut tops: Vec<f32> = stack.groups.iter().map(|group| group.top()).collect();
             tops.dedup();
-            groups.iter().map(|group| tops.iter().position(|top| *top == group.top()).unwrap()).collect::<Vec<_>>()
+            stack.groups.iter().map(|group| tops.iter().position(|top| *top == group.top()).unwrap()).collect::<Vec<_>>()
         };
-        // The four groups (290 with their margins), the wrap panel's
-        // margins and the menu with the groups' spacing before it: 342.
-        assert_eq!(rows(342.0), [0, 0, 0, 0]);
-        assert_eq!(rows(341.0), [0, 0, 0, 1]);
-        assert_eq!(rows(320.0), [0, 0, 0, 1]);
-        // At the property panel's least width Drop/Invert goes down with
-        // Min/Max, which share the full width under the menu.
-        assert_eq!(rows(248.0), [0, 0, 1, 1]);
-        assert_eq!(rows(150.0), [0, 1, 2, 2]);
+        // The four groups (290 with their margins) in the wrap panel's
+        // margins of 4, past the stack's 0.2: 298.2, whatever the menu has.
+        assert_eq!(rows(298.2), [0, 0, 0, 0]);
+        assert_eq!(rows(298.1), [0, 0, 0, 1]);
+        assert_eq!(rows(256.0), [0, 0, 0, 1]);
+        assert_eq!(rows(224.2), [0, 0, 0, 1]);
+        assert_eq!(rows(224.1), [0, 0, 1, 1]);
+        assert_eq!(rows(150.2), [0, 1, 2, 2]);
+        assert_eq!(rows(150.1), [0, 1, 2, 3]);
+        // At the least property width the groups leave the menu no room.
+        let stack = stack_layout(Rect::from_min_size(Pos2::ZERO, Vec2::new(256.0, 0.0)), 32.0, -5.0);
+        assert!(stack.state_border.width() < 42.0);
     }
 
     /// Runs `check` in a frame with the app's fonts.
@@ -1599,20 +1562,19 @@ mod tests {
     }
 
     #[test]
-    fn notes_keep_their_message_clear_of_their_links() {
+    fn notes_keep_their_message_beside_their_links() {
         with_ui(|ui| {
-            // From a property area a small window squeezes under its least
-            // width to well past where the messages fit on one row.
             for tenth in 1000..=8000 {
                 let width = tenth as f32 / 10.0;
                 for (name, layout) in [("port", port_note_layout(ui, width)), ("height", height_note_layout(ui, width).0)] {
-                    let inner = Rect::from_min_size(Pos2::ZERO, layout.size).shrink2(NOTE_PADDING).expand(1e-3);
+                    let inner = Rect::from_min_size(Pos2::ZERO, layout.size).shrink(NOTE_INSET).expand(1e-3);
                     let (message, links) = (layout.message, layout.links);
-                    assert!(inner.contains_rect(message), "{name} note {width} wide: its message {message:?} leaves {inner:?}");
                     assert!(inner.contains_rect(links), "{name} note {width} wide: its links {links:?} leave {inner:?}");
-                    let beside = message.right() + NOTE_GAP <= links.left() + 1e-3;
-                    let above = message.bottom() + NOTE_PADDING.y <= links.top() + 1e-3;
-                    assert!(beside || above, "{name} note {width} wide: its message {message:?} meets its links {links:?}");
+                    assert_eq!(links.right(), layout.size.x - NOTE_INSET, "{name} note {width} wide");
+                    assert!((message.left() - (NOTE_INSET + NOTE_TEXT_PADDING.x)).abs() < 1e-3, "{name} note {width} wide: {message:?}");
+                    // Wrapped in what the links leave, less its padding.
+                    let rows_fit = layout.galley.rows.iter().all(|row| row.rect().width() <= links.left() - NOTE_TEXT_PADDING.x - message.left() + 1.0 || row.glyphs.len() <= 1 || row.text().split_whitespace().count() <= 1);
+                    assert!(rows_fit, "{name} note {width} wide: its message runs under its links");
                 }
             }
         });
@@ -1625,21 +1587,16 @@ mod tests {
             // side.
             let width = crate::ui::MIN_PROPERTIES - 32.0;
             for (name, layout) in [("port", port_note_layout(ui, width)), ("height", height_note_layout(ui, width).0)] {
-                assert!(layout.message.right() + NOTE_GAP <= layout.links.left(), "{name} note: its message goes above its links");
+                assert!(layout.message.right() + NOTE_TEXT_PADDING.x <= layout.links.left() + 0.5, "{name} note: its message runs under its links");
                 assert!(layout.galley.rows.len() <= 2, "{name} note: its message takes more than two rows");
             }
         });
     }
 
     /// A Combine node (a command row, the port note, a parameter group)
-    /// in the property area `height` high at its least width: the area,
-    /// and what it drew there.
-    fn combine_shown(height: f32) -> (Rect, Vec<egui::epaint::ClippedShape>) {
-        combine_shown_with(height, |_, _| {}, Vec::new())
-    }
-
-    /// `combine_shown` once `setup` has had the editor and the node, and
-    /// after a frame for each of `events`.
+    /// in the property area `height` high at its least width, once `setup`
+    /// has had the editor and the node, and after a frame for each of
+    /// `events`: the area, and what it drew there.
     fn combine_shown_with(height: f32, setup: impl FnOnce(&mut Editor, i32), events: Vec<Vec<egui::Event>>) -> (Rect, Vec<egui::epaint::ClippedShape>) {
         let mut document = Document::new();
         let combine = document.add_node("Combine", [26000.0, 26000.0]).unwrap();
@@ -1694,17 +1651,6 @@ mod tests {
         }
     }
 
-    /// The frames' events that scroll what is at `position` as far down
-    /// as it goes: the pointer moved there, then a trackpad swipe, taken
-    /// whole in its frame (a wheel's is spread over the frames after,
-    /// where what scrolls under the pointer could take the rest).
-    fn wheel_down_at(position: Pos2) -> Vec<Vec<egui::Event>> {
-        let swipe = |phase, y| egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, y), phase, modifiers: egui::Modifiers::NONE };
-        let start = swipe(egui::TouchPhase::Start, 0.0);
-        let down = swipe(egui::TouchPhase::Move, -10_000.0);
-        vec![vec![egui::Event::PointerMoved(position)], vec![start, down], vec![swipe(egui::TouchPhase::End, 0.0)], Vec::new()]
-    }
-
     /// The texts drawn, each with the part of it that shows.
     fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect)> {
         let text = |clipped: &egui::epaint::ClippedShape| match &clipped.shape {
@@ -1715,7 +1661,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_name_shows_whole_in_its_row_tooltip() {
+    fn a_dropdown_name_wraps_and_the_row_tooltip_is_its_help() {
         let mut document = Document::new();
         let mesher = document.add_node("Mesher", [26000.0, 26000.0]).unwrap();
         let mut editor = Editor::new(document);
@@ -1724,7 +1670,7 @@ mod tests {
         theme::apply(&context);
         context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
         // At its least width the area shows the enum as a dropdown, its
-        // name cut to the 100 column.
+        // name wrapped in the 100 column.
         let rect = Rect::from_min_size(Pos2::new(10.0, 50.0), Vec2::new(crate::ui::MIN_PROPERTIES - 4.0, 900.0));
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0));
         let mut frame = |events: Vec<egui::Event>| {
@@ -1741,88 +1687,20 @@ mod tests {
         for _ in 0..3 {
             shown = frame(Vec::new());
         }
-        let (_, label) = shown.iter().find(|(text, _)| text == name).expect("the name is drawn");
+        let (_, label) = shown.iter().find(|(text, _)| text == name).expect("the name is drawn whole");
         frame(vec![egui::Event::PointerMoved(label.center())]);
-        let tooltip = format!("{name}\n\n{help}");
-        let shows = (0..120).any(|_| frame(Vec::new()).iter().any(|(text, _)| *text == tooltip));
-        assert!(shows, "no tooltip says {tooltip:?}");
+        let shows = (0..120).any(|_| frame(Vec::new()).iter().any(|(text, _)| *text == help));
+        assert!(shows, "no tooltip says {help:?}");
     }
 
     #[test]
-    fn seeds_show_whole_at_the_least_width() {
-        let mut document = Document::new();
-        let reseed = document.add_node("Reseed", [26000.0, 26000.0]).unwrap();
-        let mut editor = Editor::new(document);
-        editor.select(Some(reseed));
-        let context = egui::Context::default();
-        theme::apply(&context);
-        egui_extras::install_image_loaders(&context);
-        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
-        let rect = Rect::from_min_size(Pos2::new(10.0, 50.0), Vec2::new(crate::ui::MIN_PROPERTIES - 4.0, 900.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0));
-        // One the dice draws, one typed, and the longest an `Int32` takes.
-        for seed in [58077, 1999999, i64::from(i32::MIN)] {
-            editor.document.set_value(reseed, "Seed", Value::from(seed));
-            let mut shapes = Vec::new();
-            for _ in 0..3 {
-                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-                let mut commands = Vec::new();
-                let mut output = context.run_ui(input, |ui| show(ui, rect, &mut editor, &mut commands));
-                shapes = std::mem::take(&mut output.shapes);
-                output.drop_without_applying_deltas();
-            }
-            let shown = seed.to_string();
-            let drawn = shapes.iter().find_map(|clipped| match &clipped.shape {
-                egui::Shape::Text(text) if text.galley.text() == shown => Some((text, clipped.clip_rect)),
-                _ => None,
-            });
-            let (text, clip) = drawn.expect("the seed is drawn");
-            assert!(!text.galley.elided, "{shown} is trimmed");
-            assert!(clip.contains_rect(text.visual_bounding_rect()), "{shown} is clipped: {:?} leaves {clip:?}", text.visual_bounding_rect());
-            // The name keeps clear of the button.
-            let name = texts(&shapes).into_iter().find(|(text, _)| text == "Seed").expect("the name is drawn").1;
-            assert!(name.right() < clip.left(), "the name {name:?} runs into the button {clip:?}");
-        }
-    }
-
-    #[test]
-    fn the_parameters_keep_above_the_modifier_toolbar_at_the_least_height() {
-        let width = crate::ui::MIN_PROPERTIES - 4.0;
-        let least = least_height(width);
-        let (rect, shapes) = combine_shown(least);
-        let toolbar_top = rect.bottom() - modifier_panel_height(rect.width());
-        let shown = texts(&shapes);
-        for (text, visible) in &shown {
-            assert!(!visible.is_positive() || visible.bottom() <= toolbar_top + 0.5, "{text:?} shows at {visible:?}, over the modifier toolbar from {toolbar_top}");
-        }
-        // The command row, the group and its first row show; the port
-        // note steps aside for them.
-        let showing = |name: &str| shown.iter().any(|(text, visible)| text == name && visible.is_positive());
-        assert!(showing("Swap Inputs") && showing("Combine") && showing("Ratio"), "{shown:?}");
-        let note = "This node can add additional input ports.";
-        assert!(!showing(note));
-        // With room for it, the note shows too, above the toolbar.
-        let (_, shapes) = combine_shown(least + 60.0);
-        let shown = texts(&shapes);
-        let note_shown = shown.iter().find(|(text, _)| text == note).expect("the port note shows");
-        assert!(note_shown.1.bottom() <= rect.top() + least + 60.0 - modifier_panel_height(rect.width()));
-        // Everything fits: the area does not scroll.
-        let swap_inputs = |shapes: &[egui::epaint::ClippedShape]| texts(shapes).into_iter().find(|(text, _)| text == "Swap Inputs");
-        let header = Pos2::new(rect.center().x, rect.top() + 20.0);
-        let (_, scrolled) = combine_shown_with(least, |_, _| {}, wheel_down_at(header));
-        assert_eq!(swap_inputs(&scrolled), swap_inputs(&combine_shown(least).1));
-    }
-
-    #[test]
-    fn a_short_area_scrolls_to_the_modifier_toolbar_under_the_parameters() {
+    fn the_modifier_stack_keeps_to_the_foot_and_the_parameters_to_what_is_left() {
         let width = crate::ui::MIN_PROPERTIES - 4.0;
         let least = least_height(width);
         let error = "Input B is not connected.";
-        // As on a screen too small for the least window, and where a
-        // warning or the locked-preview alert takes room of its own.
         let cases = [
+            ("the least height", least, None),
             ("70 short", least - 70.0, None),
-            ("as short as the toolbar", least - modifier_panel_height(width), None),
             ("a warning", least, Some(error)),
             ("the locked-preview alert", least - 30.0, Some(DESCENDANT_ALERT)),
         ];
@@ -1839,44 +1717,35 @@ mod tests {
                 None => {}
             };
             let (rect, shapes) = combine_shown_with(height, setup, Vec::new());
-            // The command row, the message, the group and its first row
-            // show, the toolbar under them rather than over them; the port
-            // note steps aside.
+            // The stack at the area's foot, nothing shown over it.
             assert_no_text_under_the_modifier_groups(&shapes);
+            let stack_top = rect.bottom() - modifier_stack_height(rect.width(), &theme::DEFAULT_SIZES);
+            for (group, _) in modifier_groups(&shapes) {
+                assert!(group.top() >= stack_top - 0.5 && group.bottom() <= rect.bottom() + 0.5, "{case}: a group at {group:?}");
+            }
+            // The port note always shows, above the stack.
             let shown = texts(&shapes);
-            let showing = |name: &str| shown.iter().find(|(text, visible)| text == name && visible.is_positive()).map(|(_, visible)| *visible);
-            for name in ["Swap Inputs", "Combine"].into_iter().chain(message) {
-                assert!(showing(name).is_some(), "{case}: {name:?} does not show in {shown:?}");
+            let note = shown.iter().find(|(text, visible)| text == "This node can add additional input ports." && visible.is_positive());
+            let note = note.unwrap_or_else(|| panic!("{case}: the port note does not show"));
+            assert!(note.1.bottom() <= stack_top, "{case}: the port note at {:?}", note.1);
+            for name in ["Swap Inputs"].into_iter().chain(message) {
+                assert!(shown.iter().any(|(text, visible)| text == name && visible.is_positive()), "{case}: {name:?} does not show");
             }
-            assert!(showing("This node can add additional input ports.").is_none(), "{case}");
-            let ratio = showing("Ratio").unwrap_or_else(|| panic!("{case}: Ratio does not show in {shown:?}"));
-            let groups = modifier_groups(&shapes);
-            assert!(groups.iter().all(|(group, _)| group.top() >= ratio.bottom()), "{case}: {groups:?} not under Ratio at {ratio:?}");
-            // Some of it is past the area's foot, to scroll to.
-            assert!(groups.iter().any(|(group, _)| group.bottom() > rect.bottom()), "{case}: {groups:?}");
-
-            // Scrolled to the foot, the toolbar shows whole, still under
-            // the parameters.
-            let header = Pos2::new(rect.center().x, rect.top() + 20.0);
-            let (rect, shapes) = combine_shown_with(height, setup, wheel_down_at(header));
-            assert_no_text_under_the_modifier_groups(&shapes);
-            for (group, visible) in modifier_groups(&shapes) {
-                assert!(rect.contains_rect(group) && visible == group, "{case}: a modifier group at {group:?} does not show whole in {rect:?}");
-            }
-            let ratio = texts(&shapes).into_iter().find(|(text, visible)| text == "Ratio" && visible.is_positive());
-            assert!(ratio.is_some(), "{case}: scrolled, Ratio does not show");
         }
     }
 
     #[test]
-    fn notes_keep_their_height_when_the_message_fits_on_a_row() {
+    fn notes_are_as_high_as_their_message_or_links() {
         with_ui(|ui| {
             let port = port_note_layout(ui, 600.0);
             assert_eq!(port.galley.rows.len(), 1);
-            assert_eq!(port.size.y, PORT_NOTE_HEIGHT);
-            let (height, _) = height_note_layout(ui, 600.0);
+            let message = port.galley.size().y + 2.0 * NOTE_TEXT_PADDING.y;
+            assert_eq!(port.size.y, message.max(PORT_NOTE_CLOSE) + 2.0 * NOTE_INSET);
+            let (height, link) = height_note_layout(ui, 600.0);
             assert_eq!(height.galley.rows.len(), 1);
-            assert_eq!(height.size.y, HEIGHT_NOTE_HEIGHT);
+            let message = height.galley.size().y + 2.0 * NOTE_TEXT_PADDING.y;
+            let link = link.size().y + 2.0 * HEIGHT_NOTE_LINK_PADDING.y;
+            assert_eq!(height.size.y, message.max(link) + 2.0 * NOTE_INSET);
         });
     }
 

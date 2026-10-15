@@ -192,7 +192,7 @@ struct Entry {
     ignore: bool,
 }
 
-/// The OJPEG codec's tags.
+/// The OJPEG codec's tags, and what it makes of the directory.
 #[derive(Clone, Debug, Default)]
 pub(super) struct OldJpegTags {
     pub proc: Option<u16>,
@@ -202,6 +202,15 @@ pub(super) struct OldJpegTags {
     pub q_tables: Vec<u64>,
     pub dc_tables: Vec<u64>,
     pub ac_tables: Vec<u64>,
+    /// Whether the striles' offsets and byte counts were in the
+    /// directory (the codec reads them itself, and fails without them).
+    pub strip_offsets_set: bool,
+    pub strip_byte_counts_set: bool,
+    /// The subsampling the codec reports, corrected from the stream.
+    pub subsampling: (u16, u16),
+    /// The stream's sampling factors are ones TIFF can't express, so
+    /// libjpeg upsamples.
+    pub force_desubsampling: bool,
 }
 
 /// `TIFFDirectory`: what the reader needs of the first directory.
@@ -852,6 +861,8 @@ impl<'a> Tiff<'a> {
         if self.dir.strip_offsets.len() < strip_count as usize {
             self.dir.strip_offsets.resize(strip_count as usize, 0);
         }
+        self.dir.old_jpeg.strip_offsets_set = offsets_set;
+        self.dir.old_jpeg.strip_byte_counts_set = counts_set;
 
         // Samples beyond the photometric's colours are extra samples.
         // A missing photometric reads as 0, min-is-white.
@@ -1296,6 +1307,11 @@ impl<'a> Tiff<'a> {
         }
         if compression == COMPRESSION_JPEG {
             super::jpeg::fixup_subsampling(self);
+        }
+        // The directory's own checks ask for the scanline size, whose
+        // YCbCr subsampling the old-style codec corrects from the stream.
+        if compression == COMPRESSION_OJPEG {
+            super::ojpeg::correct_subsampling(self);
         }
         Ok(())
     }

@@ -10,6 +10,7 @@ members = [
     "crates/nerthus-nodes",
     "crates/nerthus-assimp",
     "crates/nerthus-io",
+    "crates/nerthus-hevc",
     "crates/nerthus-export",
     "crates/nerthus-render",
     "crates/nerthus-app",
@@ -34,6 +35,9 @@ nerthus-compute = { path = "crates/nerthus-compute" }
 nerthus-nodes = { path = "crates/nerthus-nodes" }
 nerthus-assimp = { path = "crates/nerthus-assimp" }
 nerthus-io = { path = "crates/nerthus-io" }
+nerthus-hevc = { path = "crates/nerthus-hevc" }
+# AV1 for AVIF: a Rust port of dav1d, without its assembly (no nasm needed).
+rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 nerthus-export = { path = "crates/nerthus-export" }
 nerthus-render = { path = "crates/nerthus-render" }
 
@@ -137,6 +141,13 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 debug = false
+
+# openjp2 0.6.1 frees code blocks it never decoded with a null pointer
+# (`opj_tcd_code_block_dec_deallocate`). The system allocator takes a null
+# free, but the standard library's debug checks abort on it, so they are off
+# for that crate (release builds never have them).
+[profile.dev.package.openjp2]
+debug-assertions = false
 
 [profile.release]
 opt-level = 3

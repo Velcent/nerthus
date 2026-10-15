@@ -16,7 +16,7 @@ use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::data_view::{section_title, subtle_button, toolbar, toolbar_divider, toolbar_row};
-use crate::ui::editors::{dropdown_box, fitted_line};
+use crate::ui::editors::dropdown_box;
 use crate::ui::widgets::{check_item, dialog, dialog_button, icon_button, icon_menu, icon_menu_sized, menu_caption, menu_item, menu_item_enabled, menu_separator, Tooltips};
 
 /// `cboResolution`'s items: the size and its text.
@@ -117,7 +117,7 @@ fn confirm_format(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState) {
         let title = egui::RichText::new("Update file format").font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS);
         ui.label(title);
         ui.add_space(6.0);
-        ui.label("Do you want to change the file format for all nodes?");
+        ui.label("Do you want change file format for all nodes");
         ui.add_space(12.0);
         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -167,11 +167,10 @@ fn build_settings(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, comm
     // `ReloadBuildSettings`: with a region to build, its size.
     let region = definition.portion.as_ref().and_then(|portion| editor.document.regions().into_iter().find(|region| region.name == portion.name));
     let resolution = region.as_ref().map(|region| region.size.max(0) as usize).unwrap_or(definition.resolution);
-    let current = resolution.to_string();
     let shown = RESOLUTIONS.iter().find(|(size, _)| *size == resolution).map(|(_, text)| *text).unwrap_or_default();
     let entries: Vec<(String, String)> = RESOLUTIONS.iter().map(|(size, text)| (size.to_string(), text.to_string())).collect();
     let id = ui.id().with("data-view-resolution");
-    let chosen = dropdown_box(ui, id, Some("Resolution"), 90.0, 26.0, shown, &entries, &current, theme::interface(12.0));
+    let chosen = dropdown_box(ui, id, Some("Resolution"), 90.0, 26.0, shown, &entries, theme::interface(12.0));
     let chosen_size = chosen.and_then(|value| value.parse::<u64>().ok());
     // `CboResolution_SelectionChanged`.
     match (chosen_size, region) {
@@ -383,17 +382,17 @@ fn savable(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, id: i32, co
     let mut menu_ui = ui.new_child(egui::UiBuilder::new().max_rect(menu_rect));
     icon_menu_sized(&mut menu_ui, "menu-deep", "Ports", None, Vec2::splat(24.0), |ui| ports_menu(ui, editor, &node, &export, commands));
 
-    // The name and the format share a 20 high line through the bar's centre.
+    // `displayLabel` (margin 8, 2, 8, 6) beside the format.
     let format_rect = Rect::from_min_max(Pos2::new(rect.right() - SAVABLE_FORMAT_COLUMN, bar.top()), Pos2::new(rect.right() - 6.0, bar.bottom()));
     let format_center = Rect::from_center_size(format_rect.center(), Vec2::new(format_rect.width(), 20.0));
-    let name_rect = Rect::from_min_max(Pos2::new(bar.right() + SAVABLE_MENU_COLUMN + 8.0, format_center.top()), Pos2::new(format_rect.left() - 8.0, format_center.bottom()));
+    let name_rect = Rect::from_min_max(Pos2::new(bar.right() + SAVABLE_MENU_COLUMN + 8.0, bar.top() + 2.0), Pos2::new(format_rect.left() - 8.0, bar.bottom() - 6.0));
     filename_field(ui, editor, state, &node, &export, name_rect, color);
 
     let mut format_ui = ui.new_child(egui::UiBuilder::new().max_rect(format_center));
     format_ui.add_enabled_ui(export.enabled, |ui| {
         let entries: Vec<(String, String)> = FileFormat::ALL.iter().map(|format| (format.name().to_string(), format.name().to_string())).collect();
         let format_id = ui.id().with(("data-view-format", id));
-        let chosen = dropdown_box(ui, format_id, None, 0.0, 20.0, export.format.name(), &entries, export.format.name(), theme::monospace(11.0));
+        let chosen = dropdown_box(ui, format_id, None, 0.0, 20.0, export.format.name(), &entries, theme::monospace(11.0));
         let chosen_format = chosen.and_then(|name| FileFormat::from_name(&name));
         if let Some(format) = chosen_format {
             editor.document.edit_export(id, "Export format", |settings| settings.format = format);
@@ -441,10 +440,10 @@ fn ports_menu(ui: &mut Ui, editor: &mut Editor, node: &nerthus_engine::NodeData,
     }
 }
 
-/// `displayLabel`: one line centred down `rect`, cut with an ellipsis
-/// while it isn't being typed in (the whole name in its tooltip). Saved
-/// on Enter or Tab (empty: the node's name); Escape puts the saved name
-/// back.
+/// `displayLabel`: a text box over `rect` (padding 4, 2, 4, 0), its line
+/// centred down it (`VerticalContentAlignment`), a long name cut off at
+/// its end. Saved on Enter or Tab (empty: the node's name); Escape puts
+/// the saved name back.
 fn filename_field(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, node: &nerthus_engine::NodeData, export: &ExportSettings, rect: Rect, color: Color32) {
     let index = match state.filenames.iter().position(|(node_id, _)| *node_id == node.id) {
         Some(index) => index,
@@ -454,39 +453,21 @@ fn filename_field(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, node
         }
     };
     let text_color = if export.enabled { color } else { theme::ACCENT_MUTED_RED };
-    let font = theme::semibold(11.0);
     let field_id = ui.id().with(("data-view-filename", node.id));
-    // The box's own text shows only while typing; otherwise the name is
-    // painted over it, cut to fit.
-    let typing = ui.memory(|memory| memory.has_focus(field_id));
+    // egui takes a custom frame's margin, not the edit's own.
     let mut frame = egui::Frame::NONE;
-    frame.inner_margin = egui::Margin::symmetric(4, 0);
+    frame.inner_margin = egui::Margin { left: 4, right: 4, top: 2, bottom: 0 };
     let mut edit = egui::TextEdit::singleline(&mut state.filenames[index].1);
     edit = edit.id(field_id);
     edit = edit.frame(frame);
-    edit = edit.font(font.clone());
-    edit = edit.text_color(if typing { text_color } else { Color32::TRANSPARENT });
+    edit = edit.font(theme::semibold(11.0));
+    edit = edit.text_color(text_color);
     edit = edit.desired_width(rect.width());
     edit = edit.min_size(Vec2::new(0.0, rect.height()));
     edit = edit.vertical_align(Align::Center);
     let mut field_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-    let shown = field_ui.add_enabled_ui(export.enabled, |ui| {
-        let output = edit.show(ui);
-        let response = output.response.response;
-        if typing {
-            return response;
-        }
-        let name = output.galley.text().to_string();
-        let galley = fitted_line(ui, &name, font, text_color, output.text_clip_rect.width());
-        let elided = galley.elided;
-        ui.painter().galley(output.galley_pos, galley, text_color);
-        if elided { response.tooltip(name) } else { response }
-    });
-    let response = shown.inner;
-    // Show the change of look on the next frame without waiting for input.
-    if response.has_focus() != typing {
-        ui.ctx().request_repaint();
-    }
+    field_ui.shrink_clip_rect(rect);
+    let response = field_ui.add_enabled(export.enabled, edit);
     let committed = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Tab));
     let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
     if committed {
@@ -512,7 +493,7 @@ mod tests {
     const LONG_NAME: &str = "export_file_name_that_is_rather_long_1_and_longer_still";
 
     /// A text a frame painted: what it says, whether it was cut short,
-    /// where its line sits and whether it shows.
+    /// what of its line shows and whether it shows.
     struct PaintedText {
         text: String,
         elided: bool,
@@ -547,7 +528,7 @@ mod tests {
             egui::Shape::Text(text) => Some(PaintedText {
                 text: text.galley.text().to_string(),
                 elided: text.galley.elided,
-                rect: text.galley.rect.translate(text.pos.to_vec2()),
+                rect: text.galley.rect.translate(text.pos.to_vec2()).intersect(clipped.clip_rect),
                 shows: text.galley.job.sections.iter().any(|section| section.format.color.a() > 0),
             }),
             _ => None,
@@ -560,16 +541,19 @@ mod tests {
     }
 
     #[test]
-    fn a_long_file_name_is_cut_short_level_with_its_format() {
+    fn a_long_file_name_is_cut_off_at_its_box() {
         let (context, mut editor, mut state, id) = long_named_row();
         row_frame(&context, &mut editor, &mut state, id, Vec::new());
         let texts = row_frame(&context, &mut editor, &mut state, id, Vec::new());
         let name = shown(&texts, LONG_NAME);
         let format = shown(&texts, FileFormat::Png16.name());
-        assert!(name.elided, "the name is cut short with an ellipsis");
+        // Laid out whole, cut off at the box short of the format.
+        assert!(!name.elided, "the name is cut short with an ellipsis");
         assert!(name.rect.right() <= format.rect.left(), "the name {:?} runs into the format {:?}", name.rect, format.rect);
+        // The box is 2 down and 6 up in the bar (margin 8, 2, 8, 6), its
+        // text 2 further down: its line a point above the format's.
         let offset = name.rect.center().y - format.rect.center().y;
-        assert!(offset.abs() <= 0.5, "the name's line sits {offset} below the format's");
+        assert!((offset + 1.0).abs() <= 0.75, "the name's line sits {offset} below the format's");
     }
 
     #[test]

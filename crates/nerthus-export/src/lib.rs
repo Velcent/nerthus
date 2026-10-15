@@ -18,7 +18,6 @@ pub mod report;
 pub mod swarm;
 pub mod tiff;
 pub mod tiles;
-mod ycc_map;
 
 pub use build::{BuildDefinition, BuildEvent, BuildRefusal, BuildReport, ExportPreferences, RunOptions};
 pub use format::{clamp_for_export, write_map, FileFormat, WriteOptions};

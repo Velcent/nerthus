@@ -13,7 +13,7 @@ mod luv;
 mod lzw;
 mod next;
 mod ojpeg;
-mod quantum;
+
 mod read;
 mod rgba;
 mod thunder;
@@ -25,7 +25,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::pixel_cache::{CacheColorspace, ImageType, PixelCache, PixelChannel, DEFAULT_GAMMA};
 use directory::*;
-use quantum::{Picture, QuantumInfo, QuantumType};
+use super::quantum::{self, Picture, QuantumInfo, QuantumType};
 use read::Decoder;
 
 /// `MagickMaxBufferExtent`: ImageMagick memory-maps larger files.

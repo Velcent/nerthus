@@ -624,7 +624,10 @@ fn show_dialogs(_main_thread: NonSendMarker, mut editor: ResMut<Editor>) {
             if let Some(folder) = editor.user.locations.folder(locations::OPEN) {
                 dialog = dialog.set_directory(folder);
             }
+            // Cancelled, there is no file to read: the repair fails.
             let Some(path) = pick_file(editor, dialog) else {
+                log::error!("Failed to repair file. No file was picked.");
+                editor.report("Fail: Repair attempt failed.");
                 return;
             };
             repair(editor, &path);
@@ -819,10 +822,10 @@ fn pick_file(editor: &mut Editor, dialog: rfd::FileDialog) -> Option<PathBuf> {
     picked
 }
 
-/// File › Repair File… (`RepairFile`): a new project holding the chosen
-/// file's graph, read as File › Open reads it and imported tab by tab, in
-/// place of the new project's empty first tab. A file that cannot be read
-/// leaves the open project as it was.
+/// File › Repair File… (`RepairFile`), the new project already up: the
+/// chosen file's graph, read as File › Open reads it and imported tab by
+/// tab, in place of the new project's empty first tab. A file that cannot
+/// be read leaves the new project empty.
 fn repair(editor: &mut Editor, path: &Path) {
     let stem = path.file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_default();
     let project = std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|text| nerthus_engine::Project::parse(&text).map_err(anyhow::Error::from));
@@ -834,7 +837,6 @@ fn repair(editor: &mut Editor, path: &Path) {
             return;
         }
     };
-    new_project(editor);
     editor.document.import_terrain(project.terrain(), &stem);
     editor.document.delete_graph_tab(0);
     editor.changed();
@@ -890,23 +892,20 @@ mod tests {
     }
 
     #[test]
-    fn repair_keeps_the_project_until_a_file_is_read() {
-        let mut document = Document::new();
-        let mountain = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
-        let mut editor = Editor::new(document);
-        let ridge = PathBuf::from("Ridge.terrain");
-        editor.document.path = Some(ridge.clone());
+    fn repair_imports_into_the_new_project_or_leaves_it_empty() {
+        let mut editor = Editor::new(Document::new());
+        // Repair File has closed the project for a new one by now.
+        new_project(&mut editor);
         let folder = std::env::temp_dir().join(format!("nerthus-repair-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let broken = folder.join("Broken.terrain");
         std::fs::write(&broken, "not a project").unwrap();
         repair(&mut editor, &broken);
-        assert_eq!(editor.document.path, Some(ridge));
-        assert!(editor.document.terrain().nodes.contains_key(&mountain));
+        assert!(editor.document.terrain().nodes.is_empty());
         repair(&mut editor, &folder.join("Missing.terrain"));
-        assert!(editor.document.terrain().nodes.contains_key(&mountain));
+        assert!(editor.document.terrain().nodes.is_empty());
         std::fs::remove_dir_all(&folder).unwrap();
-        // A file that reads: a new, untitled project holding its graph.
+        // A file that reads: its graph in the new, untitled project.
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples/Alpine Valley.terrain");
         let text = std::fs::read_to_string(&example).unwrap();
         let nodes = nerthus_engine::Project::parse(&text).unwrap().terrain().nodes.len();

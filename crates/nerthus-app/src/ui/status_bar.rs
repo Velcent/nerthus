@@ -1,10 +1,10 @@
-//! The status bar (`Shell` `StatusBar`, padding 8, 0, 8, 2): the latest
-//! message on the left, cut short with "…" before the right-hand group
-//! and shown in full on hover; on the right, what the engine is doing, the
-//! compute device and memory (`Button-IconText`, monospace). The device
-//! button (`btnCPU`) shows only in CPU-only mode, or when the benchmark's
-//! fastest device is off; it opens Options at Compute. The memory button
-//! opens Clean Memory. Each says on hover what it shows and does.
+//! The status bar (`Shell` `StatusBar`, padding 8, 0, 8, 2): on the
+//! right, docked first, what the engine is doing, the compute device and
+//! memory (`Button-IconText`, monospace); the latest message takes what
+//! they leave on the left, cut off at its edge. The device button
+//! (`btnCPU`) shows only in CPU-only mode, or when the benchmark's fastest
+//! device is off; it opens Options. The memory button opens Clean Memory
+//! and lists the memory statistics on hover.
 
 use egui::{Align, Layout, Pos2, Rect, RichText, Sense, Ui, UiBuilder, Vec2};
 
@@ -13,14 +13,10 @@ use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::help_windows;
-use crate::ui::options_window::OptionsTab;
 use crate::ui::tool_commands::ToolCommand;
 use crate::ui::widgets::Tooltips;
 
 pub const HEIGHT: f32 = 20.0;
-
-/// The space between the end of the message and the right-hand group.
-const MESSAGE_GAP: f32 = 16.0;
 
 /// `BrushName.Teal`: the memory readout, once a version has started for
 /// the first time.
@@ -37,30 +33,33 @@ pub fn note_eco_mark() {
 }
 
 /// The memory readout is teal once a version has started for the first
-/// time before this start, the label colour until then.
-fn memory_colour() -> egui::Color32 {
+/// time before this start (set on the button itself, so its hover tint
+/// leaves it), the label colour until then.
+fn memory_colour() -> Option<egui::Color32> {
     note_eco_mark();
     let marked = ECO_MARKED.get().copied().unwrap_or(false);
-    if marked { MEMORY_COLOR } else { theme::LABEL_DEFAULT }
+    marked.then_some(MEMORY_COLOR)
 }
 
 /// `process_gib` is the process's memory (`SystemInformationDiagnosticsPlugin`).
 pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, process_gib: Option<f64>, commands: &mut Vec<Command>) {
     ui.painter().rect_filled(rect, 0.0, theme::WINDOW_BACKGROUND);
     let content = Rect::from_min_max(rect.min + Vec2::new(8.0, 0.0), rect.max - Vec2::new(8.0, 2.0));
-    // The right-hand group is laid out first, from the right edge, so the
+    // The right-hand group is docked first, from the right edge, so the
     // message has only the width it leaves.
     let builder = UiBuilder::new().max_rect(content).layout(Layout::right_to_left(Align::Center));
     let mut bar = ui.new_child(builder);
     bar.spacing_mut().item_spacing.x = 0.0;
     readout(&mut bar, editor, process_gib, commands);
 
-    bar.add_space(MESSAGE_GAP);
+    // `StatusText` (margin 0, -1, 0, 0) fills the rest, cut off where the
+    // engine's state begins.
+    let message_right = bar.min_rect().left();
     let message = editor.messages.last().cloned().unwrap_or_default();
-    let message_text = RichText::new(message).font(theme::interface(10.0)).color(theme::LABEL_DEFAULT);
-    bar.with_layout(Layout::left_to_right(Align::Center), |ui| {
-        ui.add(egui::Label::new(message_text).truncate());
-    });
+    let galley = ui.painter().layout_no_wrap(message, theme::interface(10.0), theme::LABEL_DEFAULT);
+    let room = Rect::from_x_y_ranges(content.left()..=message_right.max(content.left()), content.y_range());
+    let position = Pos2::new(room.left(), room.center().y - galley.size().y / 2.0 - 1.0);
+    ui.painter().with_clip_rect(room.intersect(ui.clip_rect())).galley(position, galley, theme::LABEL_DEFAULT);
 }
 
 /// The right-hand group, right to left: memory, the device, the Nahimic
@@ -79,11 +78,12 @@ fn readout(ui: &mut Ui, editor: &Editor, process_gib: Option<f64>, commands: &mu
         commands.push(Command::CleanMemory);
     }
     let device = if editor.compute.cpu_only { Some("CPU Only") } else { editor.compute.fastest_disabled.as_deref() };
-    if let Some(device) = device {
-        let device_button = icon_text(ui, "cpu-2", device, 10.0, theme::LABEL_DEFAULT);
-        if device_button.tooltip(device_tooltip(editor.compute.cpu_only)).clicked() {
-            commands.push(Command::ShowOptions(Some(OptionsTab::Compute)));
-        }
+    // `btnCPU` (`ShowOptionsDialog`): Options on the page it was last left
+    // at.
+    if let Some(device) = device
+        && icon_text(ui, "cpu-2", device, 10.0, None).clicked()
+    {
+        commands.push(Command::ShowOptions(None));
     }
     // `NahimicWarning`: shows the warning again.
     if crate::nahimic::detected() {
@@ -107,40 +107,33 @@ fn readout(ui: &mut Ui, editor: &Editor, process_gib: Option<f64>, commands: &mu
     ui.label(state_text);
 }
 
-/// The memory button's tooltip: what its two figures are, and what a
-/// click does.
+/// The memory button's tooltip (`ReadOut_Memory`'s figures): the cache,
+/// all of it hot, the rest of the process and the total.
 fn memory_tooltip(cached: f64, process_gib: Option<f64>) -> String {
-    let mut lines = vec![format!("Cache: {cached:.1} GB, the maps the nodes have built")];
-    if let Some(process) = process_gib {
-        lines.push(format!("Total: {process:.1} GB, all the memory Nerthus uses"));
-    }
-    lines.push(String::new());
-    lines.push("Click to clean memory.".to_string());
-    lines.join("\n")
-}
-
-/// The device button's tooltip: why it shows, and what a click does.
-fn device_tooltip(cpu_only: bool) -> &'static str {
-    if cpu_only {
-        "Nodes build on the CPU alone.\n\nClick to choose the compute devices in Options."
-    } else {
-        "The fastest device in the benchmark is not in use.\n\nClick to choose the compute devices in Options."
-    }
+    let process = process_gib.unwrap_or(cached);
+    let other = (process - cached).max(0.0);
+    format!("Memory Statistics\n\nTotal Cache: {cached:.1} GB\nHot Memory: {cached:.1} GB\nWarm Memory: 0.0 GB\nOther Uses: {other:.1} GB\nTotal Memory: {process:.1} GB")
 }
 
 /// `Button-IconText` (padding 8, 2; the icon as wide as `MinWidth` 16;
-/// the text 6 past it in monospace). Under the pointer it lights up: a
-/// fill that stands out from the bar, and the icon and text brighter.
-fn icon_text(ui: &mut Ui, icon: &str, text: &str, size: f32, color: egui::Color32) -> egui::Response {
+/// the text 6 past it in monospace, hand cursor). Under the pointer it
+/// takes `Button-Hover` (the bar's own colour) and the icon and text turn
+/// `Accent-Muted-Gray`, unless the button has a colour of its own
+/// (`color`), which the hover leaves as it is.
+fn icon_text(ui: &mut Ui, icon: &str, text: &str, size: f32, color: Option<egui::Color32>) -> egui::Response {
     // Laid out uncoloured, so the text takes the tint the icon does.
     let galley = ui.painter().layout_no_wrap(text.to_string(), theme::monospace(size), egui::Color32::PLACEHOLDER);
     let width = 8.0 + 16.0 + 6.0 + galley.size().x + 8.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, rect_height(ui)), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.hovered() {
-        ui.painter().rect_filled(rect, 2.0, theme::MENU_BACKGROUND_HOVER);
+        ui.painter().rect_filled(rect, 2.0, theme::BUTTON_HOVER);
     }
-    let tint = if response.hovered() { color.lerp_to_gamma(egui::Color32::WHITE, 0.5) } else { color };
+    let tint = match color {
+        Some(color) => color,
+        None if response.hovered() => theme::ACCENT_MUTED_GRAY,
+        None => theme::LABEL_DEFAULT,
+    };
     let icon_rect = Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.center().y - 8.0), Vec2::splat(16.0));
     icons::paint(ui, icon_rect, icon, tint);
     let text_position = Pos2::new(icon_rect.right() + 6.0, rect.center().y - galley.size().y / 2.0 + 0.5);
@@ -199,18 +192,14 @@ mod tests {
         })
     }
 
-    fn brightness(color: Color32) -> u32 {
-        u32::from(color.r()) + u32::from(color.g()) + u32::from(color.b())
-    }
-
     fn button(pos: Pos2, pressed: bool) -> Event {
         Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
     }
 
-    /// The button saying `label` lights up under the pointer, says
-    /// `tooltip` once the pointer rests on it, and gives `command` when
-    /// clicked.
-    fn check_button(editor: &Editor, label: &str, color: Color32, tooltip: &str, command: Command) {
+    /// The button saying `label`, `color` at rest, takes `Button-Hover` and
+    /// `hovered` under the pointer, says `tooltip` (if any) once the
+    /// pointer rests on it, and gives `command` when clicked.
+    fn check_button(editor: &Editor, label: &str, color: Color32, hovered: Color32, tooltip: Option<&str>, command: Command) {
         let context = themed_context();
         let (shapes, _) = frame(&context, editor, Vec::new());
         let resting = text_saying(&shapes, label).unwrap_or_else(|| panic!("{label} shows")).clone();
@@ -219,14 +208,14 @@ mod tests {
         assert_eq!(hover_fill(&shapes, point), None, "{label} has no fill at rest");
 
         let (shapes, _) = frame(&context, editor, vec![Event::PointerMoved(point)]);
-        let hovered = text_saying(&shapes, label).unwrap_or_else(|| panic!("{label} shows hovered"));
-        assert!(brightness(hovered.fallback_color) > brightness(color), "{label} brightens, not {:?}", hovered.fallback_color);
-        let fill = hover_fill(&shapes, point).unwrap_or_else(|| panic!("{label} is filled hovered"));
-        assert_ne!(fill, theme::WINDOW_BACKGROUND, "{label}'s fill shows against the bar");
-        assert!(brightness(fill) > brightness(theme::WINDOW_BACKGROUND), "{label}'s fill is lighter than the bar");
+        let shown = text_saying(&shapes, label).unwrap_or_else(|| panic!("{label} shows hovered"));
+        assert_eq!(shown.fallback_color, hovered, "{label} hovered");
+        assert_eq!(hover_fill(&shapes, point), Some(theme::BUTTON_HOVER), "{label}'s fill hovered");
 
-        let shown = (0..120).any(|_| text_saying(&frame(&context, editor, Vec::new()).0, tooltip).is_some());
-        assert!(shown, "{label} says {tooltip:?} on hover");
+        let said = |text: &str| (0..120).any(|_| text_saying(&frame(&context, editor, Vec::new()).0, text).is_some());
+        if let Some(tooltip) = tooltip {
+            assert!(said(tooltip), "{label} says {tooltip:?} on hover");
+        }
 
         frame(&context, editor, vec![button(point, true)]);
         let (_, commands) = frame(&context, editor, vec![button(point, false)]);
@@ -234,23 +223,27 @@ mod tests {
     }
 
     #[test]
-    fn the_memory_readout_explains_itself_and_opens_clean_memory() {
+    fn the_memory_readout_lists_the_statistics_and_opens_clean_memory() {
         let editor = Editor::new(Document::new());
         let tooltip = memory_tooltip(0.0, Some(PROCESS_GIB));
-        assert!(tooltip.contains("Cache: 0.0 GB") && tooltip.contains("Total: 1.3 GB"), "{tooltip}");
-        check_button(&editor, "0.0 GB / 1.3 GB", memory_colour(), &tooltip, Command::CleanMemory);
+        assert_eq!(tooltip, "Memory Statistics\n\nTotal Cache: 0.0 GB\nHot Memory: 0.0 GB\nWarm Memory: 0.0 GB\nOther Uses: 1.3 GB\nTotal Memory: 1.3 GB");
+        // Teal is the button's own colour, which the hover leaves.
+        let (rest, hovered) = match memory_colour() {
+            Some(color) => (color, color),
+            None => (theme::LABEL_DEFAULT, theme::ACCENT_MUTED_GRAY),
+        };
+        check_button(&editor, "0.0 GB / 1.3 GB", rest, hovered, Some(&tooltip), Command::CleanMemory);
     }
 
     #[test]
-    fn the_device_readout_explains_itself_and_opens_compute() {
+    fn the_device_readout_opens_options() {
         let mut editor = Editor::new(Document::new());
         editor.compute.cpu_only = true;
-        let command = Command::ShowOptions(Some(OptionsTab::Compute));
-        check_button(&editor, "CPU Only", theme::LABEL_DEFAULT, device_tooltip(true), command);
+        check_button(&editor, "CPU Only", theme::LABEL_DEFAULT, theme::ACCENT_MUTED_GRAY, None, Command::ShowOptions(None));
     }
 
     #[test]
-    fn a_long_message_stops_short_of_the_readout_and_shows_in_full_on_hover() {
+    fn a_long_message_is_cut_off_where_the_readout_begins() {
         let mut editor = Editor::new(Document::new());
         editor.compute.cpu_only = true;
         let folder = "/a very long directory name for testing recent paths overflow in nerthus/another nested folder level two/and a third";
@@ -259,27 +252,12 @@ mod tests {
         let context = themed_context();
         let (shapes, _) = frame(&context, &editor, Vec::new());
 
-        let shown = text_saying(&shapes, &message).expect("the message shows");
-        assert!(shown.galley.elided, "the message is cut short");
-        let message_rect = shown.visual_bounding_rect();
-        assert!(message_rect.left() >= BAR.left() + 8.0, "the message starts inside the bar: {message_rect:?}");
+        let shown = shapes.iter().find(|clipped| matches!(&clipped.shape, Shape::Text(shape) if shape.galley.text() == message)).expect("the message shows");
+        let Shape::Text(text) = &shown.shape else { unreachable!() };
+        assert!(!text.galley.elided, "the message is laid out whole");
+        assert!(text.visual_bounding_rect().left() >= BAR.left() + 8.0, "the message starts inside the bar");
         let state = text_saying(&shapes, "Idle").expect("the engine's state shows").visual_bounding_rect();
-        assert!(message_rect.right() + MESSAGE_GAP <= state.left(), "the message {message_rect:?} stops short of the state {state:?}");
-        for readout in ["CPU Only", "0.0 GB / 1.3 GB"] {
-            let readout_rect = text_saying(&shapes, readout).unwrap_or_else(|| panic!("{readout} shows")).visual_bounding_rect();
-            assert!(!message_rect.intersects(readout_rect), "the message {message_rect:?} clears {readout} {readout_rect:?}");
-        }
-
-        let point = message_rect.center();
-        frame(&context, &editor, vec![Event::PointerMoved(point)]);
-        let in_full = (0..120).any(|_| {
-            let (shapes, _) = frame(&context, &editor, Vec::new());
-            shapes.iter().any(|clipped| match &clipped.shape {
-                Shape::Text(shape) => shape.galley.text() == message && !shape.galley.elided,
-                _ => false,
-            })
-        });
-        assert!(in_full, "the whole message shows on hover");
+        assert!((shown.clip_rect.right() - state.left()).abs() < 1.0, "the message is cut off at {} rather than where the state begins, {}", shown.clip_rect.right(), state.left());
     }
 
     #[test]

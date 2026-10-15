@@ -6,17 +6,21 @@
 //! Space on a row with a submenu opens it on its first row; Left or
 //! Escape closes it back to its row (Escape in a menu is egui's, which
 //! closes it). In the main menu Left, and Right on a row without a
-//! submenu, go to the menu beside, and F10 opens File or closes the menu
-//! open (`bar`).
+//! submenu, go to the menu beside; F10 (or Alt let go alone) puts the
+//! menu bar in menu mode, and Alt with an item's access key opens it
+//! (`bar`).
 //!
 //! While the keys are in use the pointer neither highlights rows nor
 //! opens submenus, until it moves or presses.
 
 use egui::containers::menu::{find_menu_root, is_in_menu, MenuState};
-use egui::{Context, FocusDirection, Id, InputState, Key, Modifiers, Popup, Response, Ui, UiKind, Vec2};
+use egui::{Context, Event, FocusDirection, Id, InputState, Key, Modifiers, Popup, Response, Ui, UiKind, Vec2};
 
 /// Where the context keeps it.
 const KEYBOARD_ID: &str = "nerthus-menu-keys";
+/// Alt pressed and let go alone puts the menu bar in menu mode, as in
+/// Windows; on macOS Option types characters, so it does not there.
+const ALT_ENTERS_MENU_MODE: bool = !cfg!(target_os = "macos");
 
 /// What the menus drawn last showed, and where the keys are.
 #[derive(Clone, Default)]
@@ -34,6 +38,29 @@ struct Keyboard {
     focus_first: Option<(Id, u64)>,
     /// Left or Right asked for the menu beside, in the menu bar.
     step: Option<Step>,
+    /// Menu mode: the menu bar's item highlighted while none is open, and
+    /// the keys it took this pass.
+    bar_focus: Option<usize>,
+    bar_keys: BarKeys,
+    /// The menu bar's item open last pass.
+    bar_open: Option<usize>,
+    /// Alt is held, and nothing else has been pressed since it went down;
+    /// it was let go so this pass.
+    alt_held: bool,
+    alt_alone: bool,
+    alt_let_go_alone: bool,
+}
+
+/// The keys menu mode takes.
+#[derive(Clone, Copy, Default)]
+struct BarKeys {
+    left: bool,
+    right: bool,
+    /// Down, Enter or Space: open the item.
+    open: bool,
+    escape: bool,
+    /// A press of the pointer, anywhere, leaves menu mode.
+    pressed: bool,
 }
 
 #[derive(Clone)]
@@ -104,6 +131,11 @@ fn with<R>(ctx: &Context, f: impl FnOnce(&mut Keyboard) -> R) -> R {
 pub fn begin(ctx: &Context) {
     let pass = ctx.cumulative_pass_nr();
     let moved = ctx.input(|input| input.pointer.delta() != Vec2::ZERO || input.pointer.any_pressed());
+    note_alt(ctx);
+    // Menu mode takes its keys before anything else sees them.
+    let bar_mode = with(ctx, |keyboard| keyboard.bar_focus.is_some());
+    let bar_keys = if bar_mode { ctx.input_mut(take_bar_keys) } else { BarKeys::default() };
+    with(ctx, |keyboard| keyboard.bar_keys = bar_keys);
     let focused = ctx.memory(|memory| memory.focused());
     let ours = with(ctx, |keyboard| {
         keyboard.forget(pass, moved);
@@ -131,6 +163,38 @@ pub fn begin(ctx: &Context) {
     });
     if keys.any() {
         ctx.request_repaint();
+    }
+}
+
+/// Alt going down and up: let go with nothing pressed between, it asks
+/// for menu mode.
+fn note_alt(ctx: &Context) {
+    let (alt, other) = ctx.input(|input| {
+        let pressed = input.events.iter().any(|event| matches!(event, Event::Key { pressed: true, .. } | Event::Text(_)));
+        (input.modifiers.alt, pressed || input.pointer.any_pressed())
+    });
+    with(ctx, |keyboard| {
+        if alt && !keyboard.alt_held {
+            keyboard.alt_alone = true;
+        }
+        if other {
+            keyboard.alt_alone = false;
+        }
+        keyboard.alt_let_go_alone = ALT_ENTERS_MENU_MODE && !alt && keyboard.alt_held && keyboard.alt_alone;
+        keyboard.alt_held = alt;
+    });
+}
+
+fn take_bar_keys(input: &mut InputState) -> BarKeys {
+    let down = input.consume_key(Modifiers::NONE, Key::ArrowDown);
+    let enter = input.consume_key(Modifiers::NONE, Key::Enter);
+    let space = input.consume_key(Modifiers::NONE, Key::Space);
+    BarKeys {
+        left: input.consume_key(Modifiers::NONE, Key::ArrowLeft),
+        right: input.consume_key(Modifiers::NONE, Key::ArrowRight),
+        open: down || enter || space,
+        escape: input.consume_key(Modifiers::NONE, Key::Escape),
+        pressed: input.pointer.any_pressed(),
     }
 }
 
@@ -389,32 +453,85 @@ pub fn active(ctx: &Context) -> bool {
     with(ctx, |keyboard| keyboard.active)
 }
 
-/// The menu bar's part, once its menus (their popups' ids, in order) are
-/// drawn: F10 opens the first, or closes the one open; Left and Right in
-/// one open the one beside.
-pub fn bar(ctx: &Context, menus: &[Id]) {
+/// The menu bar's item highlighted in menu mode, for the bar to draw as
+/// under the pointer.
+pub fn bar_focus(ctx: &Context) -> Option<usize> {
+    with(ctx, |keyboard| keyboard.bar_focus)
+}
+
+/// The menu bar's part, once its menus (their popups' ids and access
+/// keys, in order) are drawn, as WPF's main menu takes keys. F10, or Alt
+/// let go alone, puts the bar in menu mode, its first item highlighted but
+/// not open, or takes it out of it, closing a menu open; Alt and an item's
+/// access key opens that item. In menu mode Left and Right go between the
+/// items, Down, Enter or Space open the one highlighted, and Escape or a
+/// press leaves; Escape out of an open menu comes back to its item. Left
+/// and Right in an open menu open the one beside.
+pub fn bar(ctx: &Context, menus: &[(Id, Key)]) {
     if menus.is_empty() {
         return;
     }
-    let open = menus.iter().position(|id| Popup::is_id_open(ctx, *id));
+    let count = menus.len();
+    let open = menus.iter().position(|(id, _)| Popup::is_id_open(ctx, *id));
     let step = with(ctx, |keyboard| keyboard.step.take());
     let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
+    let typing = ctx.egui_wants_keyboard_input();
     let f10 = !modal && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F10));
-    let target = match (open, step) {
-        (Some(open), _) if f10 => {
-            Popup::close_id(ctx, menus[open]);
-            ctx.request_repaint();
-            None
-        }
-        (None, _) if f10 => Some(0),
-        (Some(open), Some(Step::Back)) => Some((open + menus.len() - 1) % menus.len()),
-        (Some(open), Some(Step::Forward)) => Some((open + 1) % menus.len()),
-        _ => None,
+    let alt_alone = with(ctx, |keyboard| std::mem::take(&mut keyboard.alt_let_go_alone));
+    let toggled = f10 || (!modal && alt_alone);
+    // Alt and a key with no Ctrl, a system key: an access key.
+    let access = if modal || typing {
+        None
+    } else {
+        ctx.input_mut(|input| menus.iter().position(|(_, key)| input.consume_key(Modifiers::ALT, *key)))
     };
+    let escape = ctx.input(|input| input.key_pressed(Key::Escape));
+    let (focus, keys, was_open) = with(ctx, |keyboard| (keyboard.bar_focus, keyboard.bar_keys, keyboard.bar_open));
+
+    let mut target = None;
+    let mut next_focus = focus;
+    if let Some(index) = access {
+        target = Some(index);
+    } else if let Some(open_index) = open {
+        match step {
+            _ if toggled => {
+                Popup::close_id(ctx, menus[open_index].0);
+                next_focus = None;
+            }
+            Some(Step::Back) => target = Some((open_index + count - 1) % count),
+            Some(Step::Forward) => target = Some((open_index + 1) % count),
+            None => {}
+        }
+    } else if toggled {
+        next_focus = if focus.is_some() { None } else { Some(0) };
+    } else if let Some(closed) = was_open.filter(|_| escape) {
+        // Escape out of a menu: back to its item.
+        next_focus = Some(closed);
+    } else if let Some(index) = focus {
+        if keys.pressed || keys.escape {
+            next_focus = None;
+        } else if keys.open {
+            target = Some(index);
+        } else if keys.left {
+            next_focus = Some((index + count - 1) % count);
+        } else if keys.right {
+            next_focus = Some((index + 1) % count);
+        }
+    } else if was_open.is_some() {
+        next_focus = None;
+    }
+    if focus != next_focus || toggled {
+        ctx.request_repaint();
+    }
+    let still_open = target.or(open.filter(|_| !toggled));
+    with(ctx, |keyboard| {
+        keyboard.bar_focus = if still_open.is_some() { None } else { next_focus };
+        keyboard.bar_open = still_open;
+    });
     let Some(target) = target else {
         return;
     };
-    let popup = menus[target];
+    let popup = menus[target].0;
     Popup::open_id(ctx, popup);
     // The keys leave a text field for the menu.
     ctx.memory_mut(|memory| {

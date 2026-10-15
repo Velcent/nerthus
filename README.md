@@ -191,7 +191,7 @@ Its tools:
 
 ## Not done yet
 
-These parts of Gaea 2.0 are not in Nerthus yet.
+These parts of Gaea 2.3.1.0 are not in Nerthus yet.
 
 ### Graph
 
@@ -280,27 +280,52 @@ These parts of Gaea 2.0 are not in Nerthus yet.
 ### Files
 
 - Some images the File node reads differently from Gaea:
-  - EXR files with subsampled channels (luminance/chroma images, for
-    example) don't open.
-  - TIFF files compressed with old-style JPEG don't open.
-  - MIFF files in a colorspace other than sRGB, linear RGB, grey, CMYK, Lab
-    or XYZ (HSL, for example) don't open.
   - SVG drawings are drawn by resvg rather than librsvg and cairo, so their
     edges are antialiased a little differently.
-  - Animated WebP files don't open. Gaea reads their first frame.
-  - Camera raw files other than DNG (CR2, CR3, NEF, ARW, ORF, RAF, RW2 and
-    so on) don't open, and neither do a few rarer DNGs, such as Fuji
-    SuperCCD ones.
-  - Of the other formats ImageMagick reads, only TGA opens. It goes through
-    a general-purpose decoder at 8 bits per channel, so its pixels can
-    differ. PNM and PFM, ICO, PCX, QOI, HEIC, AVIF, JPEG XL and the rest
-    don't open.
+  - Camera raw files other than DNG (CR2, CR3, CRW, NEF, ARW, ORF, RAF,
+    RW2, PEF, SRW and so on) don't open yet. The port of LibRaw's
+    format-specific path that reads them is underway in
+    `crates/nerthus-io/src/coders/dng/tiff.rs` (unwired) and
+    `crates/nerthus-io/src/coders/dng/state.rs`, with the camera maker
+    notes, per-camera decoders and the post-open fix-ups still to write;
+    the DNG-only path, which opens DNG files exactly, is what's wired in.
+    Neither do a few rarer DNGs, such as Fuji SuperCCD ones, and a DNG
+    without a colour matrix of its own stays in the camera's colours,
+    where Gaea takes the camera's matrix from LibRaw's table.
+  - JPEG XL files don't open (Gaea links libjxl).
+  - PES embroidery files don't open (Gaea imports them as SVG drawings).
+  - TrueType and OpenType font files don't open (Gaea links FreeType and
+    prints a spec sheet of the glyphs through it).
+  - H.264-encoded HEIF and AVIF images don't open (Gaea links OpenH264;
+    H.265/HEVC and AV1 ones do open).
 
 ### Builds
 
-- On ARM computers such as Apple Silicon Macs, white noise made from
-  undefined (NaN) positions comes out differently from Gaea's, because ARM
-  and x86 processors give NaNs different bits.
+- BlobRemover with Enforce Quantization off fails ("Reduce complexity or
+  choose Enforce Quantization.") when its input has more than 65,536
+  separate patches of one value, as most heightfields larger than 256 × 256
+  pixels do. Gaea doesn't fail there: the node passes its input through
+  unchanged.
+- In projects from older versions of Gaea, ErosionPro, TextureBase,
+  Cellular3D, ThermalShaper and Debris nodes with a mask input can build
+  differently. Gaea reads the inputs those nodes gained later (Precipitation,
+  Guide, Gap, Intensity and Debris's Removal) by their place in the node's
+  list of inputs, and a mask input added before them comes first, so Gaea
+  reads the mask there instead. Nerthus reads these inputs by name. Gaea's
+  own Crater - Impact Blast example has an ErosionPro like this.
+- Trees and Shrubs now and then place a tree one row past the bottom of the
+  map (a random position comes out as exactly 1), as one of the Trees nodes
+  in Gaea's Trees - Multiple Ecotopes example does at 512 × 512. Gaea marks
+  just that node as failed (its log says "Index was outside the bounds of
+  the array."), the nodes fed by it report "The port In returned bad or no
+  data.", and the rest of the graph builds. Nerthus's build crashes
+  instead: `nerthus-build` stops, and the editor builds nothing more until
+  it's restarted.
+- Blurs wider than about 360 pixels can come out wrong: Blur at Radius 0.36
+  or more on a 1024 × 1024 build (0.09 or more at 4096), and other nodes
+  and modifiers that blur that far. Nerthus's fixed-point sums overflow on
+  rows that start with high values (values near 1 at 360 pixels, lower ones
+  for wider blurs), where Gaea's don't.
 
 ### Left out on purpose
 
@@ -312,8 +337,12 @@ These parts of Gaea 2.0 are not in Nerthus yet.
 - Drawing Windows metafiles (`.emf`) exactly as Windows does. Nerthus draws
   them itself, so edges and text differ slightly, and fonts that aren't
   installed are replaced by similar ones.
-- Reading EPS files. Gaea hands them to Ghostscript, a separately installed
-  program that draws them with its own fonts.
+- On Windows, a console window opens beside the editor every time it
+  starts. Gaea opens one only when it's started with `-Console`.
+- Reading EPS, PostScript and PDF files. Gaea hands them to Ghostscript, a
+  separately installed program that draws them with its own fonts.
+- Gaea's support services: Watson's support ticket form, and its upload of
+  crash logs to QuadSpinner in return for a Log Receipt code.
 - Gaea's interface fonts. Nerthus uses Roboto and Roboto Mono, so text is
   spaced a little differently and monospaced text is about a fifth wider.
 - The icons that are Gaea's own or licensed artwork, about 100 of them

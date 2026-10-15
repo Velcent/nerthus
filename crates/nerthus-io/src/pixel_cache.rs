@@ -5,7 +5,6 @@
 //! assigns. The File node reads the cache raw, so these details reach its
 //! maps.
 
-use std::io::Read;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -29,23 +28,11 @@ pub enum PixelChannel {
     Meta,
 }
 
-/// The colorspaces IM gives the files the File node reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CacheColorspace {
-    SRgb,
-    /// Linear RGB (`RGBColorspace`).
-    Rgb,
-    Gray,
-    LinearGray,
-    /// CMYK, as a PSD reads (ink amounts, not negated).
-    Cmyk,
-    /// CIE Lab, as a PSD reads.
-    Lab,
-    /// CIE XYZ, as a Radiance XYZE file reads.
-    Xyz,
-    /// YCbCr, as an uncompressed YCbCr TIFF reads.
-    YCbCr,
-}
+/// The colorspace IM gives an image (`ColorspaceType`): sRGB for most
+/// files, linear RGB, grey and linear grey, CMYK (ink amounts, not
+/// negated), CIE Lab and XYZ, YCbCr, and any other a MIFF names.
+pub use nerthus_image::colorspace_transform::Colorspace as CacheColorspace;
+pub use nerthus_image::colorspace_transform::TransformSettings;
 
 /// `image->type` as a reader leaves it. Writing pixels resets it to
 /// `UndefinedType`, so only readers that set it after their pixels give
@@ -82,12 +69,20 @@ pub struct PixelCache {
     /// entries' colours, but colorspace transforms rebuild them from it
     /// (`SyncImage`), so it matters where they don't.
     pub colormap: Vec<[f64; 4]>,
+    /// The image properties a transform to sRGB reads (Log film settings,
+    /// Jzazbz white luminance).
+    pub transform_settings: TransformSettings,
+    /// `image->alpha_trait`: whether IM counts the alpha channel. A reader
+    /// may clear it after the pixels are in, which leaves the channel in
+    /// the cache until something resyncs it.
+    pub alpha_trait: bool,
 }
 
 impl PixelCache {
     /// A `DirectClass` cache of undefined type.
     pub fn new(width: usize, height: usize, channels: Vec<PixelChannel>, data: Vec<f32>, colorspace: CacheColorspace, gamma: f64) -> Self {
-        Self { width, height, channels, data, colorspace, gamma, image_type: ImageType::Undefined, colormap: Vec::new() }
+        let alpha_trait = channels.contains(&PixelChannel::Alpha);
+        Self { width, height, channels, data, colorspace, gamma, image_type: ImageType::Undefined, colormap: Vec::new(), transform_settings: TransformSettings::default(), alpha_trait }
     }
 
     pub fn has_channel(&self, channel: PixelChannel) -> bool {
@@ -104,147 +99,90 @@ pub(crate) fn char_quantum(value: u8) -> f32 {
     257.0 * value as f32
 }
 
-/// The readers, by the format ImageMagick picks for a file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Format {
-    Png,
-    Jpeg,
-    Gif,
-    Bmp,
-    Tiff,
-    Exr,
-    Webp,
-    Jp2,
-    Dds,
-    Miff,
-    Svg,
-    Dng,
-    Psd,
-    Emf,
-    Sgi,
-    Hdr,
-    /// Anything else: the `image` crate.
-    Other,
-}
-
-/// Camera raw extensions, which name their format outright (LibRaw's).
-const RAW_EXTENSIONS: [&str; 31] = [
-    "dng", "3fr", "arw", "cr2", "cr3", "crw", "dcr", "dcraw", "erf", "fff", "iiq", "k25", "kdc", "mdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "pef", "raf", "raw", "rmf", "rw2", "rwl", "sr2", "srf",
-    "srw", "sti", "x3f",
-];
-
-/// The signatures IM recognises files by (its magic list), for the formats
-/// read here and the camera raws that share TIFF's; longer ones first.
-const SIGNATURES: [(usize, &[u8], Format); 33] = [
-    (0, b"MM\x00\x2a\x00\x00\x00\x12\x41\x50\x50\x4c\x45\x44\x4e\x47", Format::Dng),
-    (0, b"FUJIFILMCCD-RAW ", Format::Dng),
-    (0, b"\x00\x00\x00\x0c\x6a\x50\x20\x20\x0d\x0a\x87\x0a", Format::Jp2),
-    (0, b"II\x2a\x00\x10\x00\x00\x00CR\x02", Format::Dng),
-    (0, b"MM\x00\x2a\x00\x10\x00\x00RC\x02", Format::Dng),
-    (0, b"II\x1a\x00\x00\x00HEAPCCDR", Format::Dng),
-    (0, b"Id=ImageMagick", Format::Miff),
-    (0, b"id=ImageMagick", Format::Miff),
-    (0, b"#?RADIANCE", Format::Hdr),
-    (0, b"\x89PNG\r\n\x1a\n", Format::Png),
-    (0, b"IIRO\x08\x00\x00\x00", Format::Dng),
-    (0, b"IIU\x00\x08\x00\x00\x00", Format::Dng),
-    (0, b"IIU\x00\x18\x00\x00\x00", Format::Dng),
-    (0, b"II\x2b\x00\x08\x00\x00\x00", Format::Tiff),
-    (0, b"MM\x00\x2b\x00\x08\x00\x00", Format::Tiff),
-    (0, b"#?RGBE", Format::Hdr),
-    (0, b"\x76\x2f\x31\x01", Format::Exr),
-    (0, b"\x00MRM", Format::Dng),
-    (0, b"II\x2a\x00", Format::Tiff),
-    (0, b"MM\x00\x2a", Format::Tiff),
-    (0, b"\xff\x4f\xff\x51", Format::Jp2),
-    (0, b"\x0d\x0a\x87\x0a", Format::Jp2),
-    (0, b"8BPS", Format::Psd),
-    (0, b"8BPB", Format::Psd),
-    (0, b"GIF8", Format::Gif),
-    (0, b"DDS ", Format::Dds),
-    (0, b"\xff\xd8\xff", Format::Jpeg),
-    (0, b"BA", Format::Bmp),
-    (0, b"BM", Format::Bmp),
-    (0, b"CI", Format::Bmp),
-    (0, b"\x01\xda", Format::Sgi),
-    (8, b"WEBP", Format::Webp),
-    (40, b"\x20\x45\x4d\x46\x00\x00\x01\x00", Format::Emf),
-];
-
-/// The format by extension, when no signature decides.
-fn format_from_extension(extension: &str) -> Format {
-    match extension {
-        "png" | "png8" | "png24" | "png32" | "png48" | "png64" | "png00" => Format::Png,
-        "bmp" | "bmp2" | "bmp3" | "dib" => Format::Bmp,
-        "gif" | "gif87" => Format::Gif,
-        "jpg" | "jpeg" | "jpe" | "jps" | "pjpeg" | "mpo" => Format::Jpeg,
-        "tif" | "tiff" | "ptif" | "tiff64" | "group4" => Format::Tiff,
-        "exr" => Format::Exr,
-        "webp" => Format::Webp,
-        "jp2" | "j2k" | "j2c" | "jpc" | "jpm" | "jpt" => Format::Jp2,
-        "dds" | "dxt1" | "dxt5" => Format::Dds,
-        "miff" => Format::Miff,
-        "svg" | "svgz" | "msvg" | "rsvg" => Format::Svg,
-        "psd" | "psb" => Format::Psd,
-        "emf" | "wmf" => Format::Emf,
-        "sgi" => Format::Sgi,
-        "hdr" => Format::Hdr,
-        _ => Format::Other,
-    }
-}
-
-/// `SetImageInfo`: a camera raw extension names its format; otherwise the
-/// file's leading bytes decide, and the extension only when they match no
-/// known signature.
-fn detect_format(path: &Path, extension: &str) -> Result<Format> {
-    if RAW_EXTENSIONS.contains(&extension) {
-        return Ok(Format::Dng);
-    }
-    let mut head = [0u8; 64];
-    let mut file = std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let mut count = 0;
-    loop {
-        let read = file.read(&mut head[count..])?;
-        if read == 0 {
-            break;
-        }
-        count += read;
-        if count == head.len() {
-            break;
-        }
-    }
-    let head = &head[..count];
-    for (offset, signature, format) in SIGNATURES {
-        if head.len() >= offset + signature.len() && &head[offset..offset + signature.len()] == signature {
-            return Ok(format);
-        }
-    }
-    Ok(format_from_extension(extension))
-}
-
 /// Reads an image file the way Magick.NET does: the format picked as IM
-/// picks it, then read as IM's coder reads it (the `image` crate stands in
-/// for the formats without a port).
+/// picks it (`coders::formats`), then read as IM's coder for it reads it.
 pub fn read_pixel_cache(path: &Path) -> Result<PixelCache> {
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
-    match detect_format(path, &extension)? {
-        Format::Png => read_png(path),
-        Format::Jpeg => crate::coders::jpeg::read(path),
-        Format::Gif => crate::coders::gif::read(path),
-        Format::Bmp => crate::coders::bmp::read(path),
-        Format::Tiff => crate::coders::tiff::read(path),
-        Format::Exr => crate::coders::exr::read(path),
-        Format::Webp => crate::coders::webp::read(path),
-        Format::Jp2 => crate::coders::jp2::read(path),
-        Format::Dds => crate::coders::dds::read(path),
-        Format::Miff => crate::coders::miff::read(path),
-        Format::Svg => crate::coders::svg::read(path),
-        Format::Dng => crate::coders::dng::read(path),
-        Format::Psd => crate::coders::psd::read(path),
-        Format::Emf => crate::coders::emf::read(path),
-        Format::Sgi => crate::coders::sgi::read(path),
-        Format::Hdr => crate::coders::hdr::read(path),
-        Format::Other => read_with_image_crate(path),
+    let format = crate::coders::formats::select(path)?;
+    match (format.module, format.name) {
+        ("PNG", "JNG") => crate::coders::jng::read(path),
+        ("PNG", "MNG") => crate::coders::mng::read(path),
+        ("PNG", _) => read_png(path),
+        ("JPEG", _) => crate::coders::jpeg::read(path),
+        ("GIF", _) => crate::coders::gif::read(path),
+        ("BMP", _) => crate::coders::bmp::read(path),
+        ("TIFF", "GROUP4") => bail!("GROUP4 images are not supported"),
+        ("TIFF", _) => crate::coders::tiff::read(path),
+        ("EXR", _) => crate::coders::exr::read(path),
+        ("WEBP", _) => crate::coders::webp::read(path),
+        ("JP2", _) => crate::coders::jp2::read(path),
+        ("DDS", _) => crate::coders::dds::read(path),
+        ("MIFF", _) => crate::coders::miff::read(path),
+        ("SVG", _) => crate::coders::svg::read(path),
+        ("DNG", _) => crate::coders::dng::read(path),
+        ("PSD", _) => crate::coders::psd::read(path),
+        ("EMF", _) => crate::coders::emf::read(path),
+        ("SGI", _) => crate::coders::sgi::read(path),
+        ("HDR", _) => crate::coders::hdr::read(path),
+        ("PNM", _) => crate::coders::pnm::read(path),
+        ("QOI", _) => crate::coders::qoi::read(path),
+        ("FARBFELD", _) => crate::coders::farbfeld::read(path),
+        ("WBMP", _) => crate::coders::wbmp::read(path),
+        ("TGA", _) => crate::coders::tga::read(path),
+        ("XBM", _) => crate::coders::xbm::read(path),
+        ("SUN", _) => crate::coders::sun::read(path),
+        ("PCX", name) => crate::coders::pcx::read(path, name == "DCX"),
+        ("ICON", _) => crate::coders::icon::read(path),
+        ("XPM", _) => crate::coders::xpm::read(path),
+        ("VICAR", _) => crate::coders::vicar::read(path),
+        ("FITS", _) => crate::coders::fits::read(path),
+        ("MAT", _) => crate::coders::mat::read(path),
+        ("FL32", _) => crate::coders::fl32::read(path),
+        ("VIPS", _) => crate::coders::vips::read(path),
+        ("DPX", _) => crate::coders::dpx::read(path),
+        ("CIN", _) => crate::coders::cin::read(path),
+        ("MTV", _) => crate::coders::mtv::read(path),
+        ("AVS", _) => crate::coders::avs::read(path, false),
+        ("AAI", _) => crate::coders::avs::read(path, true),
+        ("HRZ", _) => crate::coders::hrz::read(path),
+        ("OTB", _) => crate::coders::otb::read(path),
+        ("RGF", _) => crate::coders::rgf::read(path),
+        ("PGX", _) => crate::coders::pgx::read(path),
+        ("IPL", _) => crate::coders::ipl::read(path),
+        ("VIFF", _) => crate::coders::viff::read(path),
+        ("DIB", "ICODIB") => bail!("ICODIB images are not supported"),
+        ("DIB", _) => crate::coders::dib::read(path),
+        ("PALM", _) => crate::coders::palm::read(path),
+        ("TXT", "TXT") => crate::coders::txt::read(path),
+        ("SIXEL", _) => crate::coders::sixel::read(path),
+        ("PDB", _) => crate::coders::pdb::read(path),
+        ("CALS", _) => crate::coders::cals::read(path),
+        ("SCR", _) => crate::coders::scr::read(path),
+        ("ART", _) => crate::coders::art::read(path),
+        ("MAC", _) => crate::coders::mac::read(path),
+        ("TIM", _) => crate::coders::tim::read(path),
+        ("PIX", _) => crate::coders::pix::read(path),
+        ("RLA", _) => crate::coders::rla::read(path),
+        ("SCT", _) => crate::coders::sct::read(path),
+        ("RLE", _) => crate::coders::rle::read(path),
+        ("SF3", _) => crate::coders::sf3::read(path),
+        ("TIM2", _) => crate::coders::tim2::read(path),
+        ("CUT", _) => crate::coders::cut::read(path),
+        ("JNX", _) => crate::coders::jnx::read(path),
+        ("FAX", "G4") => bail!("G4 images need a size"),
+        ("FAX", _) => crate::coders::fax::read(path),
+        ("ORA", _) => crate::coders::ora::read(path),
+        ("XCF", _) => crate::coders::xcf::read(path),
+        ("PICT", _) => crate::coders::pict::read(path),
+        ("META", name) => crate::coders::meta::read(path, name),
+        ("MPC", "MPC") => crate::coders::mpc::read(path),
+        ("PCD", name) => crate::coders::pcd::read(path, name),
+        ("WPG", _) => crate::coders::wpg::read(path),
+        ("DCM", _) => crate::coders::dcm::read(path),
+        ("HEIC", _) => crate::coders::heif::read(path),
+        // IM 7.1.2's SFW reader checks the file's size against itself plus
+        // 4096, so it (and PWP, made of SFW images) never reads anything.
+        ("SFW" | "PWP", _) => bail!("MemoryAllocationFailed"),
+        (_, name) => bail!("{name} images are not supported"),
     }
 }
 
@@ -316,6 +254,13 @@ fn split_transparency(bytes: &[u8]) -> (Vec<u8>, Option<(Vec<u8>, bool)>) {
 
 /// A PNG held in memory (one embedded in another file).
 pub(crate) fn read_png_bytes(bytes: &[u8]) -> Result<PixelCache> {
+    read_png_bytes_with(bytes, false)
+}
+
+/// `read_png_bytes`, optionally undoing MNG's intrapixel differencing
+/// (filter method 64: red and blue stored less green), which libpng does
+/// to each row before anything else.
+pub(crate) fn read_png_bytes_with(bytes: &[u8], intrapixel: bool) -> Result<PixelCache> {
     let (stripped, transparency_chunk) = split_transparency(bytes);
     let mut decoder = png::Decoder::new(std::io::Cursor::new(stripped));
     decoder.set_transformations(png::Transformations::IDENTITY);
@@ -384,7 +329,14 @@ pub(crate) fn read_png_bytes(bytes: &[u8]) -> Result<PixelCache> {
     let mut data = Vec::with_capacity(width * height * channels.len());
     for y in 0..height {
         let row = &buffer[y * line_size..(y + 1) * line_size];
-        let samples = unpack_row(row, bit_depth, width * samples_per_pixel);
+        let mut samples = unpack_row(row, bit_depth, width * samples_per_pixel);
+        if intrapixel && matches!(color_type, png::ColorType::Rgb | png::ColorType::Rgba) {
+            let mask = if bit_depth == 16 { 0xffff } else { 0xff };
+            for pixel in samples.chunks_exact_mut(samples_per_pixel) {
+                pixel[0] = (pixel[0] + pixel[1]) & mask;
+                pixel[2] = (pixel[2] + pixel[1]) & mask;
+            }
+        }
         for pixel in samples.chunks_exact(samples_per_pixel) {
             if pseudo {
                 // `ConstrainColormapIndex` refuses an index past the colormap.
@@ -503,37 +455,4 @@ fn colour_colorspace(gamma: f64) -> CacheColorspace {
     } else {
         CacheColorspace::SRgb
     }
-}
-
-/// JPEG, BMP, TGA and GIF through the `image` crate: 8-bit samples, grey
-/// JPEGs and GIFs as `PseudoClass` (IM reads them with a colormap).
-fn read_with_image_crate(path: &Path) -> Result<PixelCache> {
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
-    let decoded = image::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let width = decoded.width() as usize;
-    let height = decoded.height() as usize;
-    let is_gray = matches!(decoded.color(), image::ColorType::L8 | image::ColorType::L16);
-    let pseudo_gray = is_gray && matches!(extension.as_str(), "jpg" | "jpeg" | "gif");
-    let (channels, data) = if is_gray {
-        let luma = decoded.to_luma8();
-        let mut data = Vec::with_capacity(width * height * 2);
-        for &value in luma.as_raw() {
-            data.push(char_quantum(value));
-            if pseudo_gray {
-                data.push(value as f32);
-            }
-        }
-        let channels = if pseudo_gray { vec![PixelChannel::Gray, PixelChannel::Index] } else { vec![PixelChannel::Gray] };
-        (channels, data)
-    } else if decoded.color().has_alpha() {
-        let rgba = decoded.to_rgba8();
-        let data = rgba.as_raw().iter().map(|&value| char_quantum(value)).collect();
-        (vec![PixelChannel::Red, PixelChannel::Green, PixelChannel::Blue, PixelChannel::Alpha], data)
-    } else {
-        let rgb = decoded.to_rgb8();
-        let data = rgb.as_raw().iter().map(|&value| char_quantum(value)).collect();
-        (vec![PixelChannel::Red, PixelChannel::Green, PixelChannel::Blue], data)
-    };
-    let colorspace = if is_gray { CacheColorspace::Gray } else { CacheColorspace::SRgb };
-    Ok(PixelCache::new(width, height, channels, data, colorspace, DEFAULT_GAMMA))
 }

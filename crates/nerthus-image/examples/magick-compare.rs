@@ -78,6 +78,7 @@ fn main() -> ExitCode {
 
     let result = match operation {
         "srt" => distort_srt(&image, &numbers),
+        "resize" => Ok(resize(&image, numbers[0] as usize, numbers[1] as usize)),
         "resize-catrom" => {
             image.filter = Some(Filter::Catrom);
             Ok(resize(&image, numbers[0] as usize, numbers[1] as usize))

@@ -119,13 +119,6 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut DataViewSt
     tab_strip(ui, strip, state);
 }
 
-/// The narrowest the panel gets when the graph beside it needs the room:
-/// its tabs still side by side under it.
-pub fn least_width(ui: &Ui) -> f32 {
-    let widths = TABS.iter().map(|(_, name)| tab_width(ui, name));
-    widths.sum::<f32>() - (TABS.len() - 1) as f32 * TAB_OVERLAP
-}
-
 /// A tab's width: its name, at least `TAB_MIN_WIDTH`.
 fn tab_width(ui: &Ui, name: &str) -> f32 {
     let galley = ui.painter().layout_no_wrap(name.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
@@ -294,31 +287,4 @@ fn subtle_button(ui: &mut Ui, text: &str) -> egui::Response {
     let position = rect.center() - galley.size() / 2.0;
     ui.painter().galley(position, galley, theme::LABEL_DEFAULT);
     response
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_tabs_fit_the_least_width() {
-        let context = egui::Context::default();
-        theme::apply(&context);
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
-        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-        let mut strip = Rect::NOTHING;
-        let mut output = context.run_ui(input, |ui| {
-            strip = Rect::from_min_size(Pos2::new(20.0, 100.0), Vec2::new(least_width(ui), TABS_HEIGHT));
-            tab_strip(ui, strip, &mut DataViewState::default());
-        });
-        let shapes = std::mem::take(&mut output.shapes);
-        output.drop_without_applying_deltas();
-        assert!(strip.width() >= TABS.len() as f32 * TAB_MIN_WIDTH - (TABS.len() - 1) as f32 * TAB_OVERLAP);
-        assert!(!shapes.is_empty());
-        for clipped in &shapes {
-            let bounds = clipped.shape.visual_bounding_rect();
-            let inside = bounds.left() >= strip.left() - BORDER && bounds.right() <= strip.right() + BORDER;
-            assert!(inside, "{:?} at {bounds:?} outside the strip {strip:?}", clipped.shape);
-        }
-    }
 }

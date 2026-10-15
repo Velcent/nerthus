@@ -3,14 +3,14 @@
 //! clicked to collapse it to a 60 square), its icon, name and menu, the
 //! lock, and the invisible resize thumbs in the bottom corners.
 
-use egui::{CornerRadius, CursorIcon, Id, PointerButton, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{CornerRadius, CursorIcon, PointerButton, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::document::{GroupData, GROUP_ICONS, GROUP_MIN_SIZE};
 use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::{drag_origin, drag_pointer, elided_galley, line_height, GraphState, NameEditor, SIMPLIFIED_ZOOM};
+use crate::ui::graph_canvas::{close_rename_popup, drag_origin, elided_galley, line_height, rename_popup, GraphState, Renamed, SIMPLIFIED_ZOOM};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::{icon_grid, swatch_grid};
 use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, menu_style, Tooltips};
@@ -193,7 +193,7 @@ fn continue_drag(ui: &Ui, editor: &mut Editor, state: &mut GraphState, origin: P
         return;
     };
     let view = state.view();
-    let pointer = if drag.moves() { drag_pointer(ui, state.rect) } else { ui.input(|input| input.pointer.interact_pos()) };
+    let pointer = ui.input(|input| input.pointer.interact_pos());
     if let Some(pointer) = pointer {
         let current = view.to_canvas(origin, pointer);
         let delta = current - drag.pointer_start;
@@ -228,22 +228,13 @@ fn continue_drag(ui: &Ui, editor: &mut Editor, state: &mut GraphState, origin: P
 /// Where `draw` writes a group's name on `screen` at `zoom`, and in what
 /// font: the line it starts on, as wide as it runs before it is cut
 /// short; a collapsed group's below the box (margin 4, 0, 0, -16; 10px;
-/// 60 wide). Zoomed out no name shows: the line is where it would be,
-/// its font no smaller than a simplified node's name.
+/// 60 wide).
 fn title_line(ctx: &egui::Context, group: &GroupData, screen: Rect, zoom: f32) -> (Rect, egui::FontId) {
     let (size, width) = if group.collapsed { (10.0, 60.0) } else { (12.0, 150.0) };
-    let size = if zoom < SIMPLIFIED_ZOOM { (size * zoom).max(6.0) } else { size * zoom };
-    let font = theme::interface(size);
+    let font = theme::interface(size * zoom);
     let height = line_height(ctx, &font);
     let top_left = if group.collapsed { Pos2::new(screen.left() + 4.0 * zoom, screen.bottom() + 16.0 * zoom - height) } else { screen.min + Vec2::new(55.0, 6.0) * zoom };
     (Rect::from_min_size(top_left, Vec2::new(width * zoom, height)), font)
-}
-
-/// The name editor on a group (`RenameGroup`): over its name, in its
-/// font ([`title_line`]).
-pub(crate) fn name_editor(ctx: &egui::Context, group: &GroupData, screen: Rect, zoom: f32) -> NameEditor {
-    let (line, font) = title_line(ctx, group, screen, zoom);
-    NameEditor::new(ctx, line, font, zoom, false)
 }
 
 /// The group's look (`GroupElement` template).
@@ -321,27 +312,23 @@ fn group_menu_popup(button: &Response, group: &GroupData, commands: &mut Vec<Com
     });
 }
 
-/// `RenameGroup`: the name edited in place over the title (an
-/// `EditablePopup`, closing as [`crate::ui::widgets::popup_outcome`]
-/// says); a blank name is no name.
+/// `RenameGroup`: the rename popup on the group it is open on
+/// ([`rename_popup`]); a blank name is no name.
 pub fn rename_overlay(ui: &mut Ui, editor: &mut Editor, state: &mut GraphState, groups: &[GroupData], origin: Pos2) {
-    let Some((id, mut text)) = state.renaming_group.take() else {
+    let Some(Renamed::Group(id)) = state.renaming() else {
         return;
     };
     let Some(group) = groups.iter().find(|group| group.id == id) else {
+        close_rename_popup(ui.ctx(), state);
         return;
     };
     let view = state.view();
-    let screen = view.rect_to_screen(origin, group.bounds());
-    let response = name_editor(ui.ctx(), group, screen, view.zoom).show(ui, &mut text, Id::new(("group-rename", id)));
-    if !response.has_focus() && !response.lost_focus() {
-        response.request_focus();
-    }
-    let Some(accepted) = crate::ui::widgets::popup_outcome(ui, &response) else {
-        state.renaming_group = Some((id, text));
+    let bounds = group.bounds();
+    let screen = view.rect_to_screen(origin, bounds);
+    let Some(text) = rename_popup(ui, state, screen, bounds.width(), view.zoom) else {
         return;
     };
-    if accepted && !text.trim().is_empty() {
+    if !text.trim().is_empty() {
         editor.document.rename_group(id, &text);
     }
 }
