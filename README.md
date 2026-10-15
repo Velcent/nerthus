@@ -209,7 +209,8 @@ These parts of Gaea 2.0 are not in Nerthus yet.
   status differently.
 - Notes render only the headings and bullet points of their Markdown. Bold,
   italics, links, numbered lists, tables and code show as plain text in the
-  note, its tooltip and the Note Editor's preview.
+  note and the Note Editor's preview, and an icon note's tooltip shows the
+  Markdown as it was typed.
 - The Undo menu names many steps differently: Gaea writes "Mountain: Height
   0.5 → 0.7" and "Connection: Mountain-Out ⇢ Erosion-In" where Nerthus
   writes "Change Height" and "Connect". It also has no icons for the kinds
@@ -230,8 +231,10 @@ These parts of Gaea 2.0 are not in Nerthus yet.
 ### Properties
 
 - Colour properties, colour variables and the background in Options ›
-  Viewport use a stock colour picker. Gaea's is a swatch that opens a
-  square of saturation and brightness over a hue bar.
+  Viewport open a different colour picker from Gaea's. Nerthus's has a
+  square of saturation and brightness beside an upright hue strip, with
+  red, green and blue sliders and a hex box. Gaea's is the square alone,
+  with a hue bar across the bottom.
 - The gradient editor of CLUTer and Synth isn't Gaea's. Gaea shows a
   96-pixel black strip of colour stops above the same kind of picker.
   Clicking the strip adds a stop in the colour under it, dragging a stop
@@ -260,7 +263,8 @@ These parts of Gaea 2.0 are not in Nerthus yet.
 
 - Menus have no access keys. Gaea's open with Alt and the underlined letter
   (Alt F for File), and in the Lazy Menu F1 followed by 1, 2 or 3 switches
-  the renderer.
+  the renderer. In Nerthus, F10 opens the menus and the arrow keys move
+  through them.
 - Build Settings › Terrain doesn't show the terrain's real scale (metres
   per pixel at the build resolution) or its height-to-width ratio.
 - About fifteen of Gaea's message boxes are drawn as plain boxes, without
