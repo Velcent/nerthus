@@ -8,7 +8,8 @@
 use egui::{Align, Align2, Color32, Id, Layout, RichText, Sense, Stroke, Ui, Vec2};
 
 use crate::theme;
-use crate::ui::{markdown, widgets};
+use crate::ui::markdown;
+use crate::ui::widgets::{self, dialog_button, dialog_button_row};
 use crate::updates::{UpdateAnswer, UpdateToken};
 
 const SHORTCUTS: &str = include_str!("../../data/shortcuts.md");
@@ -222,12 +223,17 @@ fn shortcuts_window(ctx: &egui::Context) -> bool {
         scroll = scroll.id_salt("shortcut-guide-text");
         scroll = scroll.max_height((height - 80.0 - footer).max(100.0));
         scroll = scroll.auto_shrink([false, false]);
-        scroll.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.add_space(36.0);
-                ui.vertical(|ui| {
-                    ui.set_max_width(ui.available_width() - 36.0);
-                    markdown::show(ui, SHORTCUTS);
+        // The scroll area 12 in from the dialog's sides, so that its bar
+        // keeps clear of the border, and the text 24 further in: 36 in all.
+        let inset = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0));
+        inset.show(ui, |ui| {
+            scroll.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(24.0);
+                    ui.vertical(|ui| {
+                        ui.set_max_width(ui.available_width() - 24.0);
+                        markdown::show(ui, SHORTCUTS);
+                    });
                 });
             });
         });
@@ -459,8 +465,8 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
                 body(ui, "Congratulations! You're running the latest version of Nerthus with the most recent feature updates!\n\nIf you would like to re-install Nerthus, visit");
                 link(ui, &releases, &releases);
                 ui.add_space(12.0);
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui.button("OK").clicked() {
+                dialog_button_row(ui, |ui| {
+                    if dialog_button(ui, "OK", false).clicked() {
                         open = false;
                     }
                 });
@@ -469,8 +475,8 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
                 heading(ui, "Error loading update information.");
                 body(ui, error);
                 ui.add_space(12.0);
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui.button("OK").clicked() {
+                dialog_button_row(ui, |ui| {
+                    if dialog_button(ui, "OK", false).clicked() {
                         open = false;
                     }
                 });
@@ -497,11 +503,11 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
                     dialog.notes_open = !dialog.notes_open;
                 }
                 ui.add_space(12.0);
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui.button("Cancel").clicked() {
+                dialog_button_row(ui, |ui| {
+                    if dialog_button(ui, "Cancel", false).clicked() {
                         open = false;
                     }
-                    if important_button(ui, "Download Update", 12.0, 0.0, Vec2::new(12.0, 4.0)).clicked() {
+                    if dialog_button(ui, "Download Update", true).clicked() {
                         if token.download.is_some() {
                             download = Some(token.clone());
                         } else {

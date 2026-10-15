@@ -10,10 +10,12 @@
 //! memory pool, and sending crash reports and usage statistics (Nerthus
 //! sends nothing; the boxes show, disabled).
 
+use egui::text::{CCursor, CCursorRange};
 use egui::{Align, Color32, Layout, RichText, Stroke, Ui, Vec2};
 use serde_json::{json, Value};
 
 use crate::theme;
+use crate::ui::editors;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::options_window::OptionsTab;
 use crate::ui::widgets::{selectable_label, Tooltips};
@@ -388,13 +390,28 @@ fn choice(ui: &mut Ui, label: &str, label_width: f32, choices: &[&str], current:
 
 /// A check box `indent` from the left, bound to a flag.
 fn check(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, indent: f32, text: &str) {
-    let mut checked = copy.flag(setting);
     ui.horizontal(|ui| {
         ui.add_space(indent);
-        if ui.checkbox(&mut checked, RichText::new(text).font(theme::interface(12.0))).changed() {
-            copy.set(setting, Value::Bool(checked));
-        }
+        check_box(ui, copy, setting, text);
     });
+}
+
+/// A check box headed by a label in the column `label_width` wide, as
+/// far from it as `choice` puts its choices.
+fn labelled_check(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, label_width: f32, text: &str) {
+    ui.horizontal(|ui| {
+        row_label(ui, label, label_width);
+        ui.add_space(8.0);
+        check_box(ui, copy, setting, text);
+    });
+}
+
+/// The check box of `check` and `labelled_check`.
+fn check_box(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, text: &str) {
+    let mut checked = copy.flag(setting);
+    if ui.checkbox(&mut checked, RichText::new(text).font(theme::interface(12.0))).changed() {
+        copy.set(setting, Value::Bool(checked));
+    }
 }
 
 /// A check box that shows but cannot change.
@@ -416,26 +433,70 @@ fn note(ui: &mut Ui, indent: f32, text: &str, color: Color32) {
 }
 
 /// `FileBrowserControl`: a header, the folder's path and a button that
-/// picks another.
+/// picks another. Until it is clicked into, a path too long for its box
+/// shows its root, "..." and its end (`TruncatePath`), the whole path as
+/// its tooltip.
 fn folder_box(ui: &mut Ui, copy: &mut OptionsCopy, dialogs: &mut FileDialogs, setting: Setting, header: &str) {
     let key = folder_key(setting);
-    let mut text = copy.text(setting);
+    let path = copy.text(setting);
     ui.horizontal(|ui| {
         row_label(ui, header, 92.0);
         ui.add_space(8.0);
+        let id = ui.make_persistent_id(&key);
+        let font = theme::semibold(12.0);
+        let width = ui.available_width() - 40.0;
+        let margin = egui::Margin::symmetric(4, 2);
+        let typing = ui.memory(|memory| memory.has_focus(id));
+        // The text has the box less its margin.
+        let mut text = if typing { path.clone() } else { editors::truncate_path(ui, &path, &font, width - margin.sum().x) };
+        let shortened = text != path;
         let mut field = egui::TextEdit::singleline(&mut text);
-        field = field.font(theme::semibold(12.0));
+        field = field.id(id);
+        field = field.font(font);
         field = field.text_color(theme::TEXTBOX_FILE_FOREGROUND);
-        field = field.desired_width(ui.available_width() - 40.0);
-        if ui.add(field).changed() {
+        field = field.margin(margin);
+        field = field.desired_width(width);
+        let response = ui.add(field);
+        if shortened {
+            // Clicked into: the whole path from the next frame, the caret
+            // where it was put in the shortened one.
+            if response.has_focus()
+                && let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id)
+                && let Some(range) = state.cursor.char_range()
+            {
+                let caret = |cursor: CCursor| CCursor::new(caret_in_path(&text, &path, cursor.index.0));
+                state.cursor.set_char_range(Some(CCursorRange::two(caret(range.secondary), caret(range.primary))));
+                state.store(ui.ctx(), id);
+            }
+        } else if response.changed() {
             copy.set(setting, Value::String(text.clone()));
         }
+        if !typing && !path.is_empty() {
+            response.tooltip(&path);
+        }
         if ui.add_enabled(!dialogs.pending(&key), egui::Button::new("…")).clicked() {
-            let current = std::path::PathBuf::from(&text);
+            let current = std::path::PathBuf::from(copy.text(setting));
             let request = DialogRequest { key, title: header.to_string(), kind: DialogKind::PickFolder, directory: Some(current) };
             dialogs.ask(request);
         }
     });
+}
+
+/// Where a caret put at `caret` in `shown` (`path` as `truncate_path`
+/// shortened it) is in `path`: the same place in the root, as far from
+/// the end in the end, and where the end starts if it was on the "...".
+fn caret_in_path(shown: &str, path: &str, caret: usize) -> usize {
+    let shown_length = shown.chars().count();
+    let path_length = path.chars().count();
+    let root = shown.find("...").map_or(0, |start| shown[..start].chars().count());
+    let end = shown_length.saturating_sub(root + 3);
+    if caret <= root {
+        caret
+    } else if caret + end >= shown_length {
+        path_length.saturating_sub(shown_length - caret)
+    } else {
+        path_length.saturating_sub(end)
+    }
 }
 
 /// The dialog key a folder box asks under.
@@ -462,12 +523,14 @@ fn take_folder_answers(copy: &mut OptionsCopy, dialogs: &mut FileDialogs) {
     }
 }
 
-/// An enum member stored by name, as one of `names`.
-fn named_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, choices: &[&str], names: &[&str], width: Option<f32>) {
+/// An enum member stored by name: each choice shown, and the name it
+/// stores.
+fn named_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, label_width: f32, choices: &[(&str, &str)], width: Option<f32>) {
     let current = copy.text(setting);
-    let index = names.iter().position(|name| *name == current);
-    if let Some(chosen) = choice(ui, label, 96.0, choices, index, width) {
-        copy.set(setting, Value::String(names[chosen].to_string()));
+    let index = choices.iter().position(|(_, name)| *name == current);
+    let shown: Vec<&str> = choices.iter().map(|(shown, _)| *shown).collect();
+    if let Some(chosen) = choice(ui, label, label_width, &shown, index, width) {
+        copy.set(setting, Value::String(choices[chosen].1.to_string()));
     }
 }
 
@@ -481,12 +544,12 @@ fn indexed_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: 
 }
 
 /// An integer member stored as one of `values`.
-fn valued_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, values: &[i64], width: Option<f32>) {
+fn valued_choice(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, label: &str, label_width: f32, values: &[i64], width: Option<f32>) {
     let current = copy.number(setting) as i64;
     let names: Vec<String> = values.iter().map(i64::to_string).collect();
     let choices: Vec<&str> = names.iter().map(String::as_str).collect();
     let index = values.iter().position(|value| *value == current);
-    if let Some(chosen) = choice(ui, label, 96.0, &choices, index, width) {
+    if let Some(chosen) = choice(ui, label, label_width, &choices, index, width) {
         copy.set(setting, json!(values[chosen]));
     }
 }
@@ -562,7 +625,8 @@ fn general(ui: &mut Ui, copy: &mut OptionsCopy) -> Option<PageRequest> {
 fn paths(ui: &mut Ui, copy: &mut OptionsCopy, dialogs: &mut FileDialogs) {
     ui.add_space(8.0);
     section(ui, "Paths", 16.0);
-    named_choice(ui, copy, Opt("ThumbnailStorage"), "File Thumbnails", &["Don't Save", "Central Data Folder", "Next to File"], &["None", "Central", "Local"], None);
+    let storage = [("Don't Save", "None"), ("Central Data Folder", "Central"), ("Next to File", "Local")];
+    named_choice(ui, copy, Opt("ThumbnailStorage"), "File Thumbnails", 96.0, &storage, None);
     ui.add_space(12.0);
     folder_box(ui, copy, dialogs, Pref("Locations", "Documents"), "User Files");
     note(ui, 100.0, "This is where all Presets, Screenshots, and other Nerthus documents are stored.", theme::LABEL_DEFAULT);
@@ -579,51 +643,55 @@ fn paths(ui: &mut Ui, copy: &mut OptionsCopy, dialogs: &mut FileDialogs) {
     note(ui, 24.0, "Projects are usually small, lightweight files. However, Builds are very large and heavy. Keeping them separate is recommended if you frequently backup either folder.", theme::LABEL_EMPHASIS);
 }
 
+/// `ToolboxTab`'s label column, wide enough for "Maximum Results" to
+/// start in line with the section titles.
+const TOOLBOX_LABELS: f32 = 108.0;
+/// Where `ToolboxTab`'s check boxes go: in line with its choices, which
+/// `choice` puts 8 and the item spacing past the labels.
+const TOOLBOX_CHECKS: f32 = TOOLBOX_LABELS + 14.0;
+
 /// `ToolboxTab`: Menus show their layout and organization, the Toolbox
 /// its layout and labels.
 fn toolbox(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.add_space(8.0);
     section(ui, "Toolbox", 16.0);
-    named_choice(ui, copy, Opt("ToolboxStyle"), "Configuration", &["Menus", "Toolbox"], &["Menus", "Panel"], Some(220.0));
+    named_choice(ui, copy, Opt("ToolboxStyle"), "Configuration", TOOLBOX_LABELS, &[("Menus", "Menus"), ("Toolbox", "Panel")], Some(220.0));
     ui.add_space(12.0);
     if copy.text(Opt("ToolboxStyle")) == "Panel" {
         let compact = copy.flag(Opt("ToolboxCompact"));
-        if let Some(chosen) = choice(ui, "Layout", 96.0, &["Compact", "Expanded"], Some(usize::from(!compact)), Some(220.0)) {
+        if let Some(chosen) = choice(ui, "Layout", TOOLBOX_LABELS, &["Compact", "Expanded"], Some(usize::from(!compact)), Some(220.0)) {
             copy.set(Opt("ToolboxCompact"), Value::Bool(chosen == 0));
         }
         ui.add_space(8.0);
-        check(ui, copy, Opt("ToolboxLeftAlignLabels"), 112.0, "Left-align labels");
+        check(ui, copy, Opt("ToolboxLeftAlignLabels"), TOOLBOX_CHECKS, "Left-align labels");
     } else {
-        named_choice(ui, copy, Opt("ToolboxMode"), "Layout", &["Compact", "Buttons", "Large"], &["Single", "Double", "Expanded"], Some(220.0));
+        let modes = [("Compact", "Single"), ("Buttons", "Double"), ("Large", "Expanded")];
+        named_choice(ui, copy, Opt("ToolboxMode"), "Layout", TOOLBOX_LABELS, &modes, Some(220.0));
         ui.add_space(8.0);
-        named_choice(ui, copy, Opt("ToolboxMenus"), "Organization", &["Nested by Family", "Show All"], &["Nested", "Flat"], Some(220.0));
+        let menus = [("Nested by Family", "Nested"), ("Show All", "Flat")];
+        named_choice(ui, copy, Opt("ToolboxMenus"), "Organization", TOOLBOX_LABELS, &menus, Some(220.0));
         ui.add_space(8.0);
-        check(ui, copy, Opt("ShowIconsInToolbox"), 112.0, "Show icons in Toolbox");
+        check(ui, copy, Opt("ShowIconsInToolbox"), TOOLBOX_CHECKS, "Show icons in Toolbox");
     }
     ui.add_space(8.0);
-    check(ui, copy, Opt("ToolboxHighlightHighUse"), 112.0, "Highlight most-used nodes");
+    check(ui, copy, Opt("ToolboxHighlightHighUse"), TOOLBOX_CHECKS, "Highlight most-used nodes");
     ui.add_space(4.0);
-    check(ui, copy, Opt("ToolboxPinHighUse"), 112.0, "Pin most-used nodes");
+    check(ui, copy, Opt("ToolboxPinHighUse"), TOOLBOX_CHECKS, "Pin most-used nodes");
     ui.add_space(8.0);
     section(ui, "Search", 8.0);
-    // "Search Results" (margin 26, 6, 0, -25) shares the first check's row.
-    let row_top = ui.cursor().top();
-    let label_position = egui::pos2(ui.min_rect().left() + 26.0, row_top + 3.0);
-    let label_galley = ui.painter().layout_no_wrap("Search Results".to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
-    ui.painter().galley(label_position, label_galley, theme::LABEL_DEFAULT);
-    check(ui, copy, Opt("ShowFamilyName"), 112.0, "Show Family Name");
-    check(ui, copy, Opt("ShowIconsInSearchResults"), 112.0, "Show Icons");
+    labelled_check(ui, copy, Opt("ShowFamilyName"), "Search Results", TOOLBOX_LABELS, "Show Family Name");
+    check(ui, copy, Opt("ShowIconsInSearchResults"), TOOLBOX_CHECKS, "Show Icons");
     ui.add_space(8.0);
-    valued_choice(ui, copy, Opt("MaximumSearchResults"), "Maximum Results", &[5, 10, 15], Some(220.0));
+    valued_choice(ui, copy, Opt("MaximumSearchResults"), "Maximum Results", TOOLBOX_LABELS, &[5, 10, 15], Some(220.0));
     ui.separator();
-    check(ui, copy, Opt("StackedSatelliteMaps"), 112.0, "Show Satellite Maps List as a Single Stack");
+    check(ui, copy, Opt("StackedSatelliteMaps"), TOOLBOX_CHECKS, "Show Satellite Maps List as a Single Stack");
 }
 
 /// `GraphTab`.
 fn graph(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.add_space(8.0);
     section(ui, "Graph", 16.0);
-    valued_choice(ui, copy, Opt("GridSize"), "Grid Snap Size", &[10, 20, 25, 50, 100], Some(220.0));
+    valued_choice(ui, copy, Opt("GridSize"), "Grid Snap Size", 96.0, &[10, 20, 25, 50, 100], Some(220.0));
     ui.separator();
     ui.add_space(8.0);
     check(ui, copy, Opt("ConfineShortcuts"), 108.0, "Allow node shortcuts only when cursor is inside the graph");
@@ -670,7 +738,7 @@ fn node(ui: &mut Ui, copy: &mut OptionsCopy) {
 fn data_view(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.add_space(8.0);
     section(ui, "Data View", 16.0);
-    named_choice(ui, copy, Opt("DataViewIcons"), "Icons", &["Colorful", "Muted", "Hide"], &["Color", "Muted", "Hide"], None);
+    named_choice(ui, copy, Opt("DataViewIcons"), "Icons", 96.0, &[("Colorful", "Color"), ("Muted", "Muted"), ("Hide", "Hide")], None);
     ui.add_space(12.0);
     check(ui, copy, Opt("ExpandDataView"), 112.0, "Always expand");
 }
@@ -926,4 +994,151 @@ fn experimental(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.add_space(8.0);
     check(ui, copy, Pref("Locations", "ShowCustomOnly"), 0.0, "Show only these locations");
     note(ui, 0.0, "This reduces clutter in the directory tree. You can still access any location by typing a path, or using the breadcrumbs at the top.", theme::LABEL_DEFAULT);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Shape};
+
+    /// The page's place in the window at its full size, its border and
+    /// margin left out.
+    const PLACE: Rect = Rect { min: Pos2::new(160.0, 100.0), max: Pos2::new(845.0, 660.0) };
+
+    fn context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.global_style_mut(|style| {
+            style.interaction.tooltip_delay = 0.0;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        context
+    }
+
+    fn copy() -> OptionsCopy {
+        OptionsCopy::load(&UserOptions::new(), &Preferences::new())
+    }
+
+    /// A text drawn: what it says, its rect, and the rect it is clipped to.
+    type Drawn = (String, Rect, Rect);
+
+    /// A frame of `tab` with these events. Returns the texts drawn.
+    fn frame(context: &egui::Context, tab: OptionsTab, copy: &mut OptionsCopy, events: Vec<Event>) -> Vec<Drawn> {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1333.0, 800.0))), events, ..Default::default() };
+        let mut dialogs = FileDialogs::default();
+        let output = context.run_ui(input, |ui| {
+            let mut page_ui = ui.new_child(egui::UiBuilder::new().max_rect(PLACE).layout(Layout::top_down(Align::Min)));
+            page(&mut page_ui, tab, copy, &mut dialogs);
+        });
+        let mut texts = Vec::new();
+        let mut shapes: Vec<(Shape, Rect)> = output.shapes.iter().map(|clipped| (clipped.shape.clone(), clipped.clip_rect)).collect();
+        while let Some((shape, clip)) = shapes.pop() {
+            match shape {
+                Shape::Vec(inner) => shapes.extend(inner.into_iter().map(|shape| (shape, clip))),
+                Shape::Text(text) => texts.push((text.galley.text().to_string(), text.galley.rect.translate(text.pos.to_vec2()), clip)),
+                _ => {}
+            }
+        }
+        output.drop_without_applying_deltas();
+        texts
+    }
+
+    fn settle(context: &egui::Context, tab: OptionsTab, copy: &mut OptionsCopy) -> Vec<Drawn> {
+        frame(context, tab, copy, Vec::new());
+        frame(context, tab, copy, Vec::new())
+    }
+
+    fn rect_of(texts: &[Drawn], wanted: &str) -> Rect {
+        let found = texts.iter().find(|(text, ..)| text == wanted);
+        found.unwrap_or_else(|| panic!("{wanted} is not drawn")).1
+    }
+
+    fn click(context: &egui::Context, tab: OptionsTab, copy: &mut OptionsCopy, position: Pos2) {
+        let button = |pressed| Event::PointerButton { pos: position, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(context, tab, copy, vec![Event::PointerMoved(position)]);
+        frame(context, tab, copy, vec![button(true)]);
+        frame(context, tab, copy, vec![button(false)]);
+    }
+
+    #[test]
+    fn toolbox_labels_line_up_in_their_column() {
+        for style in ["Menus", "Panel"] {
+            let context = context();
+            let mut copy = copy();
+            copy.set(Opt("ToolboxStyle"), Value::String(style.to_string()));
+            let texts = settle(&context, OptionsTab::Toolbox, &mut copy);
+            let mut labels = vec!["Configuration", "Layout", "Search Results", "Maximum Results"];
+            if style == "Menus" {
+                labels.push("Organization");
+            }
+            let column = rect_of(&texts, "Configuration").right();
+            for label in labels {
+                let rect = rect_of(&texts, label);
+                assert!((rect.right() - column).abs() <= 0.5, "{style}: {label} ends at {}, not {column}", rect.right());
+                assert!(rect.left() >= PLACE.left() + 8.0, "{style}: {label} starts at {}, at the section's edge {}", rect.left(), PLACE.left());
+            }
+            // "Search Results" heads the first of its check boxes, as far
+            // from it as the other labels are from what they label.
+            let search = rect_of(&texts, "Search Results");
+            let family = rect_of(&texts, "Show Family Name");
+            let icons = rect_of(&texts, "Show Icons");
+            assert!((search.center().y - family.center().y).abs() <= 1.0, "{style}: {search:?} is not in the row of {family:?}");
+            assert!((family.left() - icons.left()).abs() <= 0.5, "{style}: the search check boxes do not line up");
+            let first_choice = rect_of(&texts, if style == "Menus" { "Menus" } else { "Compact" });
+            let first_check = rect_of(&texts, "Highlight most-used nodes");
+            let family_gap = family.left() - search.right();
+            let choice_gap = first_check.left() - column;
+            assert!((family_gap - choice_gap).abs() <= 0.5, "{style}: Show Family Name is {family_gap} from its label, the checks {choice_gap} from the column");
+            assert!(first_choice.left() > column + 8.0, "{style}: the choices start at {}, too near the labels", first_choice.left());
+        }
+    }
+
+    #[test]
+    fn long_folder_paths_show_their_ends() {
+        let context = context();
+        let mut copy = copy();
+        let shared = "/home/someone/Documents/Terrains/Clients/Northern Range Survey/Season Two/Exports/Working Copies/Revisions/";
+        let user_files = format!("{shared}user files kept for the alpine set");
+        let project_files = format!("{shared}project files kept for the coastal set");
+        copy.set(Pref("Locations", "Documents"), Value::String(user_files.clone()));
+        copy.set(Pref("Locations", "Projects"), Value::String(project_files.clone()));
+        let texts = settle(&context, OptionsTab::Paths, &mut copy);
+        for (path, end) in [(&user_files, "alpine set"), (&project_files, "coastal set")] {
+            let shown = texts.iter().find(|(text, ..)| text.starts_with("/...") && text.ends_with(end));
+            let (_, rect, clip) = shown.unwrap_or_else(|| panic!("{path} is not shown by its end: {texts:?}"));
+            assert!(clip.expand(0.5).contains_rect(*rect), "{rect:?} is cut off at {clip:?}");
+        }
+
+        // Hovered, the whole path shows as the tooltip.
+        let shown = texts.iter().find(|(text, ..)| text.starts_with("/...") && text.ends_with("alpine set")).unwrap().1;
+        frame(&context, OptionsTab::Paths, &mut copy, vec![Event::PointerMoved(shown.center())]);
+        let texts = frame(&context, OptionsTab::Paths, &mut copy, vec![Event::PointerMoved(shown.center())]);
+        assert!(texts.iter().any(|(text, ..)| *text == user_files), "no tooltip with {user_files}");
+
+        // Clicked at its end, the whole path is typed in at its end.
+        click(&context, OptionsTab::Paths, &mut copy, Pos2::new(shown.right() + 1.0, shown.center().y));
+        frame(&context, OptionsTab::Paths, &mut copy, Vec::new());
+        frame(&context, OptionsTab::Paths, &mut copy, vec![Event::Text("s".to_string())]);
+        assert_eq!(copy.text(Pref("Locations", "Documents")), format!("{user_files}s"));
+        assert_eq!(copy.text(Pref("Locations", "Projects")), project_files);
+    }
+
+    #[test]
+    fn carets_go_to_the_same_place_in_the_whole_path() {
+        let path = "C:\\Users\\someone\\Documents\\Terrains";
+        let shown = "C:\\...Terrains";
+        // In the root.
+        assert_eq!(caret_in_path(shown, path, 0), 0);
+        assert_eq!(caret_in_path(shown, path, 3), 3);
+        // On the "...": where the end starts.
+        assert_eq!(caret_in_path(shown, path, 4), path.len() - 8);
+        // In the end, as far from the path's end.
+        assert_eq!(caret_in_path(shown, path, 6), path.len() - 8);
+        assert_eq!(caret_in_path(shown, path, 10), path.len() - 4);
+        assert_eq!(caret_in_path(shown, path, shown.len()), path.len());
+        // A path with no root.
+        assert_eq!(caret_in_path("...Terrains", "Documents/Terrains", 11), 18);
+        assert_eq!(caret_in_path("...Terrains", "Documents/Terrains", 0), 0);
+        assert_eq!(caret_in_path("...Terrains", "Documents/Terrains", 2), 10);
+    }
 }

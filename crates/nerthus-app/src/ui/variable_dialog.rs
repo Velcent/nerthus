@@ -22,6 +22,7 @@ const CONTENT_WIDTH: f32 = 480.0 - 24.0;
 /// `NumericTextBox`'s `Minimum` and `Maximum` here (`RecreateUI`).
 const LIMIT: f32 = 65535.0;
 /// A `NumericTextBox`'s header (`MinWidth="96"`) and box (96 at least).
+/// Every row's header takes this column, so that the boxes line up.
 const NUMBER_COLUMN: f32 = 96.0;
 /// `Thumb_OnDragDelta`: how far a point of dragging the header moves the
 /// value.
@@ -185,9 +186,10 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, open_dialog: &mut Option<E
             }
             VarType::Bool | VarType::Color | VarType::Decoration => {}
         }
-        // The buttons (margin 8, 24, 8, 8), on the right.
+        // The buttons (margin 8, 24, 8, 8), on the right, their text
+        // centred in them.
         ui.add_space(24.0);
-        ui.allocate_ui_with_layout(Vec2::new(CONTENT_WIDTH, ROW_HEIGHT + 8.0), Layout::right_to_left(Align::Min), |ui| {
+        ui.allocate_ui_with_layout(Vec2::new(CONTENT_WIDTH, ROW_HEIGHT), Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(8.0);
             if dialog_button(ui, "Cancel", false).clicked() {
                 close = true;
@@ -197,6 +199,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, open_dialog: &mut Option<E
                 accept = true;
             }
         });
+        ui.add_space(8.0);
     });
     // `IsDefault`: Enter accepts while nothing covers the dialog.
     let entered = ctx.input(|input| input.key_pressed(Key::Enter));
@@ -234,29 +237,39 @@ fn accept_changes(editor: &mut Editor, dialog: &mut EditVariable, commands: &mut
     true
 }
 
-/// "Variable Name" (margin 8) and its box, focused with its text chosen
-/// when the dialog opens.
+/// A field's row: `header` right-aligned in the header column, and a `Ui`
+/// for the box from 8 after it to the row's end, which centres the box
+/// down the row as the header is. Returns the header's rect and that `Ui`.
+fn field_row(ui: &mut Ui, header: &str) -> (Rect, Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(CONTENT_WIDTH, ROW_HEIGHT), Sense::hover());
+    let header_rect = Rect::from_min_size(rect.min, Vec2::new(NUMBER_COLUMN, rect.height()));
+    let galley = ui.painter().layout_no_wrap(header.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
+    let header_position = Pos2::new(header_rect.right() - galley.size().x, header_rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(header_position, galley, theme::LABEL_DEFAULT);
+    let box_rect = Rect::from_min_max(Pos2::new(header_rect.right() + 8.0, rect.top()), rect.max);
+    let box_ui = ui.new_child(UiBuilder::new().max_rect(box_rect).layout(Layout::left_to_right(Align::Center)));
+    (header_rect, box_ui)
+}
+
+/// "Variable Name" and its box, focused with its text chosen when the
+/// dialog opens.
 fn name_row(ui: &mut Ui, dialog: &mut EditVariable) {
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        let label = RichText::new("Variable Name").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
-        ui.label(label);
-        ui.add_space(8.0);
-        let mut edit = egui::TextEdit::singleline(&mut dialog.name);
-        edit = edit.font(theme::monospace(12.0));
-        edit = edit.desired_width(ui.available_width());
-        let response = ui.add(edit);
-        if !dialog.focused {
-            // `EditVariableDialog_Loaded`: `Focus`, then `SelectAll`.
-            response.request_focus();
-            let length = dialog.name.chars().count();
-            let mut state = egui::TextEdit::load_state(ui.ctx(), response.id).unwrap_or_default();
-            let everything = CCursorRange::two(CCursor::new(0), CCursor::new(length));
-            state.cursor.set_char_range(Some(everything));
-            state.store(ui.ctx(), response.id);
-            dialog.focused = true;
-        }
-    });
+    let (_, mut box_ui) = field_row(ui, "Variable Name");
+    let mut edit = egui::TextEdit::singleline(&mut dialog.name);
+    edit = edit.id(window_id().with("name"));
+    edit = edit.font(theme::monospace(12.0));
+    edit = edit.desired_width(box_ui.available_width());
+    let response = box_ui.add(edit);
+    if !dialog.focused {
+        // `EditVariableDialog_Loaded`: `Focus`, then `SelectAll`.
+        response.request_focus();
+        let length = dialog.name.chars().count();
+        let mut state = egui::TextEdit::load_state(ui.ctx(), response.id).unwrap_or_default();
+        let everything = CCursorRange::two(CCursor::new(0), CCursor::new(length));
+        state.cursor.set_char_range(Some(everything));
+        state.store(ui.ctx(), response.id);
+        dialog.focused = true;
+    }
 }
 
 /// `NumericTextBox`: the header right-aligned in its column (dragging it
@@ -264,11 +277,7 @@ fn name_row(ui: &mut Ui, dialog: &mut EditVariable) {
 /// (`Accent-Muted-Green` for integers). Enter, Tab or leaving the box
 /// takes its text.
 fn number_field(ui: &mut Ui, id: Id, header: &str, field: &mut NumberField) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(CONTENT_WIDTH, ROW_HEIGHT), Sense::hover());
-    let header_rect = Rect::from_min_size(rect.min, Vec2::new(NUMBER_COLUMN, rect.height()));
-    let galley = ui.painter().layout_no_wrap(header.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
-    let header_position = Pos2::new(header_rect.right() - galley.size().x, header_rect.center().y - galley.size().y / 2.0);
-    ui.painter().galley(header_position, galley, theme::LABEL_DEFAULT);
+    let (header_rect, mut box_ui) = field_row(ui, header);
     // `thumb`: invisible over the header.
     let thumb = ui.interact(header_rect, id.with("thumb"), Sense::drag());
     if thumb.hovered() || thumb.dragged() {
@@ -289,8 +298,6 @@ fn number_field(ui: &mut Ui, id: Id, header: &str, field: &mut NumberField) {
     if thumb.drag_stopped() {
         field.drag = None;
     }
-    let box_rect = Rect::from_min_size(Pos2::new(header_rect.right() + 8.0, rect.top()), Vec2::new(NUMBER_COLUMN, rect.height()));
-    let mut box_ui = ui.new_child(UiBuilder::new().max_rect(box_rect));
     let colour = if field.integer { theme::ACCENT_MUTED_GREEN } else { theme::ACCENT_MUTED_BLUE };
     let mut edit = egui::TextEdit::singleline(&mut field.text);
     edit = edit.id(id.with("text"));
@@ -309,19 +316,15 @@ fn number_field(ui: &mut Ui, id: Id, header: &str, field: &mut NumberField) {
     }
 }
 
-/// `dockChoices`: "Choices" (margin 8) and its box, and the hint under it
-/// on the right (10, at 0.7).
+/// `dockChoices`: "Choices" and its box, and the hint under it on the
+/// right (10, at 0.7).
 fn choices_row(ui: &mut Ui, dialog: &mut EditVariable) {
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        let label = RichText::new("Choices").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
-        ui.label(label);
-        ui.add_space(8.0);
-        let mut edit = egui::TextEdit::singleline(&mut dialog.choices);
-        edit = edit.font(theme::monospace(12.0));
-        edit = edit.desired_width(ui.available_width());
-        ui.add(edit);
-    });
+    let (_, mut box_ui) = field_row(ui, "Choices");
+    let mut edit = egui::TextEdit::singleline(&mut dialog.choices);
+    edit = edit.id(window_id().with("choices"));
+    edit = edit.font(theme::monospace(12.0));
+    edit = edit.desired_width(box_ui.available_width());
+    box_ui.add(edit);
     ui.add_space(6.0);
     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
         let hint_colour = theme::LABEL_DEFAULT.gamma_multiply(0.7);
@@ -330,13 +333,14 @@ fn choices_row(ui: &mut Ui, dialog: &mut EditVariable) {
     });
 }
 
-/// `cboStringType` (`DropdownX` "String Type").
+/// `cboStringType` (`DropdownX` "String Type"), its box lined up with the
+/// other rows' (`dropdown_box` leaves 8 after the header).
 fn string_type_row(ui: &mut Ui, dialog: &mut EditVariable) {
     let entries: Vec<(String, String)> = STRING_TYPES.iter().enumerate().map(|(index, name)| (index.to_string(), name.to_string())).collect();
     let shown = STRING_TYPES.get(dialog.string_type).copied().unwrap_or("");
     let current = dialog.string_type.to_string();
     let id = window_id().with("string-type");
-    let chosen = dropdown_box(ui, id, Some("String Type"), 160.0, ROW_HEIGHT, shown, &entries, &current, theme::interface(12.0));
+    let chosen = dropdown_box(ui, id, Some("String Type"), NUMBER_COLUMN + 8.0, ROW_HEIGHT, shown, &entries, &current, theme::interface(12.0));
     if let Some(index) = chosen.and_then(|value| value.parse::<usize>().ok()) {
         dialog.string_type = index;
     }
@@ -356,7 +360,47 @@ fn dialog_button(ui: &mut Ui, text: &str, important: bool) -> egui::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Document;
+    use egui::RawInput;
     use serde_json::json;
+
+    /// The dialog on a variable of this kind, after a few frames at
+    /// 1600 × 960 and 120%. Returns the context to read it back from.
+    fn shown(kind: &str) -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut editor = Editor::new(Document::new());
+        let key = editor.document.add_variable(kind);
+        let mut dialog = open(&editor, &key);
+        let mut commands = Vec::new();
+        for _ in 0..3 {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1333.0, 800.0))), ..Default::default() };
+            let output = context.run_ui(input, |ui| show(ui.ctx(), &mut editor, &mut dialog, &mut commands));
+            output.drop_without_applying_deltas();
+        }
+        assert!(dialog.is_some(), "the dialog closed");
+        context
+    }
+
+    fn rect(context: &egui::Context, id: Id) -> Rect {
+        context.read_response(id).map(|response| response.rect).unwrap_or_else(|| panic!("{id:?} was not shown"))
+    }
+
+    #[test]
+    fn the_boxes_share_their_left_edge_and_sit_level_with_their_headers() {
+        let context = shown("Int");
+        let name = rect(&context, window_id().with("name"));
+        for limit in ["min", "max"] {
+            let header = rect(&context, window_id().with(limit).with("thumb"));
+            let number = rect(&context, window_id().with(limit).with("text"));
+            assert!((number.left() - name.left()).abs() < 0.5, "{limit} {number:?} does not line up with the name {name:?}");
+            assert!((number.center().y - header.center().y).abs() < 0.5, "{limit} {number:?} is not level with its header {header:?}");
+        }
+        let context = shown("Choice");
+        let name = rect(&context, window_id().with("name"));
+        let choices = rect(&context, window_id().with("choices"));
+        assert!((choices.left() - name.left()).abs() < 0.5, "the choices {choices:?} do not line up with the name {name:?}");
+    }
 
     #[test]
     fn fields_come_from_the_variable_and_go_back_as_limits() {

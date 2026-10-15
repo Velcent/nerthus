@@ -1,5 +1,6 @@
 //! The status bar (`Shell` `StatusBar`, padding 8, 0, 8, 2): the latest
-//! message on the left; on the right, what the engine is doing, the
+//! message on the left, cut short with "…" before the right-hand group
+//! and shown in full on hover; on the right, what the engine is doing, the
 //! compute device and memory (`Button-IconText`, monospace). The device
 //! button (`btnCPU`) shows only in CPU-only mode, or when the benchmark's
 //! fastest device is off; it opens Options at Compute. The memory button
@@ -17,6 +18,9 @@ use crate::ui::tool_commands::ToolCommand;
 use crate::ui::widgets::Tooltips;
 
 pub const HEIGHT: f32 = 20.0;
+
+/// The space between the end of the message and the right-hand group.
+const MESSAGE_GAP: f32 = 16.0;
 
 /// `BrushName.Teal`: the memory readout, once a version has started for
 /// the first time.
@@ -44,55 +48,63 @@ fn memory_colour() -> egui::Color32 {
 pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, process_gib: Option<f64>, commands: &mut Vec<Command>) {
     ui.painter().rect_filled(rect, 0.0, theme::WINDOW_BACKGROUND);
     let content = Rect::from_min_max(rect.min + Vec2::new(8.0, 0.0), rect.max - Vec2::new(8.0, 2.0));
-    let builder = UiBuilder::new().max_rect(content).layout(Layout::left_to_right(Align::Center));
+    // The right-hand group is laid out first, from the right edge, so the
+    // message has only the width it leaves.
+    let builder = UiBuilder::new().max_rect(content).layout(Layout::right_to_left(Align::Center));
     let mut bar = ui.new_child(builder);
+    bar.spacing_mut().item_spacing.x = 0.0;
+    readout(&mut bar, editor, process_gib, commands);
 
+    bar.add_space(MESSAGE_GAP);
     let message = editor.messages.last().cloned().unwrap_or_default();
     let message_text = RichText::new(message).font(theme::interface(10.0)).color(theme::LABEL_DEFAULT);
-    bar.add(egui::Label::new(message_text).truncate());
-
-    bar.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        // `btnMemory`: the cached maps against the process, as Humanizer's
-        // "0.0 GB" writes them.
-        let gigabytes = |bytes: f64| bytes / (1024.0 * 1024.0 * 1024.0);
-        let cached = gigabytes(editor.cache_bytes as f64);
-        let memory = match process_gib {
-            Some(process) => format!("{cached:.1} GB / {process:.1} GB"),
-            None => format!("{cached:.1} GB"),
-        };
-        let memory_button = icon_text(ui, "binary", &memory, 11.0, memory_colour());
-        if memory_button.tooltip(memory_tooltip(cached, process_gib)).clicked() {
-            commands.push(Command::CleanMemory);
-        }
-        let device = if editor.compute.cpu_only { Some("CPU Only") } else { editor.compute.fastest_disabled.as_deref() };
-        if let Some(device) = device {
-            let device_button = icon_text(ui, "cpu-2", device, 10.0, theme::LABEL_DEFAULT);
-            if device_button.tooltip(device_tooltip(editor.compute.cpu_only)).clicked() {
-                commands.push(Command::ShowOptions(Some(OptionsTab::Compute)));
-            }
-        }
-        // `NahimicWarning`: shows the warning again.
-        if crate::nahimic::detected() {
-            ui.add_space(8.0);
-            let warning_text = RichText::new("⚠ Nahimic Detected!").font(theme::interface(10.0)).color(theme::LABEL_DEFAULT);
-            let warning = ui.add(egui::Label::new(warning_text).sense(Sense::click()));
-            let warning = warning.on_hover_cursor(egui::CursorIcon::PointingHand);
-            if warning.clicked() {
-                commands.push(Command::Tools(ToolCommand::ShowNahimicWarning));
-            }
-        }
-        let state = if !editor.engine_active {
-            "Engine suspended"
-        } else if editor.building {
-            "Building"
-        } else {
-            "Idle"
-        };
-        ui.add_space(8.0);
-        let state_text = RichText::new(state).font(theme::interface(10.0)).color(theme::LABEL_DEFAULT);
-        ui.label(state_text);
+    bar.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        ui.add(egui::Label::new(message_text).truncate());
     });
+}
+
+/// The right-hand group, right to left: memory, the device, the Nahimic
+/// warning and what the engine is doing.
+fn readout(ui: &mut Ui, editor: &Editor, process_gib: Option<f64>, commands: &mut Vec<Command>) {
+    // `btnMemory`: the cached maps against the process, as Humanizer's
+    // "0.0 GB" writes them.
+    let gigabytes = |bytes: f64| bytes / (1024.0 * 1024.0 * 1024.0);
+    let cached = gigabytes(editor.cache_bytes as f64);
+    let memory = match process_gib {
+        Some(process) => format!("{cached:.1} GB / {process:.1} GB"),
+        None => format!("{cached:.1} GB"),
+    };
+    let memory_button = icon_text(ui, "binary", &memory, 11.0, memory_colour());
+    if memory_button.tooltip(memory_tooltip(cached, process_gib)).clicked() {
+        commands.push(Command::CleanMemory);
+    }
+    let device = if editor.compute.cpu_only { Some("CPU Only") } else { editor.compute.fastest_disabled.as_deref() };
+    if let Some(device) = device {
+        let device_button = icon_text(ui, "cpu-2", device, 10.0, theme::LABEL_DEFAULT);
+        if device_button.tooltip(device_tooltip(editor.compute.cpu_only)).clicked() {
+            commands.push(Command::ShowOptions(Some(OptionsTab::Compute)));
+        }
+    }
+    // `NahimicWarning`: shows the warning again.
+    if crate::nahimic::detected() {
+        ui.add_space(8.0);
+        let warning_text = RichText::new("⚠ Nahimic Detected!").font(theme::interface(10.0)).color(theme::LABEL_DEFAULT);
+        let warning = ui.add(egui::Label::new(warning_text).sense(Sense::click()));
+        let warning = warning.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if warning.clicked() {
+            commands.push(Command::Tools(ToolCommand::ShowNahimicWarning));
+        }
+    }
+    let state = if !editor.engine_active {
+        "Engine suspended"
+    } else if editor.building {
+        "Building"
+    } else {
+        "Idle"
+    };
+    ui.add_space(8.0);
+    let state_text = RichText::new(state).font(theme::interface(10.0)).color(theme::LABEL_DEFAULT);
+    ui.label(state_text);
 }
 
 /// The memory button's tooltip: what its two figures are, and what a
@@ -235,5 +247,48 @@ mod tests {
         editor.compute.cpu_only = true;
         let command = Command::ShowOptions(Some(OptionsTab::Compute));
         check_button(&editor, "CPU Only", theme::LABEL_DEFAULT, device_tooltip(true), command);
+    }
+
+    #[test]
+    fn a_long_message_stops_short_of_the_readout_and_shows_in_full_on_hover() {
+        let mut editor = Editor::new(Document::new());
+        editor.compute.cpu_only = true;
+        let folder = "/a very long directory name for testing recent paths overflow in nerthus/another nested folder level two/and a third";
+        let message = format!("Opened {folder}/Alpine_Valley_with_an_extremely_long_file_name_used_to_test_overflow.terrain");
+        editor.messages.push(message.clone());
+        let context = themed_context();
+        let (shapes, _) = frame(&context, &editor, Vec::new());
+
+        let shown = text_saying(&shapes, &message).expect("the message shows");
+        assert!(shown.galley.elided, "the message is cut short");
+        let message_rect = shown.visual_bounding_rect();
+        assert!(message_rect.left() >= BAR.left() + 8.0, "the message starts inside the bar: {message_rect:?}");
+        let state = text_saying(&shapes, "Idle").expect("the engine's state shows").visual_bounding_rect();
+        assert!(message_rect.right() + MESSAGE_GAP <= state.left(), "the message {message_rect:?} stops short of the state {state:?}");
+        for readout in ["CPU Only", "0.0 GB / 1.3 GB"] {
+            let readout_rect = text_saying(&shapes, readout).unwrap_or_else(|| panic!("{readout} shows")).visual_bounding_rect();
+            assert!(!message_rect.intersects(readout_rect), "the message {message_rect:?} clears {readout} {readout_rect:?}");
+        }
+
+        let point = message_rect.center();
+        frame(&context, &editor, vec![Event::PointerMoved(point)]);
+        let in_full = (0..120).any(|_| {
+            let (shapes, _) = frame(&context, &editor, Vec::new());
+            shapes.iter().any(|clipped| match &clipped.shape {
+                Shape::Text(shape) => shape.galley.text() == message && !shape.galley.elided,
+                _ => false,
+            })
+        });
+        assert!(in_full, "the whole message shows on hover");
+    }
+
+    #[test]
+    fn a_short_message_shows_whole() {
+        let mut editor = Editor::new(Document::new());
+        let message = "Opened Alpine Valley.terrain";
+        editor.messages.push(message.to_string());
+        let (shapes, _) = frame(&themed_context(), &editor, Vec::new());
+        let shown = text_saying(&shapes, message).expect("the message shows");
+        assert!(!shown.galley.elided, "the message is whole");
     }
 }

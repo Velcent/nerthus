@@ -801,6 +801,29 @@ mod tests {
     }
 
     #[test]
+    fn every_page_leaves_the_window_its_size_and_place() {
+        // egui draws the title bar as wide as the window's size, and grows
+        // the frame round a page too big for it: the frame would then stick
+        // out past the title bar, and the window would jump as such a page
+        // came and went (Compute, with its devices, console and buttons).
+        // 1600 × 960 at 120% and 100%, and at 175%, where it is squeezed.
+        for screen in [Vec2::new(1333.0, 800.0), Vec2::new(1600.0, 960.0), Vec2::new(914.0, 548.0)] {
+            let context = context();
+            let mut editor = Editor::new(Document::new());
+            let mut state = Some(OptionsState::new(OptionsTab::General));
+            let first = settle(&context, screen, &mut editor, &mut state);
+            let body = tool_window::body(&context);
+            let wanted = WINDOW_SIZE.min(body.size());
+            assert!((first.size() - wanted).abs().max_elem() <= 1.0, "General at {screen:?}: {first:?} is not {wanted:?}");
+            for (tab, ..) in TABS.into_iter().chain([TABS[0]]) {
+                state.as_mut().unwrap().tab = tab;
+                let rect = settle(&context, screen, &mut editor, &mut state);
+                assert!((rect.min - first.min).abs().max_elem() <= 0.5 && (rect.max - first.max).abs().max_elem() <= 0.5, "{tab:?} at {screen:?}: {rect:?} is not {first:?}");
+            }
+        }
+    }
+
+    #[test]
     fn every_page_fits_small_bodies() {
         for screen in SMALL_SCREENS {
             let context = context();

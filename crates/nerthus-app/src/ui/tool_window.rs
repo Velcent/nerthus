@@ -9,6 +9,11 @@ use egui::{Align2, AreaState, Context, Id, Layout, Pos2, Rect, Ui, Vec2};
 
 use crate::ui::{status_bar, title_bar};
 
+/// A tool window's margin (Edit Math Node's and the Constructor's 12).
+/// egui gives its title bar the same margin, which sets the title bar's
+/// height: a window whose content reaches its edges keeps it on the title.
+pub const MARGIN: i8 = 12;
+
 /// A window the body got too small for.
 #[derive(Clone, Copy, Debug)]
 struct Squeezed {

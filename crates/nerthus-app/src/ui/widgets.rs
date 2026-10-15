@@ -370,6 +370,13 @@ pub fn dialog_button(ui: &mut Ui, text: &str, important: bool) -> Response {
     ui.add(widget)
 }
 
+/// A row of dialog buttons, from the right, as high as they are (a layout
+/// given the rest of the dialog would take it all), their text centred.
+pub fn dialog_button_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let row = Vec2::new(ui.available_width(), DIALOG_BUTTON_HEIGHT);
+    ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), add_contents).inner
+}
+
 /// The tooltips, as egui's `on_hover_text` and its kin show them but
 /// with `TOOLTIP_MARGIN` round them.
 pub trait Tooltips {
