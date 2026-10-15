@@ -22,6 +22,8 @@ const MENU_ROW_HEIGHT: f32 = 23.0;
 const MENU_ICON_COLUMN: f32 = 30.0;
 const MENU_ARROW_COLUMN: f32 = 20.0;
 const MENU_MIN_WIDTH: f32 = 190.0;
+/// A disabled row's icon, text and arrow are drawn at half opacity.
+const MENU_DISABLED_OPACITY: f32 = 0.5;
 
 /// Paints a toolbar's cladding (`Panel-Cladding`, 4px corners).
 pub fn toolbar_background(ui: &Ui, rect: Rect, border: Color32, border_width: f32) {
@@ -195,6 +197,17 @@ pub fn menu_row_width(ui: &Ui, content_width: f32) -> f32 {
     ui.available_width().max(needed)
 }
 
+/// A row's shortcut colour: `Menu-Gesture`, or, when the row is disabled,
+/// its label's grey. The gesture's slate dimmed by half as well would all
+/// but vanish on the menu (under 2:1).
+fn shortcut_color(enabled: bool) -> Color32 {
+    if enabled {
+        theme::MENU_GESTURE
+    } else {
+        theme::MENU_FOREGROUND.gamma_multiply(MENU_DISABLED_OPACITY)
+    }
+}
+
 /// One menu row: the hover fill (inset 1, corners 4), the icon centred in
 /// its column, the text 2 past it (11px, white when highlighted), the
 /// shortcut in monospace 10 at the right and, for submenus, the arrow.
@@ -214,7 +227,7 @@ fn menu_row_styled(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, style
     if highlighted {
         ui.painter().rect_filled(rect.shrink(1.0), 4.0, theme::MENU_BACKGROUND_HOVER);
     }
-    let opacity = if enabled { 1.0 } else { 0.5 };
+    let opacity = if enabled { 1.0 } else { MENU_DISABLED_OPACITY };
     if let Some((name, color)) = icon {
         let icon_center = Pos2::new(rect.left() + MENU_ICON_COLUMN / 2.0, rect.center().y);
         let icon_rect = Rect::from_center_size(icon_center, Vec2::splat(icons::DEFAULT_SIZE));
@@ -226,7 +239,7 @@ fn menu_row_styled(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, style
     let text_position = Pos2::new(rect.left() + MENU_ICON_COLUMN + 2.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(text_position, galley, text_color);
     if !shortcut.is_empty() {
-        let shortcut_color = theme::MENU_GESTURE.gamma_multiply(0.75 * opacity);
+        let shortcut_color = shortcut_color(enabled);
         let shortcut_galley = ui.painter().layout_no_wrap(shortcut.to_string(), theme::monospace(10.0), shortcut_color);
         let shortcut_position = Pos2::new(rect.right() - 8.0 - shortcut_galley.size().x, rect.center().y - shortcut_galley.size().y / 2.0);
         ui.painter().galley(shortcut_position, shortcut_galley, shortcut_color);
@@ -472,5 +485,25 @@ mod tests {
     fn a_submenu_with_no_room_on_the_right_opens_on_the_left() {
         let (menu, _, submenu) = open_bake(640.0, 520.0);
         assert!(submenu.right() <= menu.left(), "{submenu:?} covers {menu:?}");
+    }
+
+    /// The WCAG contrast of `color`, laid over `background` as egui blends
+    /// (in gamma space), against `background`.
+    fn contrast(color: Color32, background: Color32) -> f32 {
+        let luminance = |color: Color32| {
+            let [red, green, blue] = theme::sc_rgb(color);
+            0.2126 * red + 0.7152 * green + 0.0722 * blue
+        };
+        let front = luminance(background.blend(color));
+        let back = luminance(background);
+        (front.max(back) + 0.05) / (front.min(back) + 0.05)
+    }
+
+    #[test]
+    fn shortcuts_stay_legible_when_disabled() {
+        let enabled = contrast(shortcut_color(true), theme::MENU_BACKGROUND);
+        let disabled = contrast(shortcut_color(false), theme::MENU_BACKGROUND);
+        assert!(enabled >= 3.0, "an enabled shortcut is {enabled:.2}:1");
+        assert!(disabled >= 3.0, "a disabled shortcut is {disabled:.2}:1");
     }
 }
