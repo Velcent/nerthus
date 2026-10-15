@@ -3,6 +3,8 @@
 //! its value for each of red, green and blue, and the colour as hex text.
 //! Colours are sRGB bytes, as WPF's `Color.R/G/B`; projects keep them as
 //! scRGB floats (`Color.ScR/ScG/ScB`), converted with WPF's own functions.
+//! [`colour_button`] shows the editor for a colour property under its
+//! swatch, as the gradient editor shows it for a stop.
 
 use egui::{Color32, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -14,6 +16,15 @@ const HUE_WIDTH: f32 = 20.0;
 /// A component row: the slider, then its value box (50 wide).
 const ROW_HEIGHT: f32 = 24.0;
 const VALUE_WIDTH: f32 = 50.0;
+/// The ring at the colour on the spectrum.
+const RING_RADIUS: f32 = 5.0;
+const RING_WIDTH: f32 = 1.5;
+/// The swatch's popup: the editor this wide, inside a margin of 8 (the
+/// gradient editor's), which the ring at an edge of the spectrum does not
+/// reach past.
+const POPUP_WIDTH: f32 = 240.0;
+const POPUP_MARGIN: i8 = 8;
+const _: () = assert!(POPUP_MARGIN as f32 > RING_RADIUS + RING_WIDTH / 2.0);
 
 /// `Color.sRgbToScRgb`.
 pub fn srgb_to_linear(byte: u8) -> f32 {
@@ -40,6 +51,13 @@ pub fn linear_to_srgb(value: f32) -> u8 {
     } else {
         255
     }
+}
+
+/// The scRGB floats for `colour`, picked for a colour that was `linear`:
+/// a component whose byte is unchanged keeps its float, so editing one
+/// leaves the others exactly as they were.
+pub fn picked_linear(linear: [f32; 3], colour: [u8; 3]) -> [f32; 3] {
+    std::array::from_fn(|index| if linear_to_srgb(linear[index]) == colour[index] { linear[index] } else { srgb_to_linear(colour[index]) })
 }
 
 /// HSV (hue in degrees) of an sRGB colour, as the spectrum shows it.
@@ -135,7 +153,7 @@ pub fn colour_picker(ui: &mut Ui, id: Id, rgb: [u8; 3]) -> Option<[u8; 3]> {
     // The markers: a ring at the colour, a bar at the hue.
     let marker = Pos2::new(square.left() + hsv[1] * square.width(), square.top() + (1.0 - hsv[2]) * square.height());
     let ring_colour = if hsv[2] > 0.5 { Color32::BLACK } else { Color32::WHITE };
-    ui.painter().circle_stroke(marker, 5.0, Stroke::new(1.5, ring_colour));
+    ui.painter().circle_stroke(marker, RING_RADIUS, Stroke::new(RING_WIDTH, ring_colour));
     let hue_y = hue_strip.top() + hsv[0] / 360.0 * hue_strip.height();
     let hue_marker = Rect::from_center_size(Pos2::new(hue_strip.center().x, hue_y), Vec2::new(hue_strip.width() + 4.0, 3.0));
     ui.painter().rect_stroke(hue_marker, 1.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Middle);
@@ -188,6 +206,31 @@ pub fn colour_picker(ui: &mut Ui, id: Id, rgb: [u8; 3]) -> Option<[u8; 3]> {
     }
     ui.data_mut(|data| data.insert_temp(id, state));
     changed.filter(|new_colour| *new_colour != rgb)
+}
+
+/// `ColorPickerEditor`'s swatch: the colour, `size` big, as egui's colour
+/// button draws it. A click opens [`colour_picker`] under it in a popup
+/// with a margin round it, which a click outside or Escape closes;
+/// returns the colour when changed.
+pub fn colour_button(ui: &mut Ui, size: Vec2, rgb: [u8; 3]) -> Option<[u8; 3]> {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let popup_id = egui::Popup::default_response_id(&response);
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    // The colour inside a 1px line of the widget's fill.
+    let visuals = if open { &ui.visuals().widgets.open } else { ui.style().interact(&response) };
+    let swatch = rect.expand(visuals.expansion);
+    ui.painter().rect_filled(swatch.shrink(1.0), 0.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+    ui.painter().rect_stroke(swatch, visuals.corner_radius.at_most(2), Stroke::new(1.0, visuals.bg_fill), egui::StrokeKind::Inside);
+
+    let mut changed = None;
+    let mut popup = egui::Popup::from_toggle_button_response(&response);
+    popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    popup = popup.frame(egui::Frame::popup(ui.style()).inner_margin(POPUP_MARGIN));
+    popup.show(|ui| {
+        ui.set_width(POPUP_WIDTH);
+        changed = colour_picker(ui, popup_id.with("editor"), rgb);
+    });
+    changed
 }
 
 /// A component's slider (its colour's range for that component) and its
@@ -320,5 +363,114 @@ mod tests {
         assert_eq!(parse_hex("#FF8000"), Some([255, 128, 0]));
         assert_eq!(parse_hex("ccff8000"), Some([255, 128, 0]));
         assert_eq!(parse_hex("#F80"), None);
+    }
+
+    #[test]
+    fn picked_colours_keep_the_floats_of_unchanged_components() {
+        // Constant "White" in Alpine Valley: sRGB 242, 244, 247.
+        let white = [0.887_923_1, 0.904_661_2, 0.930_110_9];
+        assert_eq!(white.map(linear_to_srgb), [242, 244, 247]);
+        assert_eq!(picked_linear(white, [242, 255, 247]), [white[0], 1.0, white[2]]);
+        assert_eq!(picked_linear(white, [242, 244, 247]), white);
+    }
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(600.0, 500.0));
+    const SWATCH: Rect = Rect::from_min_max(Pos2::new(20.0, 20.0), Pos2::new(300.0, 42.0));
+
+    /// A context with the editor's look, which takes effect a frame after
+    /// it is set.
+    fn themed_context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let output = context.run_ui(egui::RawInput::default(), |_| {});
+        output.drop_without_applying_deltas();
+        context
+    }
+
+    /// One frame of a swatch for `rgb` with these events: the colour it
+    /// returned and the shapes drawn.
+    fn swatch_frame(context: &egui::Context, rgb: [u8; 3], events: Vec<egui::Event>) -> (Option<[u8; 3]>, Vec<egui::Shape>) {
+        let input = egui::RawInput { screen_rect: Some(SCREEN), events, ..Default::default() };
+        let mut picked = None;
+        let mut output = context.run_ui(input, |ui| {
+            let mut swatch_ui = ui.new_child(egui::UiBuilder::new().max_rect(SWATCH));
+            picked = colour_button(&mut swatch_ui, SWATCH.size(), rgb);
+        });
+        let mut shapes = Vec::new();
+        for clipped in std::mem::take(&mut output.shapes) {
+            flatten(clipped.shape, &mut shapes);
+        }
+        output.drop_without_applying_deltas();
+        (picked, shapes)
+    }
+
+    fn flatten(shape: egui::Shape, into: &mut Vec<egui::Shape>) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.into_iter().for_each(|shape| flatten(shape, into)),
+            shape => into.push(shape),
+        }
+    }
+
+    /// A press and a release at `position`, a frame each; the colours the
+    /// swatch returned.
+    fn click(context: &egui::Context, rgb: [u8; 3], position: Pos2) -> Vec<Option<[u8; 3]>> {
+        let button = |pressed: bool| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        [vec![egui::Event::PointerMoved(position)], vec![button(true)], vec![button(false)]].into_iter().map(|events| swatch_frame(context, rgb, events).0).collect()
+    }
+
+    /// The open popup's frame.
+    fn popup_frame(context: &egui::Context) -> Option<Rect> {
+        context.memory(|memory| memory.areas().top_layer_id(egui::Order::Foreground).and_then(|layer| memory.area_rect(layer.id)))
+    }
+
+    #[test]
+    fn the_swatch_popup_keeps_the_editor_and_its_ring_inside_its_margin() {
+        // White and greys put the ring on the spectrum's left edge, black
+        // in a corner, pure hues on its right edge beside the hue strip.
+        for rgb in [[255, 255, 255], [242, 244, 247], [128, 128, 128], [0, 0, 0], [255, 0, 0], [0, 0, 255]] {
+            let context = themed_context();
+            click(&context, rgb, SWATCH.center());
+            swatch_frame(&context, rgb, Vec::new());
+            let (_, shapes) = swatch_frame(&context, rgb, Vec::new());
+            let frame = popup_frame(&context).expect("the swatch opens its popup");
+            assert!((frame.width() - (POPUP_WIDTH + 2.0 * (POPUP_MARGIN as f32 + 1.0))).abs() < 0.5, "{frame:?}");
+            // Inside the 1px border, and the editor inside the margin.
+            let inside_border = frame.shrink(1.0);
+            let content = inside_border.shrink(POPUP_MARGIN as f32).expand(0.5);
+            let mut rings = 0;
+            for shape in &shapes {
+                let bounds = shape.visual_bounding_rect();
+                match shape {
+                    egui::Shape::Circle(circle) if circle.radius == RING_RADIUS => {
+                        rings += 1;
+                        assert!(inside_border.contains_rect(bounds), "{rgb:?}: the ring {bounds:?} leaves {inside_border:?}");
+                    }
+                    egui::Shape::Mesh(_) | egui::Shape::Text(_) => assert!(content.contains_rect(bounds), "{rgb:?}: {bounds:?} is in the margin of {frame:?}"),
+                    _ => {}
+                }
+            }
+            assert_eq!(rings, 1, "{rgb:?}");
+        }
+    }
+
+    #[test]
+    fn the_swatch_popup_picks_until_a_click_outside_closes_it() {
+        let context = themed_context();
+        let grey = [128, 128, 128];
+        click(&context, grey, SWATCH.center());
+        swatch_frame(&context, grey, Vec::new());
+        let frame = popup_frame(&context).expect("the swatch opens its popup");
+        // The spectrum's top left, a quarter of the way across and down.
+        let spectrum = frame.min + Vec2::splat(1.0 + POPUP_MARGIN as f32);
+        let square_width = POPUP_WIDTH - HUE_WIDTH - 8.0;
+        let picked = click(&context, grey, spectrum + Vec2::new(square_width / 4.0, SPECTRUM_HEIGHT / 4.0));
+        let picked = picked.into_iter().flatten().next().expect("a click on the spectrum picks");
+        // Hue 0 kept from the grey, saturation and value read from the click.
+        let [hue, saturation, value] = to_hsv(picked);
+        assert!(hue.abs() < 1.0 && (saturation - 0.25).abs() < 0.02 && (value - 0.75).abs() < 0.02, "{picked:?}");
+        assert!(egui::Popup::is_any_open(&context), "a click inside keeps the popup open");
+        let picked = click(&context, grey, Pos2::new(590.0, 490.0));
+        assert!(picked.iter().all(Option::is_none));
+        assert!(!egui::Popup::is_any_open(&context), "a click outside closes the popup");
     }
 }

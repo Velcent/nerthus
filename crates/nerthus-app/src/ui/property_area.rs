@@ -1432,6 +1432,41 @@ mod tests {
         assert!(editor.document.node(perlin).unwrap().modifiers.is_empty());
     }
 
+    #[test]
+    fn modifier_boxes_line_up_with_the_group_panels() {
+        let mut document = Document::new();
+        let perlin = document.add_node("Perlin", [26000.0, 26000.0]).unwrap();
+        document.toggle_modifier(perlin, "Blur");
+        let node = document.node(perlin).unwrap().clone();
+        // Each size theme has its own `Expander.Margin`.
+        for compact in [false, true] {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            theme::set_settings(&context, theme::InterfaceSettings { compact, ..Default::default() });
+            context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 600.0));
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let mut boxes = Vec::new();
+            let mut output = context.run_ui(input, |ui| {
+                let mut column = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 600.0))));
+                column.spacing_mut().item_spacing = Vec2::ZERO;
+                group_panel(&mut column, (perlin, 0), "Perlin", true, |ui| {
+                    ui.allocate_space(Vec2::new(ui.available_width(), 26.0));
+                });
+                boxes = modifier_list(&mut column, &node, perlin, 0, 300.0).boxes;
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            let group = shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.fill == theme::EXPANDER_BACKGROUND => Some(rect.rect),
+                _ => None,
+            });
+            let group = group.expect("the group panel is drawn");
+            assert_eq!(boxes.len(), 1);
+            assert_eq!((boxes[0].left(), boxes[0].right()), (group.left(), group.right()), "compact: {compact}");
+        }
+    }
+
     /// Mountain, then a baked Gate, then a baked Blur.
     fn baked_chain() -> (Editor, i32, i32) {
         let mut document = Document::new();
