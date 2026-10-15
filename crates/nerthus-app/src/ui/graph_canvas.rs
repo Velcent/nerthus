@@ -2845,6 +2845,79 @@ mod tests {
     }
 
     #[test]
+    fn icons_across_any_edge_are_cut_off_there() {
+        // At 200%, 100% and 55%, nodes (one dimmed), a locked group, a
+        // collapsed group and an icon note sit across each of the graph's
+        // edges, the nodes marked for export and one locked in the
+        // preview: their icons cross every edge and none shows past it.
+        for zoom in [2.0, 1.0, 0.55] {
+            let mut editor = Editor::new(Document::new());
+            let mut state = GraphState::default();
+            let context = themed_context();
+            egui_extras::install_image_loaders(&context);
+            frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+            state.view_mut().zoom = zoom;
+            let view = state.view();
+            let default_size = editor.user.options.default_node_size().to_string();
+            // The corner that puts an element `size` big (canvas) with its
+            // middle at the screen point `middle`.
+            let centred = |middle: Pos2, size: Vec2| {
+                let corner = view.to_canvas(GRAPH.min, middle) - size / 2.0;
+                [corner.x, corner.y]
+            };
+
+            let edges = [
+                (GRAPH.left_top(), Vec2::new(GRAPH.width(), 0.0)),
+                (GRAPH.left_bottom(), Vec2::new(GRAPH.width(), 0.0)),
+                (GRAPH.left_top(), Vec2::new(0.0, GRAPH.height())),
+                (GRAPH.right_top(), Vec2::new(0.0, GRAPH.height())),
+            ];
+            let mut nodes = Vec::new();
+            for (start, along) in edges {
+                for (fraction, dimmed) in [(0.15, false), (0.35, true)] {
+                    let node = editor.document.add_node("Mountain", [0.0, 0.0]).unwrap();
+                    let [width, height] = node_extent(editor.document.node(node).unwrap(), &default_size);
+                    editor.document.move_nodes(&[(node, centred(start + along * fraction, Vec2::new(width, height)))], false);
+                    if dimmed {
+                        state.dimmed.insert(node);
+                    }
+                    nodes.push(node);
+                }
+                let size = Vec2::new(300.0, 200.0);
+                let locked = editor.document.add_group(&[], centred(start + along * 0.55, size), [size.x, size.y], 0);
+                editor.document.set_group_locked(locked, true);
+                let collapsed = editor.document.add_group(&[], [0.0, 0.0], [size.x, size.y], 0);
+                editor.document.toggle_group_collapsed(collapsed);
+                let collapsed_size = editor.document.group(collapsed).unwrap().bounds().size();
+                editor.document.move_group(collapsed, centred(start + along * 0.75, collapsed_size), false);
+                let note = editor.document.add_note([0.0, 0.0], 0);
+                editor.document.toggle_note_type(note);
+                let note_size = crate::ui::graph_notes::note_rect(&editor, 0, note).unwrap().size();
+                editor.document.set_note_vector(note, "Position", centred(start + along * 0.9, note_size), false);
+            }
+            editor.document.toggle_export(&nodes, nerthus_export::FileFormat::Exr);
+            editor.preview_node = nodes.last().copied();
+            editor.preview_locked = true;
+
+            // Icons are the shapes drawn with a texture of their own.
+            let (shapes, _, _) = frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+            let mut crossed = [false; 4];
+            for clipped in &shapes {
+                let bounds = clipped.shape.visual_bounding_rect();
+                let shown = clipped.clip_rect.intersect(bounds);
+                assert!(!shown.is_positive() || GRAPH.contains_rect(shown), "at {zoom}: {shown:?} shows outside the graph");
+                if clipped.shape.texture_id() != egui::TextureId::default() {
+                    crossed[0] |= bounds.top() < GRAPH.top();
+                    crossed[1] |= bounds.bottom() > GRAPH.bottom();
+                    crossed[2] |= bounds.left() < GRAPH.left();
+                    crossed[3] |= bounds.right() > GRAPH.right();
+                }
+            }
+            assert_eq!(crossed, [true; 4], "at {zoom}: icons cross the top, bottom, left and right edges");
+        }
+    }
+
+    #[test]
     fn the_view_scrolls_faster_the_further_past_the_edge() {
         let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0));
         assert_eq!(auto_pan_velocity(rect, Pos2::new(400.0, 300.0)), Vec2::ZERO);
