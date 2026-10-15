@@ -1347,6 +1347,8 @@ fn option_cells(ui: &mut Ui, id: Id, list: Rect, entries: &[String], selected: O
         let text_color = if is_selected || hovered { theme::LABEL_EMPHASIS } else { theme::OPTIONS_LABEL };
         let shown_color = text_color.gamma_multiply(opacity);
         let galley = fitted_line(ui, entry, theme::interface(font_size), shown_color, item.width() - 2.0 * sizes.option_padding[0]);
+        // A cut entry is named in full under the pointer.
+        let response = if galley.elided { response.tooltip(entry) } else { response };
         ui.painter().galley(item.center() - galley.size() / 2.0, galley, shown_color);
         if response.clicked() && enabled && !is_selected {
             chosen = Some(index);
@@ -2181,6 +2183,30 @@ mod tests {
         file_frame(&context, "/old.png", vec![egui::Event::PointerMoved(below)]);
         let edit = file_frame_dropping(&context, "/old.png", Vec::new(), vec!["/maps/height.psd"]);
         assert!(matches!(edit, Edit::None));
+    }
+
+    #[test]
+    fn a_cut_option_is_named_in_full_on_hover() {
+        let context = themed_context();
+        let entries = vec!["Constant".to_string(), "Custom".to_string()];
+        let list = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(60.0, 40.0));
+        let frame = |events: Vec<egui::Event>| {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut output = context.run_ui(input, |ui| {
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(list));
+                option_list(&mut row, Id::new("options-test"), &entries, Some(1), 2, 11.0);
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            shapes
+        };
+        let whole = |shapes: &[egui::epaint::ClippedShape]| {
+            shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == "Constant" && !text.galley.elided))
+        };
+        assert!(!whole(&frame(Vec::new())), "Constant is cut in its cell");
+        frame(vec![egui::Event::PointerMoved(list.left_center() + Vec2::new(10.0, 0.0))]);
+        assert!((0..120).any(|_| whole(&frame(Vec::new()))), "Constant shows in full on hover");
     }
 
     #[test]
