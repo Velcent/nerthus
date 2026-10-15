@@ -34,6 +34,10 @@ fn toolbar_width(sizes: &theme::Sizes) -> f32 {
 /// border's margin), placed left of the sun button.
 const LIGHTING_POPUP_WIDTH: f32 = 400.0;
 const LIGHTING_POPUP_MARGIN: f32 = 24.0;
+/// The least the lighting panel is narrowed to where the window has less
+/// room beside the sun button: the dial and a slider's name and value
+/// still fit.
+const LIGHTING_PANEL_MIN_WIDTH: f32 = 200.0;
 /// `SunControl`: the dial, the sun's glow and how far past the dial the
 /// glow may be dragged (`MoveFactor`, three quarters of the glow).
 const SUN_DIAL: f32 = 96.0;
@@ -356,22 +360,43 @@ fn clicked_outside(ui: &Ui, panel: Rect) -> bool {
     layer.is_none_or(|layer| layer.order == egui::Order::Background)
 }
 
-/// `skyPopup`: the lighting panel (`PrivateSky` in an `EditorBase`) left
-/// of the sun button: a toolbar with Reset Sky, the sun dial and the
-/// parameters. Returns where the panel is.
+/// Where the lighting panel goes beside `sun_button` in `window`: its left
+/// and its width. The popup's margin stays clear round the panel, from the
+/// window's edges as from the button: left of the button, as
+/// `ToggleSkyEditor` opens it, where it fits there; else right of it, as a
+/// popup that does not fit flips; else on the side with more room,
+/// narrowed to it but no narrower than `LIGHTING_PANEL_MIN_WIDTH`. Only a
+/// window too narrow even for that has it over the button.
+fn lighting_panel_span(sun_button: Rect, window: Rect) -> (f32, f32) {
+    let full = LIGHTING_POPUP_WIDTH - 2.0 * LIGHTING_POPUP_MARGIN;
+    let leftmost = window.left() + LIGHTING_POPUP_MARGIN;
+    let rightmost = window.right() - LIGHTING_POPUP_MARGIN;
+    let left_room = sun_button.left() - LIGHTING_POPUP_MARGIN - leftmost;
+    let right_room = rightmost - (sun_button.right() + LIGHTING_POPUP_MARGIN);
+    let on_left = left_room >= full || (right_room < full && left_room >= right_room);
+    let width = if on_left { left_room } else { right_room }.clamp(LIGHTING_PANEL_MIN_WIDTH, full);
+    let left = if on_left { sun_button.left() - LIGHTING_POPUP_MARGIN - width } else { sun_button.right() + LIGHTING_POPUP_MARGIN };
+    (left.clamp(leftmost, (rightmost - width).max(leftmost)), width)
+}
+
+/// `skyPopup`: the lighting panel (`PrivateSky` in an `EditorBase`) beside
+/// the sun button (`lighting_panel_span`): a toolbar with Reset Sky, the
+/// sun dial and the parameters. Returns where the panel is.
 fn lighting_panel(ui: &Ui, sun_button: Rect, editor: &Editor, settings: &mut ViewportSettings, commands: &mut Vec<Command>) -> Rect {
-    let panel_width = LIGHTING_POPUP_WIDTH - 2.0 * LIGHTING_POPUP_MARGIN;
-    let position = Pos2::new(sun_button.left() - LIGHTING_POPUP_WIDTH + LIGHTING_POPUP_MARGIN, sun_button.top() + LIGHTING_POPUP_MARGIN);
+    let (left, panel_width) = lighting_panel_span(sun_button, ui.ctx().content_rect());
+    let position = Pos2::new(left, sun_button.top() + LIGHTING_POPUP_MARGIN);
     let area = egui::Area::new(ui.id().with("lighting-panel")).fixed_pos(position).order(egui::Order::Foreground);
     let shown = area.show(ui.ctx(), |ui| {
         let mut frame = egui::Frame::new();
         frame.fill = theme::PANEL_BACKGROUND;
         frame.stroke = Stroke::new(1.0, theme::PANEL_BORDER);
         frame.corner_radius = CornerRadius::same(4);
-        frame.inner_margin = egui::Margin { left: 0, right: 8, top: 0, bottom: 0 };
         frame.shadow = ui.visuals().popup_shadow;
+        // No margin inside the border: the toolbar meets it on the right
+        // as on the left and top, the dial centred under it.
+        let content_width = panel_width - frame.total_margin().sum().x;
         frame.show(ui, |ui| {
-            ui.set_width(panel_width - 8.0);
+            ui.set_width(content_width);
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             // An area's room is its size last frame; the panel may run to
             // the window's foot, scrolling past that.
@@ -574,6 +599,100 @@ mod tests {
     fn lighting_defaults_sit_on_the_panel() {
         let defaults = ViewportLighting::panel_defaults();
         assert_eq!((defaults.sun_azimuth, defaults.sun_elevation), (327.0, 25.0));
+    }
+
+    /// A window `width` by 800 (in points), and a sun button `left` in.
+    fn window_and_sun_button(width: f32, left: f32) -> (Rect, Rect) {
+        let window = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 800.0));
+        (window, Rect::from_min_size(Pos2::new(left, 60.0), Vec2::splat(32.0)))
+    }
+
+    #[test]
+    fn the_lighting_panel_opens_left_of_the_sun_button_where_it_fits() {
+        // 1600 by 960 at 120%.
+        let (window, button) = window_and_sun_button(1333.0, 900.0);
+        assert_eq!(lighting_panel_span(button, window), (900.0 - 376.0, 352.0));
+    }
+
+    #[test]
+    fn a_narrow_window_narrows_the_lighting_panel_clear_of_its_edge_and_the_toolbar() {
+        // 700 by 520 at 120%: the button 278 in, about as much room right
+        // of it, over the property panel.
+        let (window, button) = window_and_sun_button(583.0, 278.0);
+        let (left, width) = lighting_panel_span(button, window);
+        assert_eq!(left, LIGHTING_POPUP_MARGIN);
+        assert_eq!(left + width, button.left() - LIGHTING_POPUP_MARGIN);
+    }
+
+    #[test]
+    fn the_lighting_panel_flips_right_of_the_sun_button_where_only_that_side_fits_it() {
+        // 1600 by 960 at 120% with the splitter dragged far left.
+        let (window, button) = window_and_sun_button(1333.0, 262.0);
+        assert_eq!(lighting_panel_span(button, window), (button.right() + LIGHTING_POPUP_MARGIN, 352.0));
+    }
+
+    #[test]
+    fn the_lighting_panel_keeps_inside_the_windows_margin_where_nothing_fits() {
+        // Less than the least width either side of the button.
+        for left in [40.0, 134.0, 230.0] {
+            let (window, button) = window_and_sun_button(300.0, left);
+            let (panel_left, width) = lighting_panel_span(button, window);
+            assert_eq!(width, LIGHTING_PANEL_MIN_WIDTH, "{left}");
+            assert!(panel_left >= LIGHTING_POPUP_MARGIN && panel_left + width <= 300.0 - LIGHTING_POPUP_MARGIN, "{left}: {panel_left}");
+        }
+    }
+
+    /// The lighting panel beside `sun_button` on a `screen` big screen,
+    /// once it shows: its frame and its toolbar's.
+    fn lighting_panel_frames(screen: Vec2, sun_button: Rect) -> (Rect, Rect) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let editor = Editor::new(Document::new());
+        let mut settings = ViewportSettings::default();
+        let mut panel = Rect::NOTHING;
+        let mut shapes = Vec::new();
+        // A second a frame, for the panel to fade in.
+        for second in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), time: Some(second as f64), ..Default::default() };
+            let mut commands = Vec::new();
+            let mut output = context.run_ui(input, |ui| {
+                panel = lighting_panel(ui, sun_button, &editor, &mut settings, &mut commands);
+            });
+            shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+        }
+        let mut cladding = Vec::new();
+        for clipped in shapes {
+            collect_cladding(clipped.shape, &mut cladding);
+        }
+        let toolbar = cladding.into_iter().min_by(|a, b| a.top().total_cmp(&b.top())).expect("the toolbar");
+        (panel, toolbar)
+    }
+
+    /// Rects filled with the toolbars' cladding.
+    fn collect_cladding(shape: Shape, into: &mut Vec<Rect>) {
+        match shape {
+            Shape::Vec(shapes) => shapes.into_iter().for_each(|shape| collect_cladding(shape, into)),
+            Shape::Rect(rect) if rect.fill == theme::PANEL_CLADDING => into.push(rect.rect),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn the_lighting_panel_and_its_toolbar_keep_their_margins() {
+        let wide = (Vec2::new(1333.0, 800.0), Rect::from_min_size(Pos2::new(900.0, 60.0), Vec2::splat(32.0)));
+        let narrow = (Vec2::new(583.0, 433.0), Rect::from_min_size(Pos2::new(278.0, 60.0), Vec2::splat(32.0)));
+        for (screen, button) in [wide, narrow] {
+            let (panel, toolbar) = lighting_panel_frames(screen, button);
+            // Clear of the window's edge and the toolbar it opened from.
+            assert!(panel.left() >= LIGHTING_POPUP_MARGIN, "{screen:?}: {panel:?}");
+            assert_eq!(panel.right(), button.left() - LIGHTING_POPUP_MARGIN, "{screen:?}: {panel:?}");
+            // Reset Sky's toolbar the panel's width inside its border: as
+            // far from the right as from the left, at the top.
+            assert_eq!(toolbar.left() - panel.left(), 1.0, "{screen:?}: {toolbar:?} in {panel:?}");
+            assert_eq!(panel.right() - toolbar.right(), 1.0, "{screen:?}: {toolbar:?} in {panel:?}");
+            assert_eq!(toolbar.top() - panel.top(), 1.0, "{screen:?}: {toolbar:?} in {panel:?}");
+        }
     }
 
     /// One frame of the viewport area in `rect` on a 1600 by 960 screen,
