@@ -2484,6 +2484,50 @@ mod tests {
     }
 
     #[test]
+    fn the_typing_box_fits_its_text_in_the_window_on_the_frame_it_was_typed() {
+        let context = themed_context();
+        let spec = SliderSpec::linear(0.0, 1.0);
+        let typing_id = slider_id().with("typing");
+        let screen = frame_input(Vec::new(), egui::Modifiers::NONE).screen_rect.unwrap_or(Rect::NOTHING);
+        right_click(&context, 0.25, &spec, Pos2::new(292.0, 53.0));
+        let place = || context.memory(|memory| memory.area_rect(typing_id.with("area"))).expect("the box shows");
+        let opened = place();
+        // One frame of typing (all the keys of a slow frame): where the
+        // box and its text show.
+        let typed = |text: &str| {
+            let input = frame_input(vec![egui::Event::Text(text.to_string())], egui::Modifiers::NONE);
+            let output = context.run_ui(input, |ui| {
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(SLIDER_ROW));
+                slider(&mut row, slider_id(), "Scale", 0.25, &spec, Color32::WHITE);
+            });
+            let typed_text = slider_popups::typing_text(&context, typing_id).unwrap_or_default();
+            let drawn = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == typed_text => Some(Rect::from_min_size(shape.pos, shape.galley.size())),
+                _ => None,
+            });
+            output.drop_without_applying_deltas();
+            (place(), drawn.expect("the text shows"))
+        };
+
+        // Wider than the room to the window's edge: the box moves back, its
+        // text whole in it.
+        let (whole, text) = typed("123456789012345678901234");
+        assert!(whole.width() > opened.width(), "{whole:?}");
+        assert!(whole.right() <= screen.right() + 0.5, "{whole:?} goes past {screen:?}");
+        assert!(whole.left() < opened.left(), "{whole:?}");
+        assert!(whole.left() < text.left() && text.right() < whole.right(), "{text:?} is cut in {whole:?}");
+        // Wider than the window: as wide as it, the text scrolled to the
+        // caret.
+        let (widest, text) = typed(&"5".repeat(40));
+        assert!((widest.left() - screen.left()).abs() < 0.5 && (widest.right() - screen.right()).abs() < 0.5, "{widest:?}");
+        assert!(text.left() < widest.left() && text.right() < widest.right(), "{text:?} ends past {widest:?}");
+        // Back to a short value: back in its place.
+        slider_frame(&context, 0.25, &spec, vec![egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }]);
+        let (short, _) = typed("0.2500");
+        assert_eq!(short, opened);
+    }
+
+    #[test]
     fn a_right_click_off_the_number_opens_the_nudge_bar() {
         let context = themed_context();
         let spec = SliderSpec::linear(0.0, 1.0);
