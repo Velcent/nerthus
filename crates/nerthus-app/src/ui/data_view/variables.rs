@@ -12,6 +12,7 @@ use crate::document::variable_name_problem;
 use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
+use crate::ui::colour_picker::{colour_button, linear_to_srgb, picked_linear};
 use crate::ui::commands::Command;
 use crate::ui::data_view::{toolbar, toolbar_divider, toolbar_row};
 use crate::ui::editors::{dropdown_box, palette_color, range_slider, slider, toggle, RangeSpec, SliderSpec};
@@ -567,11 +568,12 @@ fn choice_options(variable: &Variable) -> Vec<String> {
     list.map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
 }
 
-/// `ColorPicker` (margin 24, 2, 4, 2): the name and the colour.
+/// `ColorPicker` (margin 24, 2, 4, 2): the name and the colour, a swatch
+/// opening the `ColorEditor`.
 fn color_row(ui: &mut Ui, editor: &mut Editor, key: &str, variable: &Variable) {
     let value = variable.json.get("Value").cloned().unwrap_or(Value::Null);
     let component = |name: &str| value.get(name).and_then(Value::as_f64).unwrap_or(0.0) as f32;
-    let mut rgba = egui::Rgba::from_rgb(component("R"), component("G"), component("B"));
+    let linear = [component("R"), component("G"), component("B")];
     let width = ui.available_width();
     let (outer, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
     let rect = Rect::from_min_max(outer.min + Vec2::new(24.0, 2.0), outer.max - Vec2::new(4.0, 2.0));
@@ -581,10 +583,9 @@ fn color_row(ui: &mut Ui, editor: &mut Editor, key: &str, variable: &Variable) {
     let swatch_left = rect.left() + 96.0;
     let swatch = Rect::from_min_max(Pos2::new(swatch_left, rect.top()), Pos2::new(rect.right().max(swatch_left), rect.bottom()));
     let mut swatch_ui = ui.new_child(egui::UiBuilder::new().max_rect(swatch));
-    swatch_ui.spacing_mut().interact_size = swatch.size();
-    let changed = egui::color_picker::color_edit_button_rgba(&mut swatch_ui, &mut rgba, egui::color_picker::Alpha::Opaque).changed();
-    if changed {
-        let saved = json!({"R": rgba.r() as f64, "G": rgba.g() as f64, "B": rgba.b() as f64});
+    if let Some(colour) = colour_button(&mut swatch_ui, swatch.size(), linear.map(linear_to_srgb)) {
+        let [red, green, blue] = picked_linear(linear, colour);
+        let saved = json!({"R": red as f64, "G": green as f64, "B": blue as f64});
         editor.document.set_variable_value(key, saved);
         editor.changed();
     }
