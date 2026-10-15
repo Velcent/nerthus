@@ -1,7 +1,9 @@
 //! Options (`OptionsWindow`, Tools › Options…, Ctrl Alt O): the pages in
 //! a list on the left (`TabList`) and the page on the right, with Reset
-//! this page, Accept Changes and Cancel below. The pages other than
-//! Compute are in [`super::options_pages`].
+//! this page, Accept Changes and Cancel below; Esc is Cancel. In a body
+//! smaller than the window it shrinks to fit, the list and the page
+//! scrolling, so the title bar and the buttons stay in reach. The pages
+//! other than Compute are in [`super::options_pages`].
 //!
 //! Compute (`ComputeTab`) lists the devices Nerthus can compute on, a group
 //! per device with a check box per backend. Ticking a box activates the
@@ -11,7 +13,7 @@
 //! In CPU-only mode the page offers to leave it on the next start.
 
 use crossbeam_channel::{Receiver, TryRecvError};
-use egui::{Align, Color32, Id, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align, Color32, Id, Key, Layout, Modifiers, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use nerthus_compute::{DeviceInfo, DeviceType, ProfileError, Scores};
 
 use crate::editor::Editor;
@@ -68,10 +70,15 @@ impl OptionsTab {
     }
 }
 
-/// `OptionsWindow`'s size before the interface scale.
-const WINDOW_SIZE: Vec2 = Vec2::new(840.0, 640.0);
+/// `OptionsWindow`'s size before the interface scale, its title bar and
+/// frame included. It gets as much of it as the shell's body has room
+/// for, and the page list and the page scroll in what is left.
+const WINDOW_SIZE: Vec2 = Vec2::new(854.0, 686.0);
 /// `TabList` headers' `MinWidth`.
 const TAB_WIDTH: f32 = 128.0;
+/// The footer under the page list and the page: the gap above its
+/// buttons, the buttons, and the gap below.
+const FOOTER_HEIGHT: f32 = 44.0;
 
 /// A message box (`MBox`) the page raised.
 struct Notice {
@@ -611,6 +618,29 @@ fn reset_question(ctx: &egui::Context, options: &mut OptionsState) {
     }
 }
 
+/// A part of the window, drawn at `rect` and kept to it: what does not
+/// fit is cut off rather than making the window larger.
+fn part(ui: &mut Ui, id: &str, rect: Rect, layout: Layout) -> Ui {
+    let mut part = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(rect).layout(layout));
+    part.set_clip_rect(rect.intersect(ui.clip_rect()));
+    part
+}
+
+/// Esc is Cancel (`IsCancel`) while the window shows: taken before the
+/// shell's keys, so that it does not stop a build as well. A message box,
+/// the reset question or a list dropped down on the page takes it instead.
+pub fn take_escape(ctx: &egui::Context, state: &mut Option<OptionsState>) {
+    let Some(options) = state.as_ref() else {
+        return;
+    };
+    if options.notice.is_some() || options.resetting || egui::Popup::is_any_open(ctx) {
+        return;
+    }
+    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
+        *state = None;
+    }
+}
+
 /// The window. `last_tab` keeps the page shown last (`LastOptionsTab`).
 pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<OptionsState>, last_tab: &mut OptionsTab, dialogs: &mut FileDialogs) -> OptionsOutcome {
     let mut outcome = OptionsOutcome::default();
@@ -633,66 +663,73 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
     let mut window = egui::Window::new("Options");
     window = window.collapsible(false);
     window = window.resizable(false);
+    // egui keeps the size to the body the window is constrained to.
     window = window.fixed_size(WINDOW_SIZE);
     window = tool_window::place(ctx, window, Id::new("options"), WINDOW_SIZE);
     window = window.open(&mut open);
     window.show(ctx, |ui| {
-        let footer_height = 44.0;
-        let body_height = WINDOW_SIZE.y - footer_height;
-        let page_size = Vec2::new(WINDOW_SIZE.x - TAB_WIDTH - 8.0, body_height);
-        ui.horizontal_top(|ui| {
-            let list_size = Vec2::new(TAB_WIDTH, body_height);
-            ui.allocate_ui_with_layout(list_size, Layout::top_down(Align::Min), |ui| tab_list(ui, &mut options.tab));
-            ui.add_space(8.0);
-            ui.allocate_ui_with_layout(page_size, Layout::top_down(Align::Min), |ui| {
-                let frame = egui::Frame::new().stroke(Stroke::new(1.5, theme::ACCENT_MUTED_PURPLE)).corner_radius(3.0).inner_margin(8.0);
-                frame.show(ui, |ui| {
-                    // The page's size less the frame's margin and border.
-                    let inside = page_size - Vec2::splat(19.0);
-                    ui.set_min_size(inside);
-                    ui.set_max_size(inside);
-                    match options.tab {
-                        OptionsTab::Compute => {
-                            compute_page(ui, editor, &mut options.compute, &mut options.notice);
-                            outcome.docs = options.compute.docs.take();
-                        }
-                        tab => {
-                            if let Some(copy) = options.copy.as_mut()
-                                && options_pages::page(ui, tab, copy, dialogs) == Some(PageRequest::RunDiagnostics)
-                            {
-                                outcome.run_diagnostics = true;
-                            }
-                        }
+        // The room inside, split between the parts whatever they hold, so
+        // that the footer stays in the window and the window in the body.
+        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        let body = rect.with_max_y((rect.bottom() - FOOTER_HEIGHT).max(rect.top()));
+        let list = body.with_max_x((body.left() + TAB_WIDTH).min(body.right()));
+        let page = body.with_min_x((list.right() + 8.0).min(body.right()));
+        let footer = rect.with_min_y((body.bottom() + 12.0).min(rect.bottom()));
+
+        let mut list_ui = part(ui, "options-list", list, Layout::top_down(Align::Min));
+        let mut tabs = egui::ScrollArea::vertical();
+        tabs = tabs.id_salt("options-tabs");
+        tabs = tabs.auto_shrink([false, false]);
+        tabs.show(&mut list_ui, |ui| tab_list(ui, &mut options.tab));
+
+        // The page's border goes round its place, and the page is kept
+        // inside it, whatever the page holds.
+        let border = Stroke::new(1.5, theme::ACCENT_MUTED_PURPLE);
+        ui.painter().rect_stroke(page, 3.0, border, egui::StrokeKind::Inside);
+        let mut page_ui = part(ui, "options-page", page.shrink(border.width), Layout::top_down(Align::Min));
+        egui::Frame::new().inner_margin(8.0).show(&mut page_ui, |ui| {
+            // The page's size less the frame's margin and border.
+            let inside = (page.size() - Vec2::splat(19.0)).max(Vec2::ZERO);
+            ui.set_min_size(inside);
+            ui.set_max_size(inside);
+            match options.tab {
+                OptionsTab::Compute => {
+                    compute_page(ui, editor, &mut options.compute, &mut options.notice);
+                    outcome.docs = options.compute.docs.take();
+                }
+                tab => {
+                    if let Some(copy) = options.copy.as_mut()
+                        && options_pages::page(ui, tab, copy, dialogs) == Some(PageRequest::RunDiagnostics)
+                    {
+                        outcome.run_diagnostics = true;
                     }
-                });
-            });
+                }
+            }
         });
 
         // The footer (margin 146, 8, 8, 0): Reset on the left, Accept
         // Changes and Cancel on the right.
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(146.0);
-            if button(ui, "Reset this page", false, true).clicked() {
-                if options.tab == OptionsTab::Compute {
-                    let text = "Settings for this page cannot be reset.";
-                    options.notice = Some(Notice { title: "Nerthus", text: text.to_string() });
-                } else {
-                    options.resetting = true;
-                }
+        let mut footer_ui = part(ui, "options-footer", footer, Layout::left_to_right(Align::Min));
+        footer_ui.add_space(146.0);
+        if button(&mut footer_ui, "Reset this page", false, true).clicked() {
+            if options.tab == OptionsTab::Compute {
+                let text = "Settings for this page cannot be reset.";
+                options.notice = Some(Notice { title: "Nerthus", text: text.to_string() });
+            } else {
+                options.resetting = true;
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(8.0);
-                if button(ui, "Cancel", false, true).clicked() {
-                    close = true;
-                }
-                ui.add_space(8.0);
-                if button(ui, "Accept Changes", true, true).clicked() {
-                    accept(editor, options.copy.as_ref());
-                    outcome.accepted = true;
-                    close = true;
-                }
-            });
+        }
+        footer_ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+            ui.add_space(8.0);
+            if button(ui, "Cancel", false, true).clicked() {
+                close = true;
+            }
+            ui.add_space(8.0);
+            if button(ui, "Accept Changes", true, true).clicked() {
+                accept(editor, options.copy.as_ref());
+                outcome.accepted = true;
+                close = true;
+            }
         });
     });
     show_notice(ctx, &mut options.notice);
@@ -702,4 +739,139 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
         *state = None;
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use egui::{AreaState, Event, PointerButton, Pos2, RawInput};
+
+    /// The screen, in points, of 1366 × 768, 1280 × 720 (or 1920 × 1080
+    /// at 150%) and 640 × 480 at the default 120%, and 1024 × 768 at 175%.
+    const SMALL_SCREENS: [Vec2; 4] = [Vec2::new(1138.0, 640.0), Vec2::new(1066.0, 600.0), Vec2::new(533.0, 400.0), Vec2::new(585.0, 438.0)];
+
+    fn context() -> egui::Context {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context
+    }
+
+    /// A frame at this screen size with these events, Esc taken before the
+    /// window as the shell does. Returns the window's rect and what it did.
+    fn frame(context: &egui::Context, screen: Vec2, editor: &mut Editor, state: &mut Option<OptionsState>, events: Vec<Event>) -> (Rect, OptionsOutcome) {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
+        let mut last_tab = OptionsTab::General;
+        let mut dialogs = FileDialogs::default();
+        let mut outcome = OptionsOutcome::default();
+        let output = context.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            take_escape(&ctx, state);
+            outcome = show(&ctx, editor, state, &mut last_tab, &mut dialogs);
+        });
+        output.drop_without_applying_deltas();
+        let rect = AreaState::load(context, Id::new("options")).filter(|area| area.size.is_some()).map(|area| area.rect());
+        (rect.unwrap_or(Rect::NOTHING), outcome)
+    }
+
+    /// Frames enough for egui's first-frame sizing to settle.
+    fn settle(context: &egui::Context, screen: Vec2, editor: &mut Editor, state: &mut Option<OptionsState>) -> Rect {
+        for _ in 0..4 {
+            frame(context, screen, editor, state, Vec::new());
+        }
+        frame(context, screen, editor, state, Vec::new()).0
+    }
+
+    /// A click at `position`; what the window did on the release.
+    fn click(context: &egui::Context, screen: Vec2, editor: &mut Editor, state: &mut Option<OptionsState>, position: Pos2) -> OptionsOutcome {
+        let button = |pressed| Event::PointerButton { pos: position, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(context, screen, editor, state, vec![Event::PointerMoved(position)]);
+        frame(context, screen, editor, state, vec![button(true)]);
+        frame(context, screen, editor, state, vec![button(false)]).1
+    }
+
+    fn escape() -> Event {
+        Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    #[test]
+    fn the_window_keeps_its_size_where_there_is_room() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        let mut state = Some(OptionsState::new(OptionsTab::General));
+        // 1600 × 960 at 120%.
+        let screen = Vec2::new(1333.0, 800.0);
+        let rect = settle(&context, screen, &mut editor, &mut state);
+        let body = tool_window::body(&context);
+        assert!((rect.size() - WINDOW_SIZE).abs().max_elem() <= 1.0, "{rect:?} is not {WINDOW_SIZE:?}");
+        assert!((rect.center() - body.center()).length() <= 1.0, "{rect:?} is not centred in {body:?}");
+    }
+
+    #[test]
+    fn every_page_fits_small_bodies() {
+        for screen in SMALL_SCREENS {
+            let context = context();
+            let mut editor = Editor::new(Document::new());
+            let mut state = Some(OptionsState::new(OptionsTab::General));
+            for (tab, ..) in TABS {
+                state.as_mut().unwrap().tab = tab;
+                let rect = settle(&context, screen, &mut editor, &mut state);
+                let body = tool_window::body(&context);
+                assert!(body.expand(0.5).contains_rect(rect), "{tab:?} at {screen:?}: {rect:?} is outside {body:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn accept_and_cancel_are_in_reach_in_small_bodies() {
+        // The footer's buttons from the window's bottom right corner: past
+        // the frame (7), Cancel 8 in and 100 wide, Accept Changes 8 to its
+        // left, in the row 4 above the bottom.
+        let row = |rect: Rect| rect.bottom() - 7.0 - 4.0 - 14.0;
+        let cancel = |rect: Rect| Pos2::new(rect.right() - 7.0 - 8.0 - 50.0, row(rect));
+        let accept = |rect: Rect| Pos2::new(rect.right() - 7.0 - 8.0 - 100.0 - 8.0 - 40.0, row(rect));
+        for screen in SMALL_SCREENS {
+            let context = context();
+            let mut editor = Editor::new(Document::new());
+            let mut state = Some(OptionsState::new(OptionsTab::Viewport));
+            let rect = settle(&context, screen, &mut editor, &mut state);
+            let outcome = click(&context, screen, &mut editor, &mut state, cancel(rect));
+            assert!(state.is_none() && !outcome.accepted, "Cancel at {screen:?} did not close the window");
+
+            let mut state = Some(OptionsState::new(OptionsTab::Viewport));
+            let rect = settle(&context, screen, &mut editor, &mut state);
+            let outcome = click(&context, screen, &mut editor, &mut state, accept(rect));
+            assert!(state.is_none() && outcome.accepted, "Accept Changes at {screen:?} did not accept");
+        }
+    }
+
+    #[test]
+    fn escape_cancels_unless_the_reset_question_is_up() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        let screen = Vec2::new(1066.0, 600.0);
+        let mut state = Some(OptionsState::new(OptionsTab::Graph));
+        settle(&context, screen, &mut editor, &mut state);
+        state.as_mut().unwrap().resetting = true;
+        settle(&context, screen, &mut editor, &mut state);
+        // Esc answers the question, and the window stays.
+        frame(&context, screen, &mut editor, &mut state, vec![escape()]);
+        assert!(state.as_ref().is_some_and(|options| !options.resetting));
+        let (_, outcome) = frame(&context, screen, &mut editor, &mut state, vec![escape()]);
+        assert!(state.is_none() && !outcome.accepted);
+    }
+
+    #[test]
+    fn the_shell_does_not_see_the_escape_the_window_takes() {
+        let context = context();
+        let mut state = Some(OptionsState::new(OptionsTab::General));
+        let input = RawInput { events: vec![escape()], ..Default::default() };
+        let mut seen = true;
+        let output = context.run_ui(input, |ui| {
+            take_escape(ui.ctx(), &mut state);
+            seen = ui.input(|input| input.key_pressed(Key::Escape));
+        });
+        output.drop_without_applying_deltas();
+        assert!(state.is_none() && !seen);
+    }
 }
