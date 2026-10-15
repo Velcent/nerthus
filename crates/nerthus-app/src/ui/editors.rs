@@ -579,6 +579,9 @@ pub fn slider(ui: &mut Ui, id: Id, label: &str, value: f64, spec: &SliderSpec, c
         let label_left = content.left() + 10.0;
         let label_room = value_rect.left() - 8.0 - label_left;
         let label_galley = fitted_line(ui, label, theme::interface(12.0), label_color, label_room);
+        if label_galley.elided {
+            note_cut_name(ui, label);
+        }
         let label_top = content.top() - 1.0 + (content.height() + 1.0 - label_galley.size().y) / 2.0;
         text_painter.galley(Pos2::new(label_left, label_top), label_galley, label_color);
     }
@@ -802,6 +805,9 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
     {
         let name_room = (high_rect.left() - low_rect.right() - 16.0).min(content.width());
         let name_galley = fitted_line(ui, label, theme::interface(12.0), text_color, name_room);
+        if name_galley.elided {
+            note_cut_name(ui, label);
+        }
         text_painter.galley(content.center() - name_galley.size() / 2.0, name_galley, text_color);
     }
     // Each value's `ToolTip` is its text.
@@ -1071,11 +1077,30 @@ pub fn fitted_line(ui: &Ui, text: &str, font: egui::FontId, color: Color32, max_
     ui.painter().layout_job(job)
 }
 
+/// Where an editor notes the name it cut short or left out, for its row's
+/// tooltip to show whole.
+fn cut_name_id() -> Id {
+    Id::new("cut-editor-name")
+}
+
+/// Notes `name` as cut short in the row being drawn.
+fn note_cut_name(ui: &Ui, name: &str) {
+    ui.data_mut(|data| data.insert_temp(cut_name_id(), name.to_string()));
+}
+
+/// The name an editor cut short or left out since this was last asked.
+pub fn take_cut_name(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|data| data.remove_temp::<String>(cut_name_id()))
+}
+
 /// A right-aligned header label in its column, vertically centred
 /// (`PART_DisplayName`, margin 0, 0, 8, 0).
 fn header_label(ui: &Ui, column: Rect, text: &str, color: Color32) {
     let available = (column.width() - 8.0).max(0.0);
     let galley = fitted_line(ui, text, theme::interface(12.0), color, available);
+    if galley.elided {
+        note_cut_name(ui, text);
+    }
     let position = Pos2::new(column.right() - 8.0 - galley.size().x, column.center().y - galley.size().y / 2.0);
     ui.painter().galley(position, galley, color);
 }
@@ -1197,15 +1222,14 @@ enum Shrunk {
     Lot,
 }
 
-/// `ToggleX`: the name in the header column (160; 100 when narrow) and
-/// the switch (`ToggleButton`: 26 by 14, the accent when on).
+/// `ToggleX`: the name in the header column and the switch
+/// (`ToggleButton`: 26 by 14, the accent when on).
 pub fn toggle(ui: &mut Ui, id: Id, label: &str, value: bool, accent: Color32) -> Option<bool> {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::hover());
-    let shrunk = if width < 300.0 { Shrunk::Little } else { Shrunk::None };
-    let column = if shrunk == Shrunk::None { theme::sizes(ui.ctx()).header_column } else { 100.0 };
+    let column = toggle_column(ui, label, width);
     let enabled = ui.is_enabled();
-    let header = Rect::from_min_size(rect.min, Vec2::new(column.min(width), rect.height()));
+    let header = Rect::from_min_size(rect.min, Vec2::new(column, rect.height()));
     // Disabled: the control at 0.8, its name at 0.3, the switch at 0.33.
     let label_color = theme::LABEL_DEFAULT.gamma_multiply(if enabled { 1.0 } else { 0.3 });
     header_label(ui, header, label, label_color);
@@ -1219,6 +1243,16 @@ pub fn toggle(ui: &mut Ui, id: Id, label: &str, value: bool, accent: Color32) ->
     let knob_color = if response.hovered() { theme::TOGGLE_HOVER } else { theme::TOGGLE_INDICATOR };
     ui.painter().circle_filled(Pos2::new(knob_x, switch.center().y), 5.0, knob_color.gamma_multiply(switch_opacity));
     if response.clicked() && enabled { Some(!value) } else { None }
+}
+
+/// A toggle's header column: 160 (100 narrower than 300), widened to fit
+/// a longer name, and narrowed to keep the switch and the reach of its
+/// hit area (3) in the row.
+fn toggle_column(ui: &Ui, label: &str, width: f32) -> f32 {
+    let column = if width < 300.0 { 100.0 } else { theme::sizes(ui.ctx()).header_column };
+    let name_width = ui.painter().layout_no_wrap(label.to_string(), theme::interface(12.0), Color32::WHITE).size().x;
+    let wanted = name_width.ceil() + 8.0;
+    column.max(wanted).min(width - 26.0 - 3.0).max(0.0)
 }
 
 /// Which `OptionsX` template an enum gets.
@@ -1381,6 +1415,9 @@ pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String
         Shrunk::Lot => 18.0,
     };
     let header = if shrunk == Shrunk::Lot { None } else { Some(label) };
+    if header.is_none() {
+        note_cut_name(ui, label);
+    }
     let chosen = dropdown_box(ui, id, header, column, 26.0, shown, entries, current, theme::interface(12.0));
     chosen.filter(|name| name != current)
 }
@@ -2020,6 +2057,55 @@ mod tests {
         let whole = whole.unwrap();
         let drawn: String = whole.rows[0].glyphs.iter().map(|glyph| glyph.chr).collect();
         assert_eq!(drawn, "Seed");
+    }
+
+    /// One frame of `draw` in a row `width` wide, then the name it cut
+    /// short.
+    fn row_frame<R>(width: f32, mut draw: impl FnMut(&mut Ui) -> R) -> (R, Option<String>) {
+        let context = themed_context();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut drawn = None;
+        let output = context.run_ui(input, |ui| {
+            let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 30.0));
+            let mut row = ui.new_child(egui::UiBuilder::new().max_rect(row));
+            drawn = Some(draw(&mut row));
+        });
+        output.drop_without_applying_deltas();
+        (drawn.unwrap(), take_cut_name(&context))
+    }
+
+    /// A toggle's header column in a row `width` wide, and the name it cut.
+    fn toggle_row(label: &str, width: f32) -> (f32, Option<String>) {
+        row_frame(width, |ui| {
+            toggle(ui, Id::new("toggle-test"), label, false, Color32::WHITE);
+            toggle_column(ui, label, width)
+        })
+    }
+
+    #[test]
+    fn a_long_toggle_name_takes_the_room_beside_the_switch() {
+        // Short names keep the column: 100 narrower than 300, 160 wider.
+        assert_eq!(toggle_row("Invert", 250.0), (100.0, None));
+        assert_eq!(toggle_row("Invert", 350.0), (160.0, None));
+        // A longer one moves the switch along instead of being cut.
+        let (column, cut) = toggle_row("Enforce Linear Gamma", 250.0);
+        assert!(column > 100.0 && column + 26.0 + 3.0 <= 250.0, "{column}");
+        assert_eq!(cut, None);
+        // With too little room left by the switch, it is cut and noted.
+        let (column, cut) = toggle_row("Enforce Linear Gamma", 120.0);
+        assert_eq!(column, 120.0 - 26.0 - 3.0);
+        assert_eq!(cut.as_deref(), Some("Enforce Linear Gamma"));
+    }
+
+    #[test]
+    fn dropdown_names_cut_or_left_out_are_noted() {
+        let entries = [("None".to_string(), "None".to_string())];
+        let dropdown = |label: &'static str, width: f32| row_frame(width, |ui| dropdown_row(ui, Id::new("dropdown-test"), label, &entries, "None", "None")).1;
+        assert_eq!(dropdown("Mode", 250.0), None);
+        assert_eq!(dropdown("Artifact Reduction", 250.0).as_deref(), Some("Artifact Reduction"));
+        // Narrower than 150 the name is not shown at all.
+        assert_eq!(dropdown("Mode", 120.0).as_deref(), Some("Mode"));
     }
 
     #[test]
