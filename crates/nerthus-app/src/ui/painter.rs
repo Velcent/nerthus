@@ -123,7 +123,11 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor) {
     window = window.min_size(Vec2::new(WINDOW_SIZE, WINDOW_SIZE));
     window = window.collapsible(false);
     window = window.order(egui::Order::Foreground);
-    window = window.frame(egui::Frame::window(&ctx.global_style()).fill(theme::MENU_BACKGROUND).inner_margin(0));
+    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::MENU_BACKGROUND);
+    // The canvas reaches the window's edges; the title bar keeps a tool
+    // window's margin.
+    window = window.frame(frame.inner_margin(0));
+    window = window.title_frame(frame.inner_margin(tool_window::MARGIN));
     window = tool_window::place(ctx, window, window_id().with("window"), Vec2::new(WINDOW_SIZE, WINDOW_SIZE + TOOLBAR_HEIGHT));
     window.show(ctx, |ui| {
         let available = ui.available_size();

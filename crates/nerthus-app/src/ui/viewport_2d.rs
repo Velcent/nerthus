@@ -494,7 +494,11 @@ fn map_viewer_window<'open>(ctx: &egui::Context, id: Id, title: String, open: &'
     window = window.open(open);
     window = window.collapsible(false);
     window = window.order(egui::Order::Foreground);
-    window = window.frame(egui::Frame::window(&ctx.global_style()).fill(theme::WINDOW_DARK).inner_margin(0));
+    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::WINDOW_DARK);
+    // The view reaches the window's edges; the title bar keeps a tool
+    // window's margin.
+    window = window.frame(frame.inner_margin(0));
+    window = window.title_frame(frame.inner_margin(tool_window::MARGIN));
     tool_window::place(ctx, window, id, Vec2::splat(FLOATING_SIZE))
 }
 
