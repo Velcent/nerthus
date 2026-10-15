@@ -117,7 +117,7 @@ fn confirm_format(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState) {
         let title = egui::RichText::new("Update file format").font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS);
         ui.label(title);
         ui.add_space(6.0);
-        ui.label("Do you want change file format for all nodes");
+        ui.label("Do you want to change the file format for all nodes?");
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             if ui.button("Yes").clicked() {

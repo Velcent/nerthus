@@ -93,7 +93,7 @@
 
 * **Interface Scale**: Adjust interface scaling.
 * **Run Diagnostics**: Execute system and application checks. See [Diagnostics](../../../using/troubleshooting/diagnostics/index.md).
-* **Artifact Explorer**: The folders Nerthus leaves files in (caches, logs, autosaves and more), each with its size, a link that opens it, and **Delete…** to clean up all its files or those older than 45 days.
+* **Artifact Explorer**: The folders Nerthus leaves files in (caches, logs, autosaves and more), each with its size, a link that opens it, and **Delete...** to clean up all its files or those older than 45 days.
 * **Console**: Open console for debugging.
 * **Verbose Logging**: Enables detailed logging for enhanced troubleshooting and analysis.
 * **MCP Server**: Lets AI assistants (MCP clients such as Claude Code) edit and build the open project. Stays on for later starts until turned off.
