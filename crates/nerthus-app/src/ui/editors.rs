@@ -1366,10 +1366,10 @@ fn dropdown(ui: &mut Ui, id: Id, label: &str, spec: &ParameterSpec, current: &st
     dropdown_row(ui, id, label, &names, &shown, current)
 }
 
-/// `DropdownX` over (value, text) entries; returns a value picked other
-/// than `current`.
-pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String)], shown: &str, current: &str) -> Option<String> {
-    let width = ui.available_width();
+/// The header column of a `DropdownX` or `TextEditor` row `width` wide:
+/// `Column.Size`; 100 narrower than 300; 18, with no name in it, narrower
+/// than 150.
+fn header_column(ui: &Ui, width: f32) -> (Shrunk, f32) {
     let shrunk = if width < 150.0 {
         Shrunk::Lot
     } else if width < 300.0 {
@@ -1382,6 +1382,14 @@ pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String
         Shrunk::Little => 100.0,
         Shrunk::Lot => 18.0,
     };
+    (shrunk, column)
+}
+
+/// `DropdownX` over (value, text) entries; returns a value picked other
+/// than `current`.
+pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String)], shown: &str, current: &str) -> Option<String> {
+    let width = ui.available_width();
+    let (shrunk, column) = header_column(ui, width);
     let header = if shrunk == Shrunk::Lot { None } else { Some(label) };
     let chosen = dropdown_box(ui, id, header, column, 26.0, shown, entries, current, theme::interface(12.0));
     chosen.filter(|name| name != current)
@@ -1659,18 +1667,22 @@ fn information(ui: &mut Ui, text: &str, margin: egui::Margin, format: Option<&[V
     });
 }
 
-/// `TextEditor` (margin 20, 2, 4, 2): the name in a 90 header column and
+/// `TextEditor` (margin 0, 2): the name in a dropdown's header column and
 /// the value in a text box that only shows it (`TextBox`: #101010 with a
-/// #363636 line, padding 4, corners 3). A click opens an `EditablePopup`
-/// over the value (monospace 16, as wide as the value, 96 at least),
-/// which closes as [`crate::ui::widgets::popup_outcome`] says.
+/// #363636 line, padding 4, corners 3), out to the row's right edge as a
+/// dropdown's box is. A click opens an `EditablePopup` over the value
+/// (monospace 16, as wide as the value, 96 at least), which closes as
+/// [`crate::ui::widgets::popup_outcome`] says.
 fn text_box(ui: &mut Ui, id: Id, label: &str, current: &str) -> Edit {
     let width = ui.available_width();
+    let (shrunk, column) = header_column(ui, width);
     let (row, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
-    let control = Rect::from_min_max(row.min + Vec2::new(20.0, 2.0), row.max - Vec2::new(4.0, 2.0));
+    let control = row.shrink2(Vec2::new(0.0, 2.0));
     let response = ui.interact(control, id.with("text-editor"), Sense::click());
-    let header = Rect::from_min_size(control.min, Vec2::new(90.0, control.height()));
-    header_label(ui, header, label, theme::LABEL_DEFAULT);
+    let header = Rect::from_min_size(control.min, Vec2::new(column.min(width), control.height()));
+    if shrunk != Shrunk::Lot {
+        header_label(ui, header, label, theme::LABEL_DEFAULT);
+    }
     let field = Rect::from_min_max(Pos2::new(header.right(), control.top()), control.max);
     let opacity = if ui.is_enabled() { 1.0 } else { 0.5 };
     ui.painter().rect_filled(field, 3.0, theme::TEXTBOX_BACKGROUND.gamma_multiply(opacity));
@@ -1685,12 +1697,12 @@ fn text_box(ui: &mut Ui, id: Id, label: &str, current: &str) -> Edit {
     if response.clicked() && ui.is_enabled() {
         slider_popups::open_typing(ui.ctx(), typing_id, current.to_string());
     }
-    // 90 in from the control, as wide as it less 90 (96 at least), in
-    // the popup's own units.
+    // The header column in from the control, as wide as it less the
+    // column (96 at least), in the popup's own units.
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
-        top_left: Pos2::new(control.left() + 90.0 * popup_scale, control.top()),
-        width: BoxWidth::Fixed(((control.width() - 90.0) * popup_scale).max(96.0 * popup_scale)),
+        top_left: Pos2::new(control.left() + header.width() * popup_scale, control.top()),
+        width: BoxWidth::Fixed(((control.width() - header.width()) * popup_scale).max(96.0 * popup_scale)),
         font: slider_popups::value_font(),
     };
     match slider_popups::typing_box(ui, typing_id, &typing_look) {
@@ -2022,6 +2034,50 @@ mod tests {
         let whole = whole.unwrap();
         let drawn: String = whole.rows[0].glyphs.iter().map(|glyph| glyph.chr).collect();
         assert_eq!(drawn, "Seed");
+    }
+
+    #[test]
+    fn text_boxes_keep_to_the_dropdown_columns() {
+        // Each width shrinks the header column differently (none, a
+        // little, a lot), and each size theme has its own column.
+        for compact in [false, true] {
+            let context = themed_context();
+            theme::set_settings(&context, theme::InterfaceSettings { compact, ..Default::default() });
+            for width in [120.0, 200.0, 299.0, 300.0, 600.0] {
+                let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0));
+                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+                let entries = [("Value".to_string(), "Value".to_string())];
+                let mut output = context.run_ui(input, |ui| {
+                    let mut dropdown = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 26.0))));
+                    dropdown_row(&mut dropdown, Id::new("dropdown"), "Edit Mode", &entries, "Value", "Value");
+                    let mut text = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(0.0, 50.0), Vec2::new(width, 30.0))));
+                    text_box(&mut text, Id::new("text"), "Variable Name", "x");
+                });
+                let shapes = std::mem::take(&mut output.shapes);
+                output.drop_without_applying_deltas();
+                let filled = |fill: Color32| {
+                    let rect = shapes.iter().find_map(|clipped| match &clipped.shape {
+                        egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect),
+                        _ => None,
+                    });
+                    rect.expect("the box is drawn")
+                };
+                let dropdown = filled(theme::DROPDOWN_BACKGROUND);
+                let field = filled(theme::TEXTBOX_BACKGROUND);
+                assert_eq!((field.left(), field.right()), (dropdown.left(), dropdown.right()), "{width} wide, compact: {compact}");
+                let name_end = |name: &str| {
+                    shapes.iter().find_map(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) if text.galley.text() == name => Some(text.pos.x + text.galley.size().x),
+                        _ => None,
+                    })
+                };
+                match (name_end("Edit Mode"), name_end("Variable Name")) {
+                    (Some(dropdown_end), Some(text_end)) => assert!((dropdown_end - text_end).abs() < 0.5, "{width} wide, compact: {compact}: the names end at {dropdown_end} and {text_end}"),
+                    (None, None) => assert!(width < 150.0),
+                    shown => panic!("{width} wide, compact: {compact}: only one name shows: {shown:?}"),
+                }
+            }
+        }
     }
 
     #[test]
