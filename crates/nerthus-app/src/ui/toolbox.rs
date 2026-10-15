@@ -149,16 +149,20 @@ fn node_entry(ui: &mut Ui, spec: &'static NodeSpec, look: &EntryLook, origin: Or
             menu_item(ui, icon, None, node_label(spec), &short_code)
         })
         .inner;
+    // `Member_PreviewMouseMove`: pressed and moved, a toolbox entry is
+    // dragged. A row that senses only clicks is no longer pressed for egui
+    // once the press is a drag, so these rows sense drags as well.
+    let draggable = origin == Origin::Toolbox && implemented;
+    if draggable {
+        response = response.interact(Sense::drag());
+    }
     if let Some(description) = &spec.description {
         response = response.tooltip(description);
     }
     if !implemented {
         response = response.disabled_tooltip("Not available in Nerthus yet");
     }
-    // `Member_PreviewMouseMove`: pressed and moved, the entry is dragged.
-    let pressed_here = implemented && response.is_pointer_button_down_on();
-    let moved = ui.input(|input| input.pointer.is_decidedly_dragging());
-    if origin == Origin::Toolbox && pressed_here && moved {
+    if draggable && response.drag_started_by(egui::PointerButton::Primary) {
         state.toolbox_drag = Some(spec.key().to_string());
         ui.close();
         return;
