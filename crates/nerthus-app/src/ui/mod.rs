@@ -499,6 +499,7 @@ fn draw_editor(
     let floating = editor.user.options.viewport_floating();
     // Modal dialogs keep the shell's keys from it while they show.
     if !tool_commands::modal_open(ctx, ui_state) {
+        options_window::take_escape(ctx, &mut ui_state.options);
         // Allow node shortcuts only when cursor is inside the graph.
         let node_keys = !editor.user.options.confine_shortcuts() || pointer_over_graph(ctx, &ui_state.graph);
         shortcuts(ctx, node_keys, &mut pending);
