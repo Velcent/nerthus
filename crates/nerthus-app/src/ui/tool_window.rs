@@ -2,9 +2,10 @@
 //! and the status bar, centred when they first open. egui squeezes a window
 //! into that body when the body gets smaller than it, and keeps the
 //! squeezed size and place; this puts back what it had as the body grows
-//! again.
+//! again. [`part`] keeps a part of a window to its place, so that what it
+//! holds cannot make the window grow.
 
-use egui::{AreaState, Context, Id, Pos2, Rect, Vec2};
+use egui::{AreaState, Context, Id, Layout, Pos2, Rect, Ui, Vec2};
 
 use crate::ui::{status_bar, title_bar};
 
@@ -88,6 +89,14 @@ pub fn place<'open>(ctx: &Context, window: egui::Window<'open>, id: Id, size: Ve
         ctx.data_mut(|data| data.insert_temp(key, kept));
     }
     window
+}
+
+/// A part of a window, drawn at `rect` and kept to it: what does not fit
+/// is cut off rather than making the window larger.
+pub fn part(ui: &mut Ui, id: &str, rect: Rect, layout: Layout) -> Ui {
+    let mut part = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(rect).layout(layout));
+    part.set_clip_rect(rect.intersect(ui.clip_rect()));
+    part
 }
 
 /// Whether `rect` is inside `body` (give or take rounding).
