@@ -1,10 +1,10 @@
 //! The recurring controls: toolbars (`Toolbar` border style), icon
 //! buttons (`Button-IconOnly`), icon menus (`MenuItem Tag="Icon"`), menu
 //! entries (`Default-Menu-Item`) with an icon, an accent and a shortcut,
-//! and dialog buttons.
+//! dialog buttons and selectable items.
 
 use egui::containers::menu::{MenuButton, MenuConfig, SubMenu};
-use egui::{Button, Color32, CornerRadius, FontId, Id, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Button, Color32, CornerRadius, FontId, Id, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetText};
 
 use crate::icons;
 use crate::theme;
@@ -372,6 +372,30 @@ pub fn link_button(ui: &mut Ui, text: &str, font: FontId, padding: Vec2) -> Resp
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A selectable item's text: when selected, the selection stroke's colour
+/// (`Label-Emphasis`). egui would draw it so, but the theme's
+/// `override_text_color` (`Label-Default`) beats its selected colour and
+/// leaves grey text on the blue selection fill.
+pub fn selectable_text(ui: &Ui, selected: bool, text: impl Into<WidgetText>) -> WidgetText {
+    let text = text.into();
+    if !selected {
+        return text;
+    }
+    text.color(ui.visuals().selection.stroke.color)
+}
+
+/// `Ui::selectable_label` with readable selected text (`selectable_text`).
+pub fn selectable_label(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>) -> Response {
+    let text = selectable_text(ui, selected, text);
+    ui.selectable_label(selected, text)
+}
+
+/// `Ui::selectable_value` with readable selected text (`selectable_text`).
+pub fn selectable_value<V: PartialEq>(ui: &mut Ui, current: &mut V, value: V, text: impl Into<WidgetText>) -> Response {
+    let text = selectable_text(ui, *current == value, text);
+    ui.selectable_value(current, value, text)
+}
+
 /// A rule across a vertical toolbar (`Separator` with margins `above` and
 /// `below`, 2 in from each side).
 pub fn toolbar_separator(ui: &mut Ui, above: f32, below: f32) {
@@ -717,6 +741,55 @@ mod tests {
         let disabled = contrast(shortcut_color(false), theme::MENU_BACKGROUND);
         assert!(enabled >= 3.0, "an enabled shortcut is {enabled:.2}:1");
         assert!(disabled >= 3.0, "a disabled shortcut is {disabled:.2}:1");
+    }
+
+    /// The colour each text in `shapes` was painted in, as epaint resolves
+    /// it: the galley's own colour, or the shape's for a placeholder.
+    fn text_colors(shapes: &[egui::Shape], colors: &mut Vec<(String, Color32)>) {
+        for shape in shapes {
+            match shape {
+                egui::Shape::Vec(shapes) => text_colors(shapes, colors),
+                egui::Shape::Text(text) => {
+                    let format = text.galley.job.sections.first().map(|section| section.format.color);
+                    let color = match format {
+                        Some(color) if color != Color32::PLACEHOLDER => color,
+                        _ => text.fallback_color,
+                    };
+                    colors.push((text.galley.text().to_string(), text.override_text_color.unwrap_or(color)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn selected_items_are_legible_on_the_selection_fill() {
+        let context = themed_context();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut output = context.run_ui(input, |ui| {
+            selectable_label(ui, true, "Resolution");
+            selectable_label(ui, false, "Build");
+            let mut profile = 1;
+            selectable_value(ui, &mut profile, 1, "Test Profile");
+            selectable_value(ui, &mut profile, 2, "Other Profile");
+            let text = selectable_text(ui, true, "Terrain");
+            ui.add(Button::selectable(true, text));
+        });
+        let shapes: Vec<egui::Shape> = std::mem::take(&mut output.shapes).into_iter().map(|clipped| clipped.shape).collect();
+        output.drop_without_applying_deltas();
+        let mut colors = Vec::new();
+        text_colors(&shapes, &mut colors);
+        let color = |wanted: &str| colors.iter().find(|(text, _)| text == wanted).map(|(_, color)| *color).expect(wanted);
+        for selected in ["Resolution", "Test Profile", "Terrain"] {
+            assert_eq!(color(selected), theme::LABEL_EMPHASIS, "{selected}");
+            // `Label-Default` there was 1.05:1.
+            let legible = contrast(color(selected), theme::TEXTBOX_FOCUSED_BORDER);
+            assert!(legible > 2.0, "{selected} is {legible:.2}:1 on the selection");
+        }
+        for unselected in ["Build", "Other Profile"] {
+            assert_eq!(color(unselected), theme::LABEL_DEFAULT, "{unselected}");
+        }
     }
 
     /// A frame of a File-like menu with the keys taken as the app takes

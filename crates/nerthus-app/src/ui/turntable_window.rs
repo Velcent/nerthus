@@ -13,6 +13,7 @@ use nerthus_render::TurntableRequest;
 use crate::editor::Editor;
 use crate::theme;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
+use crate::ui::widgets::selectable_value;
 
 const WIDTH: f32 = 640.0 - 48.0;
 /// `cboResolution`'s sizes; 1920 by 1080 to begin with.
@@ -150,7 +151,7 @@ pub fn show(ctx: &egui::Context, window: &mut TurntableWindow, memory: &mut Turn
             combo = combo.width(118.0);
             combo.show_ui(ui, |ui| {
                 for (index, (width, height)) in RESOLUTIONS.iter().enumerate() {
-                    ui.selectable_value(&mut window.resolution, index, format!("{width} x {height}"));
+                    selectable_value(ui, &mut window.resolution, index, format!("{width} x {height}"));
                 }
             });
             ui.add_space(8.0);
