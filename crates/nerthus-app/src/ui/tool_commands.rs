@@ -13,11 +13,13 @@ use crate::ui::console_window::{self, ConsoleWindow};
 use crate::ui::consume_shortcut;
 use crate::ui::diagnostics_window::{self, DiagnosticsRequest, DiagnosticsWindow};
 use crate::ui::docs_window::{self, DocsWindow};
+use crate::ui::file_windows;
 use crate::ui::help_windows::{self, UpdateDialog};
 use crate::ui::nahimic_warning::{self, NahimicWarning};
 use crate::ui::onboard::{self, Onboard};
 use crate::ui::prompt::Prompt;
 use crate::ui::status_bar;
+use crate::ui::tool_window;
 use crate::ui::UiState;
 use crate::updates::{DownloadOutcome, ProxySettings};
 use crate::user::Preferences;
@@ -238,6 +240,37 @@ pub fn start(editor: &Editor, ui_state: &mut UiState) {
     }
 }
 
+/// Esc closes the tool window on top, as its close button does, when it
+/// is Diagnostics, the Artifact Explorer, the documentation, the console
+/// or Export Macro. Taken before the shell's keys, and before the modal
+/// check that the Artifact Explorer keeps them from: the windows that
+/// close themselves on Esc (Options, Help's, the Start dialog) and egui's
+/// modals keep it from a window under them.
+pub fn take_escape(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState) {
+    let shown = [
+        (ui_state.diagnostics.is_some(), diagnostics_window::window_id()),
+        (ui_state.artifact_explorer.is_some(), artifact_explorer::window_id()),
+        (ui_state.docs.is_some(), docs_window::window_id()),
+        (ui_state.console.is_some(), console_window::window_id()),
+        (editor.files.export_macro.is_some(), file_windows::export_macro_id()),
+    ];
+    let windows: Vec<egui::Id> = shown.into_iter().filter_map(|(open, id)| open.then_some(id)).collect();
+    let Some(closed) = tool_window::take_escape(ctx, &windows) else {
+        return;
+    };
+    if closed == diagnostics_window::window_id() {
+        ui_state.diagnostics = None;
+    } else if closed == artifact_explorer::window_id() {
+        ui_state.artifact_explorer = None;
+    } else if closed == docs_window::window_id() {
+        ui_state.docs = None;
+    } else if closed == console_window::window_id() {
+        ui_state.console = None;
+    } else if closed == file_windows::export_macro_id() {
+        file_windows::close_export_macro(editor);
+    }
+}
+
 /// Whether a window that keeps the editor's keys to itself is up: the
 /// first-run setup, the Artifact Explorer, Help's windows, the Nahimic
 /// warning, or any `egui::Modal` (Build and Export?, Save terrain?, an
@@ -316,4 +349,98 @@ pub fn show_windows(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiS
         ui_state.nahimic_warning = None;
     }
     settings_reset
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, Pos2, RawInput, Rect, Vec2};
+
+    use super::*;
+    use crate::document::Document;
+    use crate::files::ExportForm;
+    use crate::theme;
+
+    fn escape() -> Event {
+        Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    /// A frame of the windows with `events`, Esc taken first as the shell
+    /// takes it. Returns whether what was drawn after saw the Esc.
+    fn frame(context: &egui::Context, editor: &mut Editor, ui_state: &mut UiState, events: Vec<Event>) -> bool {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1333.0, 800.0))), events, ..Default::default() };
+        let mut seen = false;
+        let mut pending = Vec::new();
+        let output = context.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            take_escape(&ctx, editor, ui_state);
+            seen = ctx.input(|input| input.key_pressed(Key::Escape));
+            file_windows::show(&ctx, editor, ui_state, &mut pending);
+            show_windows(&ctx, editor, ui_state, &mut pending);
+            tool_window::note_keyboard(&ctx);
+        });
+        output.drop_without_applying_deltas();
+        seen
+    }
+
+    fn settle(context: &egui::Context, editor: &mut Editor, ui_state: &mut UiState) {
+        for _ in 0..3 {
+            frame(context, editor, ui_state, Vec::new());
+        }
+    }
+
+    fn shell() -> (egui::Context, Editor, UiState) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        (context, Editor::new(Document::new()), UiState::default())
+    }
+
+    /// Which of the console, the documentation, the Artifact Explorer,
+    /// Diagnostics and Export Macro are open.
+    fn open(editor: &Editor, ui_state: &UiState) -> Vec<bool> {
+        let docs = ui_state.docs.is_some();
+        let explorer = ui_state.artifact_explorer.is_some();
+        vec![ui_state.console.is_some(), docs, explorer, ui_state.diagnostics.is_some(), editor.files.export_macro.is_some()]
+    }
+
+    #[test]
+    fn escape_closes_the_tool_windows_from_the_top_down() {
+        let (context, mut editor, mut ui_state) = shell();
+        // Opened one after another, each over the last.
+        let opening: [fn(&mut Editor, &mut UiState); 5] = [
+            |_, ui_state| ui_state.console = Some(ConsoleWindow::open()),
+            |_, ui_state| ui_state.docs = Some(DocsWindow::open(crate::docs::HOME)),
+            |editor, ui_state| ui_state.artifact_explorer = Some(ArtifactExplorer::open(editor)),
+            |_, ui_state| ui_state.diagnostics = Some(DiagnosticsWindow::open()),
+            |editor, _| editor.files.export_macro = Some(ExportForm::for_project(editor)),
+        ];
+        for open_window in opening {
+            open_window(&mut editor, &mut ui_state);
+            settle(&context, &mut editor, &mut ui_state);
+        }
+        assert_eq!(open(&editor, &ui_state), [true; 5]);
+        // Each Esc closes the one on top, and does not stop a build too.
+        for left in (0..5).rev() {
+            let seen = frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+            assert!(!seen, "the shell saw the Esc that closed a window");
+            let expected: Vec<bool> = (0..5).map(|window| window < left).collect();
+            assert_eq!(open(&editor, &ui_state), expected);
+            settle(&context, &mut editor, &mut ui_state);
+        }
+        // With none left, Esc is the shell's.
+        assert!(frame(&context, &mut editor, &mut ui_state, vec![escape()]));
+    }
+
+    #[test]
+    fn about_over_the_console_closes_first() {
+        let (context, mut editor, mut ui_state) = shell();
+        ui_state.console = Some(ConsoleWindow::open());
+        settle(&context, &mut editor, &mut ui_state);
+        ui_state.help.about = true;
+        settle(&context, &mut editor, &mut ui_state);
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(!ui_state.help.about && ui_state.console.is_some());
+        settle(&context, &mut editor, &mut ui_state);
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(ui_state.console.is_none());
+    }
 }

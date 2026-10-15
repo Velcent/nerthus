@@ -3,11 +3,12 @@
 //! into that body when the body gets smaller than it, and keeps the
 //! squeezed size and place; this puts back what it had as the body grows
 //! again. [`part`] keeps a part of a window to its place, so that what it
-//! holds cannot make the window grow.
+//! holds cannot make the window grow. [`take_escape`] lets Esc close the
+//! window on top.
 
-use egui::{Align2, AreaState, Context, Id, Layout, Pos2, Rect, Ui, Vec2};
+use egui::{Align2, AreaState, Context, Id, Key, LayerId, Layout, Modifiers, Order, Pos2, Rect, Ui, Vec2};
 
-use crate::ui::{status_bar, title_bar};
+use crate::ui::{alert, status_bar, title_bar};
 
 /// A tool window's margin (Edit Math Node's and the Constructor's 12).
 /// egui gives its title bar the same margin, which sets the title bar's
@@ -138,6 +139,53 @@ fn within(rect: Rect, body: Rect) -> Rect {
 fn dragging(ctx: &Context, id: Id) -> bool {
     let dragged = ctx.dragged_id().or_else(|| ctx.drag_stopped_id());
     dragged.and_then(|dragged| ctx.read_response(dragged)).is_some_and(|response| response.layer_id.id == id)
+}
+
+/// The window on top: of the windows shown last frame, the one raised
+/// last, those in front (About, the Painter, a list dropped down) over the
+/// rest. The shell's alert shows among them without being one.
+pub fn on_top(ctx: &Context) -> Option<Id> {
+    let alert = alert::area_id();
+    ctx.memory(|memory| {
+        let areas = memory.areas();
+        let window = |layer: &LayerId| matches!(layer.order, Order::Middle | Order::Foreground) && layer.id != alert && areas.parent_layer(*layer).is_none() && areas.visible_last_frame(layer);
+        let shown: Vec<LayerId> = memory.layer_ids().filter(window).collect();
+        let top = |order: Order| shown.iter().rfind(|layer| layer.order == order).map(|layer| layer.id);
+        top(Order::Foreground).or_else(|| top(Order::Middle))
+    })
+}
+
+/// Esc closes the window on top (`IsCancel`) when it is one of `windows`,
+/// as its close button does: taken before the shell's keys, so that it
+/// does not stop a build as well. Returns the window to close. A modal or
+/// a list dropped down takes Esc instead, and so does a field outside the
+/// windows being typed in, which Esc puts back.
+pub fn take_escape(ctx: &Context, windows: &[Id]) -> Option<Id> {
+    let top = on_top(ctx).filter(|top| windows.contains(top))?;
+    let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
+    let typing_elsewhere = keyboard_layer(ctx).is_some_and(|layer| !windows.contains(&layer.id));
+    if modal || typing_elsewhere || egui::Popup::is_any_open(ctx) {
+        return None;
+    }
+    ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)).then_some(top)
+}
+
+/// Notes the layer of the widget with the keyboard, once the frame is
+/// drawn: egui takes the keyboard back for an Esc before the next frame
+/// is drawn.
+pub fn note_keyboard(ctx: &Context) {
+    let focused = ctx.memory(|memory| memory.focused());
+    let layer = focused.and_then(|id| ctx.read_response(id)).map(|response| response.layer_id);
+    ctx.data_mut(|data| data.insert_temp(keyboard_id(), layer));
+}
+
+/// The layer of the widget that had the keyboard last frame.
+fn keyboard_layer(ctx: &Context) -> Option<LayerId> {
+    ctx.data(|data| data.get_temp::<Option<LayerId>>(keyboard_id())).flatten()
+}
+
+fn keyboard_id() -> Id {
+    Id::new("tool-window-keyboard")
 }
 
 #[cfg(test)]
@@ -305,6 +353,161 @@ mod tests {
         let larger = settle(&context, screen, size);
         let wanted = Rect::from_min_max(opened.min, wanted.max + Vec2::new(124.0, 129.0));
         assert!(close(larger, wanted), "{larger:?} is not {wanted:?}: its top left moved, or its corner left the pointer");
+    }
+
+    const SCREEN: Vec2 = Vec2::new(1333.0, 800.0);
+
+    fn escape() -> egui::Event {
+        egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    /// A frame with `events`: Esc taken for `closable`, as the shell takes
+    /// it before it draws, then a field in the shell, then `windows` side
+    /// by side, each with a field, then `over` (drawn over them). Returns
+    /// the window Esc closed, and whether what was drawn saw the Esc.
+    fn escape_frame(context: &Context, windows: &[&str], closable: &[&str], over: impl Fn(&Context), events: Vec<egui::Event>) -> (Option<Id>, bool) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)), events, ..Default::default() };
+        let closable: Vec<Id> = closable.iter().map(|name| Id::new(*name)).collect();
+        let mut closed = None;
+        let mut seen = false;
+        let output = context.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            closed = take_escape(&ctx, &closable);
+            seen = ctx.input(|input| input.key_pressed(Key::Escape));
+            let mut text = String::new();
+            ui.add(egui::TextEdit::singleline(&mut text).id(Id::new("shell-field")));
+            for (index, name) in windows.iter().enumerate() {
+                let mut window = egui::Window::new(*name).id(Id::new(*name));
+                window = window.default_pos(Pos2::new(100.0 + 400.0 * index as f32, 200.0));
+                window.show(&ctx, |ui| {
+                    let mut text = String::new();
+                    ui.add(egui::TextEdit::singleline(&mut text).id(Id::new(*name).with("field")));
+                });
+            }
+            over(&ctx);
+            note_keyboard(&ctx);
+        });
+        output.drop_without_applying_deltas();
+        (closed, seen)
+    }
+
+    /// Frames of `windows` with nothing over them until they settle.
+    fn show_windows(context: &Context, windows: &[&str]) {
+        for _ in 0..3 {
+            escape_frame(context, windows, &[], |_| {}, Vec::new());
+        }
+    }
+
+    /// A click in the middle of `window`, which raises it.
+    fn click_in(context: &Context, windows: &[&str], window: &str) {
+        let rect = AreaState::load(context, Id::new(window)).expect("the window was shown").rect();
+        for event in [egui::Event::PointerMoved(rect.center()), button(rect.center(), true), button(rect.center(), false)] {
+            escape_frame(context, windows, &[], |_| {}, vec![event]);
+        }
+    }
+
+    fn focus(context: &Context, id: Id) {
+        context.memory_mut(|memory| memory.request_focus(id));
+    }
+
+    #[test]
+    fn escape_closes_the_window_on_top() {
+        let context = Context::default();
+        let windows = ["first", "second"];
+        show_windows(&context, &windows);
+        // The window opened last is on top.
+        let (closed, seen) = escape_frame(&context, &windows, &windows, |_| {}, vec![escape()]);
+        assert_eq!(closed, Some(Id::new("second")));
+        assert!(!seen, "the shell saw the Esc that closed the window");
+        // A click raises the other.
+        click_in(&context, &windows, "first");
+        let (closed, _) = escape_frame(&context, &windows, &windows, |_| {}, vec![escape()]);
+        assert_eq!(closed, Some(Id::new("first")));
+    }
+
+    #[test]
+    fn escape_is_left_to_a_window_on_top_that_it_does_not_close() {
+        let context = Context::default();
+        let windows = ["closable", "other"];
+        show_windows(&context, &windows);
+        let (closed, seen) = escape_frame(&context, &windows, &["closable"], |_| {}, vec![escape()]);
+        assert_eq!(closed, None);
+        assert!(seen);
+    }
+
+    #[test]
+    fn a_window_in_front_keeps_escape_from_the_windows_behind() {
+        let context = Context::default();
+        let windows = ["window"];
+        // About is in front of the window, though shown before it.
+        let about = |ctx: &Context| {
+            egui::Window::new("About").id(Id::new("about")).order(Order::Foreground).show(ctx, |ui| ui.label("About"));
+        };
+        for _ in 0..3 {
+            escape_frame(&context, &[], &[], about, Vec::new());
+        }
+        for _ in 0..3 {
+            escape_frame(&context, &windows, &[], about, Vec::new());
+        }
+        assert_eq!(on_top(&context), Some(Id::new("about")));
+        let (closed, seen) = escape_frame(&context, &windows, &windows, about, vec![escape()]);
+        assert_eq!(closed, None);
+        assert!(seen);
+    }
+
+    #[test]
+    fn escape_is_left_to_a_field_typed_in_outside_the_windows() {
+        let context = Context::default();
+        let windows = ["window"];
+        show_windows(&context, &windows);
+        focus(&context, Id::new("shell-field"));
+        show_windows(&context, &windows);
+        let (closed, seen) = escape_frame(&context, &windows, &windows, |_| {}, vec![escape()]);
+        assert_eq!(closed, None);
+        assert!(seen, "the field did not see the Esc that puts it back");
+    }
+
+    #[test]
+    fn escape_closes_a_window_while_its_own_field_is_typed_in() {
+        let context = Context::default();
+        let windows = ["window"];
+        show_windows(&context, &windows);
+        focus(&context, Id::new("window").with("field"));
+        show_windows(&context, &windows);
+        let (closed, _) = escape_frame(&context, &windows, &windows, |_| {}, vec![escape()]);
+        assert_eq!(closed, Some(Id::new("window")));
+    }
+
+    #[test]
+    fn escape_is_left_to_a_modal_over_the_window() {
+        let context = Context::default();
+        let windows = ["window"];
+        let modal = |ctx: &Context| {
+            egui::Modal::new(Id::new("modal")).show(ctx, |ui| ui.label("Modal"));
+        };
+        for _ in 0..3 {
+            escape_frame(&context, &windows, &[], modal, Vec::new());
+        }
+        let (closed, seen) = escape_frame(&context, &windows, &windows, modal, vec![escape()]);
+        assert_eq!(closed, None);
+        assert!(seen);
+    }
+
+    #[test]
+    fn the_alert_is_not_the_window_on_top() {
+        let context = Context::default();
+        let windows = ["window"];
+        show_windows(&context, &windows);
+        // The alert shows (and so is raised) after the window.
+        let alert = |ctx: &Context| {
+            egui::Area::new(alert::area_id()).order(Order::Middle).show(ctx, |ui| ui.label("Alert"));
+        };
+        for _ in 0..3 {
+            escape_frame(&context, &windows, &[], alert, Vec::new());
+        }
+        assert_eq!(on_top(&context), Some(Id::new("window")));
+        let (closed, _) = escape_frame(&context, &windows, &windows, alert, vec![escape()]);
+        assert_eq!(closed, Some(Id::new("window")));
     }
 
     #[test]

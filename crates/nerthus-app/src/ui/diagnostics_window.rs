@@ -78,6 +78,11 @@ pub enum DiagnosticsRequest {
     SettingsReset,
 }
 
+/// The window's id.
+pub fn window_id() -> Id {
+    Id::new("diagnostics")
+}
+
 /// The window: its text, the tasks and the output scroll when the window
 /// is too small for them, Start and Close staying below them. Returns
 /// whether it is still open, and a request.
@@ -89,7 +94,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut DiagnosticsWi
     let mut request = None;
     let mut open = true;
     let mut close = false;
-    let id = Id::new("diagnostics");
+    let id = window_id();
     let fit = DialogFit::new(ctx, id, &egui::Frame::window(&ctx.global_style()));
     let mut frame = egui::Window::new("Nerthus Diagnostics");
     frame = frame.id(id);

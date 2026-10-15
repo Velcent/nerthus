@@ -71,10 +71,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState, co
         examples_window(ctx, editor, commands);
     }
     if editor.files.export_macro.is_some() {
-        // Escape is Cancel's (`IsCancel`), but a window over the dialog's
-        // (a message about the export) while one shows.
-        let escaped = !tool_commands::modal_open(ctx, ui_state) && ctx.input(|input| input.key_pressed(Key::Escape));
-        export_macro_window(ctx, editor, escaped, commands);
+        export_macro_window(ctx, editor, commands);
     }
 }
 
@@ -481,18 +478,31 @@ fn example_button(ui: &mut Ui, ctx: &egui::Context, memory: &mut WindowMemory, p
     open_menu(&response, path, true, commands);
 }
 
+/// Export Macro's id.
+pub fn export_macro_id() -> Id {
+    Id::new("export-macro")
+}
+
+/// Closes Export Macro, keeping what its form says for next time.
+pub fn close_export_macro(editor: &mut Editor) {
+    if let Some(form) = editor.files.export_macro.take() {
+        form.remember(editor);
+    }
+}
+
 /// Export Macro (`ExportMacroDialog`): name, version, author, URL and
 /// description, the id they make, and whether to save a file and install
-/// the macro. Its button runs `BtnOK_OnClick`'s checks; Cancel, the close
-/// button and `escaped` close it. The form scrolls when the window is too
-/// small for it, the buttons staying below it.
-fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, escaped: bool, commands: &mut Vec<Command>) {
+/// the macro. Its button runs `BtnOK_OnClick`'s checks; Cancel and the
+/// close button close it, and so does Escape (`IsCancel`), which the shell
+/// takes for it (`tool_commands::take_escape`). The form scrolls when the
+/// window is too small for it, the buttons staying below it.
+fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut Vec<Command>) {
     let Some(mut form) = editor.files.export_macro.clone() else {
         return;
     };
     let mut open = true;
-    let mut action = escaped.then_some(false);
-    let id = Id::new("export-macro");
+    let mut action = None;
+    let id = export_macro_id();
     let fit = DialogFit::new(ctx, id, &egui::Frame::window(&ctx.global_style()));
     let mut window = egui::Window::new("Export Macro");
     window = window.id(id);
@@ -522,8 +532,7 @@ fn export_macro_window(ctx: &egui::Context, editor: &mut Editor, escaped: bool, 
     }
     editor.files.export_macro = Some(form.clone());
     if !open || action == Some(false) {
-        form.remember(editor);
-        editor.files.export_macro = None;
+        close_export_macro(editor);
         return;
     }
     if action == Some(true) {
@@ -803,7 +812,11 @@ mod tests {
         editor.files.export_macro = Some(files::ExportForm::for_project(&editor));
         let mut ui_state = UiState::default();
         let mut commands = Vec::new();
-        let mut windows = |ctx: &egui::Context| show(ctx, &mut editor, &mut ui_state, &mut commands);
+        let mut windows = |ctx: &egui::Context| {
+            // Esc taken as the shell takes it, before the windows.
+            tool_commands::take_escape(ctx, &mut editor, &mut ui_state);
+            show(ctx, &mut editor, &mut ui_state, &mut commands);
+        };
         for screen in fit_checks::SMALL_SCREENS {
             let words = fit_checks::settle(&context, screen, &mut windows);
             // The title and the button.

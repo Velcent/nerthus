@@ -230,6 +230,11 @@ fn free_name(folder: &Path, name: &str) -> PathBuf {
     }
 }
 
+/// The window's id.
+pub fn window_id() -> Id {
+    Id::new("artifact-explorer")
+}
+
 /// The window: the folders scroll when the window is too small for them,
 /// Refresh and Close staying below them. Returns false once closed.
 pub fn show(ctx: &egui::Context, editor: &mut Editor, explorer: &mut ArtifactExplorer) -> bool {
@@ -241,7 +246,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, explorer: &mut ArtifactExp
     }
     let mut open = true;
     let mut close = false;
-    let id = Id::new("artifact-explorer");
+    let id = window_id();
     let fit = DialogFit::new(ctx, id, &egui::Frame::window(&ctx.global_style()));
     let mut window = egui::Window::new("Artifact Explorer");
     window = window.id(id);
@@ -422,7 +427,7 @@ mod tests {
             });
             output.drop_without_applying_deltas();
         }
-        let area = AreaState::load(context, Id::new("artifact-explorer")).filter(|area| area.size.is_some());
+        let area = AreaState::load(context, window_id()).filter(|area| area.size.is_some());
         area.map(|area| area.rect()).unwrap_or(Rect::NOTHING)
     }
 

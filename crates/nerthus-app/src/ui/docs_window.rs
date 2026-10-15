@@ -151,6 +151,11 @@ fn place_of(target: &str) -> Place {
     }
 }
 
+/// The window's id.
+pub fn window_id() -> Id {
+    Id::new("documentation")
+}
+
 /// The window. Returns whether it is still open.
 pub fn show(ctx: &egui::Context, docs: &mut DocsWindow) -> bool {
     let mut open = true;
@@ -158,7 +163,7 @@ pub fn show(ctx: &egui::Context, docs: &mut DocsWindow) -> bool {
     window = window.collapsible(false);
     window = window.resizable(true);
     window = window.min_size(Vec2::new(640.0, 360.0));
-    window = tool_window::place(ctx, window, Id::new("documentation"), Vec2::new(1080.0, 760.0));
+    window = tool_window::place(ctx, window, window_id(), Vec2::new(1080.0, 760.0));
     window = window.open(&mut open);
     let shown = window.show(ctx, |ui| {
         toolbar(ui, docs);
