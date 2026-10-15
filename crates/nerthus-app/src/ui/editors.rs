@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::icons;
 use crate::theme;
+use crate::ui::colour_picker::{colour_button, linear_to_srgb, picked_linear};
 use crate::ui::slider_popups::{self, BoxWidth, Nudge, NudgeLook, RangeEnd, TypingLook};
 use crate::ui::widgets::Tooltips;
 
@@ -1364,10 +1365,10 @@ fn dropdown(ui: &mut Ui, id: Id, label: &str, spec: &ParameterSpec, current: &st
     dropdown_row(ui, id, label, &names, &shown, current)
 }
 
-/// `DropdownX` over (value, text) entries; returns a value picked other
-/// than `current`.
-pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String)], shown: &str, current: &str) -> Option<String> {
-    let width = ui.available_width();
+/// The header column of a `DropdownX` or `TextEditor` row `width` wide:
+/// `Column.Size`; 100 narrower than 300; 18, with no name in it, narrower
+/// than 150.
+fn header_column(ui: &Ui, width: f32) -> (Shrunk, f32) {
     let shrunk = if width < 150.0 {
         Shrunk::Lot
     } else if width < 300.0 {
@@ -1380,6 +1381,14 @@ pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String
         Shrunk::Little => 100.0,
         Shrunk::Lot => 18.0,
     };
+    (shrunk, column)
+}
+
+/// `DropdownX` over (value, text) entries; returns a value picked other
+/// than `current`.
+pub fn dropdown_row(ui: &mut Ui, id: Id, label: &str, entries: &[(String, String)], shown: &str, current: &str) -> Option<String> {
+    let width = ui.available_width();
+    let (shrunk, column) = header_column(ui, width);
     let header = if shrunk == Shrunk::Lot { None } else { Some(label) };
     let chosen = dropdown_box(ui, id, header, column, 26.0, shown, entries, current, theme::interface(12.0));
     chosen.filter(|name| name != current)
@@ -1618,10 +1627,11 @@ fn command_button(ui: &mut Ui, label: &str) -> Edit {
     if clicked { Edit::Command } else { Edit::None }
 }
 
-/// `ColorPickerEditor` (margin 20, 4, 4, 4): the name and the colour.
+/// `ColorPickerEditor` (margin 20, 4, 4, 4): the name and the colour, a
+/// swatch opening the `ColorEditor`, which leaves the alpha as it is.
 fn color_editor(ui: &mut Ui, label: &str, value: &Value) -> Edit {
     let current = color_of(value);
-    let mut rgba = egui::Rgba::from_rgba_unmultiplied(current[0], current[1], current[2], current[3]);
+    let linear = [current[0], current[1], current[2]];
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
     let header = Rect::from_min_size(rect.min, Vec2::new(90.0 + 20.0, rect.height()));
@@ -1630,14 +1640,12 @@ fn color_editor(ui: &mut Ui, label: &str, value: &Value) -> Edit {
     let swatch_right = (rect.right() - 4.0).max(header.right());
     let swatch = Rect::from_min_max(Pos2::new(header.right(), rect.top() + 4.0), Pos2::new(swatch_right, rect.bottom() - 4.0));
     let mut swatch_ui = ui.new_child(egui::UiBuilder::new().max_rect(swatch));
-    swatch_ui.spacing_mut().interact_size = swatch.size();
-    let changed = egui::color_picker::color_edit_button_rgba(&mut swatch_ui, &mut rgba, egui::color_picker::Alpha::Opaque).changed();
-    if !changed {
+    let Some(colour) = colour_button(&mut swatch_ui, swatch.size(), linear.map(linear_to_srgb)) else {
         return Edit::None;
-    }
-    let [red, green, blue, alpha] = rgba.to_rgba_unmultiplied();
+    };
+    let [red, green, blue] = picked_linear(linear, colour);
     let mut updated = value.clone();
-    set_color(&mut updated, [red, green, blue, alpha]);
+    set_color(&mut updated, [red, green, blue, current[3]]);
     Edit::Set(updated)
 }
 
@@ -1657,18 +1665,22 @@ fn information(ui: &mut Ui, text: &str, margin: egui::Margin, format: Option<&[V
     });
 }
 
-/// `TextEditor` (margin 20, 2, 4, 2): the name in a 90 header column and
+/// `TextEditor` (margin 0, 2): the name in a dropdown's header column and
 /// the value in a text box that only shows it (`TextBox`: #101010 with a
-/// #363636 line, padding 4, corners 3). A click opens an `EditablePopup`
-/// over the value (monospace 16, as wide as the value, 96 at least),
-/// which closes as [`crate::ui::widgets::popup_outcome`] says.
+/// #363636 line, padding 4, corners 3), out to the row's right edge as a
+/// dropdown's box is. A click opens an `EditablePopup` over the value
+/// (monospace 16, as wide as the value, 96 at least), which closes as
+/// [`crate::ui::widgets::popup_outcome`] says.
 fn text_box(ui: &mut Ui, id: Id, label: &str, current: &str) -> Edit {
     let width = ui.available_width();
+    let (shrunk, column) = header_column(ui, width);
     let (row, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
-    let control = Rect::from_min_max(row.min + Vec2::new(20.0, 2.0), row.max - Vec2::new(4.0, 2.0));
+    let control = row.shrink2(Vec2::new(0.0, 2.0));
     let response = ui.interact(control, id.with("text-editor"), Sense::click());
-    let header = Rect::from_min_size(control.min, Vec2::new(90.0, control.height()));
-    header_label(ui, header, label, theme::LABEL_DEFAULT);
+    let header = Rect::from_min_size(control.min, Vec2::new(column.min(width), control.height()));
+    if shrunk != Shrunk::Lot {
+        header_label(ui, header, label, theme::LABEL_DEFAULT);
+    }
     let field = Rect::from_min_max(Pos2::new(header.right(), control.top()), control.max);
     let opacity = if ui.is_enabled() { 1.0 } else { 0.5 };
     ui.painter().rect_filled(field, 3.0, theme::TEXTBOX_BACKGROUND.gamma_multiply(opacity));
@@ -2023,6 +2035,50 @@ mod tests {
     }
 
     #[test]
+    fn text_boxes_keep_to_the_dropdown_columns() {
+        // Each width shrinks the header column differently (none, a
+        // little, a lot), and each size theme has its own column.
+        for compact in [false, true] {
+            let context = themed_context();
+            theme::set_settings(&context, theme::InterfaceSettings { compact, ..Default::default() });
+            for width in [120.0, 200.0, 299.0, 300.0, 600.0] {
+                let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0));
+                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+                let entries = [("Value".to_string(), "Value".to_string())];
+                let mut output = context.run_ui(input, |ui| {
+                    let mut dropdown = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 26.0))));
+                    dropdown_row(&mut dropdown, Id::new("dropdown"), "Edit Mode", &entries, "Value", "Value");
+                    let mut text = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(0.0, 50.0), Vec2::new(width, 30.0))));
+                    text_box(&mut text, Id::new("text"), "Variable Name", "x");
+                });
+                let shapes = std::mem::take(&mut output.shapes);
+                output.drop_without_applying_deltas();
+                let filled = |fill: Color32| {
+                    let rect = shapes.iter().find_map(|clipped| match &clipped.shape {
+                        egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect),
+                        _ => None,
+                    });
+                    rect.expect("the box is drawn")
+                };
+                let dropdown = filled(theme::DROPDOWN_BACKGROUND);
+                let field = filled(theme::TEXTBOX_BACKGROUND);
+                assert_eq!((field.left(), field.right()), (dropdown.left(), dropdown.right()), "{width} wide, compact: {compact}");
+                let name_end = |name: &str| {
+                    shapes.iter().find_map(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) if text.galley.text() == name => Some(text.pos.x + text.galley.size().x),
+                        _ => None,
+                    })
+                };
+                match (name_end("Edit Mode"), name_end("Variable Name")) {
+                    (Some(dropdown_end), Some(text_end)) => assert!((dropdown_end - text_end).abs() < 0.5, "{width} wide, compact: {compact}: the names end at {dropdown_end} and {text_end}"),
+                    (None, None) => assert!(width < 150.0),
+                    shown => panic!("{width} wide, compact: {compact}: only one name shows: {shown:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn colour_rows_narrower_than_their_header_lay_out() {
         // The header and the swatch's margin take 114: a narrower row
         // leaves the swatch no width, which egui would refuse if negative.
@@ -2040,6 +2096,42 @@ mod tests {
             output.drop_without_applying_deltas();
             assert!(matches!(edit, Edit::None));
         }
+    }
+
+    #[test]
+    fn colour_properties_pick_in_the_colour_editor_and_keep_their_alpha() {
+        let context = themed_context();
+        // Constant "White" in Alpine Valley, half transparent.
+        let value = json!({"R": 0.8879231, "G": 0.9046612, "B": 0.9301109, "A": 0.5});
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 30.0));
+        let frame = |events: Vec<egui::Event>| {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0));
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut edit = Edit::None;
+            let output = context.run_ui(input, |ui| {
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(row));
+                edit = color_editor(&mut row, "Color", &value);
+            });
+            output.drop_without_applying_deltas();
+            edit
+        };
+        let click = |position: Pos2| {
+            let button = |pressed: bool| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            [vec![egui::Event::PointerMoved(position)], vec![button(true)], vec![button(false)]].into_iter().map(&frame).collect::<Vec<_>>()
+        };
+        // The swatch, right of the 110 header.
+        assert!(click(Pos2::new(250.0, 15.0)).iter().all(|edit| matches!(edit, Edit::None)));
+        frame(Vec::new());
+        let popup = context.memory(|memory| memory.areas().top_layer_id(egui::Order::Foreground).and_then(|layer| memory.area_rect(layer.id)));
+        let popup = popup.expect("the swatch opens the colour editor");
+        // Well inside the spectrum, which starts at the popup's margin.
+        let edits = click(popup.min + Vec2::splat(60.0));
+        let Some(Edit::Set(updated)) = edits.into_iter().find(|edit| matches!(edit, Edit::Set(_))) else {
+            panic!("a click on the spectrum sets the colour");
+        };
+        assert_eq!(updated["A"].as_f64(), Some(0.5));
+        let picked = color_of(&updated);
+        assert!(picked[..3].iter().zip(color_of(&value)).all(|(new, old)| (new - old).abs() > 0.01), "{updated}");
     }
 
     #[test]
@@ -2327,13 +2419,18 @@ mod tests {
         assert!(slider_popups::typing_text(&context, typing_id).is_none());
     }
 
-    /// A `TextEditor` row: its value runs from 110 (20 of margin and the
-    /// 90 header in) to 296 (4 of margin short of the end), 42 to 68.
+    /// A `TextEditor` row wide enough for the whole header column.
     const TEXT_ROW: Rect = Rect::from_min_max(Pos2::new(0.0, 40.0), Pos2::new(300.0, 70.0));
-    const TEXT_FIELD: Rect = Rect::from_min_max(Pos2::new(110.0, 42.0), Pos2::new(296.0, 68.0));
 
     fn text_id() -> Id {
         Id::new("text-test")
+    }
+
+    /// The row's value: past the header column to the row's end, 2 in
+    /// from its top and bottom.
+    fn text_field(context: &egui::Context) -> Rect {
+        let column = theme::sizes(context).header_column;
+        Rect::from_min_max(Pos2::new(TEXT_ROW.left() + column, TEXT_ROW.top() + 2.0), TEXT_ROW.max - Vec2::new(0.0, 2.0))
     }
 
     /// One frame of a text property holding `text`, with these events.
@@ -2350,7 +2447,8 @@ mod tests {
         for scale in [1.0, 1.2, 1.5] {
             let context = themed_context();
             context.set_zoom_factor(scale);
-            let on_value = TEXT_FIELD.center();
+            let field = text_field(&context);
+            let on_value = field.center();
             let events = [egui::Event::PointerMoved(on_value), press(on_value, egui::PointerButton::Primary, true), press(on_value, egui::PointerButton::Primary, false)];
             for event in events {
                 text_frame(&context, "height", vec![event]);
@@ -2360,8 +2458,8 @@ mod tests {
             let area = text_id().with("text-typing").with("area");
             let shown = context.memory(|memory| memory.area_rect(area)).expect("the popup shows");
             // Areas sit on whole pixels: within one of the value.
-            let off = (shown.left() - TEXT_FIELD.left()).abs().max((shown.right() - TEXT_FIELD.right()).abs()).max((shown.top() - TEXT_FIELD.top()).abs());
-            assert!(off < 1.0 / scale, "at {scale}: {shown:?} over {TEXT_FIELD:?}");
+            let off = (shown.left() - field.left()).abs().max((shown.right() - field.right()).abs()).max((shown.top() - field.top()).abs());
+            assert!(off < 1.0 / scale, "at {scale}: {shown:?} over {field:?}");
         }
     }
 

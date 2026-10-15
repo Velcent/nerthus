@@ -82,8 +82,11 @@ pub fn modifier_list(ui: &mut Ui, node: &NodeData, node_id: i32, color_flip: usi
     let mut made = 0usize;
     let mut color_flip = color_flip;
     let mut boxes = Vec::with_capacity(count);
+    // The group panels' margin (`Expander.Margin`), so the boxes line up
+    // with the panels above.
+    let [margin_left, margin_top, margin_right, margin_bottom] = theme::sizes(ui.ctx()).expander_margin;
     let mut frame_outer = egui::Frame::new();
-    frame_outer.inner_margin = egui::Margin::same(4);
+    frame_outer.inner_margin = egui::Margin { left: margin_left as i8, right: margin_right as i8, top: margin_top as i8, bottom: margin_bottom as i8 };
     frame_outer.show(ui, |ui| {
         for (place, (index, modifier)) in ordered.iter().copied().enumerate() {
             // The box's drag area, under everything drawn in it.
