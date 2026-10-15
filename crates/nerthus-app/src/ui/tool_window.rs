@@ -5,7 +5,7 @@
 //! again. [`part`] keeps a part of a window to its place, so that what it
 //! holds cannot make the window grow.
 
-use egui::{AreaState, Context, Id, Layout, Pos2, Rect, Ui, Vec2};
+use egui::{Align2, AreaState, Context, Id, Layout, Pos2, Rect, Ui, Vec2};
 
 use crate::ui::{status_bar, title_bar};
 
@@ -44,11 +44,29 @@ pub fn place<'open>(ctx: &Context, window: egui::Window<'open>, id: Id, size: Ve
     let body = body(ctx);
     let mut window = window.id(id);
     window = window.constrain_to(body);
-    window = window.pivot(egui::Align2::CENTER_CENTER);
-    window = window.default_pos(body.center());
     window = window.default_size(size);
+    // egui keeps a window's place at its pivot and works its edges out
+    // from there, so a centred window sized by its bottom right grip moves
+    // its top left corner by half the change, and the grip falls behind
+    // the pointer. So a window is centred when it opens, then held by its
+    // top left corner.
+    let shown = AreaState::load(ctx, id).filter(|state| state.size.is_some());
+    match shown {
+        None => {
+            window = window.pivot(Align2::CENTER_CENTER);
+            window = window.default_pos(body.center());
+        }
+        Some(state) => {
+            window = window.pivot(Align2::LEFT_TOP);
+            if state.pivot != Align2::LEFT_TOP {
+                // Not movable for the frame, as below.
+                window = window.movable(false);
+                window = window.current_pos(state.left_top_pos());
+            }
+        }
+    }
     let key = id.with("squeezed");
-    let last = AreaState::load(ctx, id).filter(|state| state.size.is_some()).map(|state| state.rect());
+    let last = shown.map(|state| state.rect());
     let mut squeezed = ctx.data(|data| data.get_temp::<Squeezed>(key));
     if let (Some(kept), Some(rect)) = (squeezed, last)
         && kept.body == body
@@ -75,7 +93,7 @@ pub fn place<'open>(ctx: &Context, window: egui::Window<'open>, id: Id, size: Ve
         // Not movable for the frame: egui puts a window dragged by its
         // title bar back where it was, whatever its `current_pos`.
         window = window.movable(false);
-        window = window.current_pos(wanted.center());
+        window = window.current_pos(wanted.min);
         if (last.size() - wanted.size()).abs().max_elem() > 0.5 {
             // For a frame, which leaves egui's resize state at this size.
             window = window.fixed_size(wanted.size());
@@ -159,6 +177,22 @@ mod tests {
         (a.min - b.min).abs().max_elem() <= 1.0 && (a.max - b.max).abs().max_elem() <= 1.0
     }
 
+    fn button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// Presses at `from`, moves to `to` a step at a time, as a hand does,
+    /// and lets go there.
+    fn drag(context: &Context, screen: Vec2, size: Vec2, from: Pos2, to: Pos2) {
+        frame(context, screen, size, vec![egui::Event::PointerMoved(from)]);
+        frame(context, screen, size, vec![button(from, true)]);
+        for step in 1..=8 {
+            let pos = from + (to - from) * (step as f32 / 8.0);
+            frame(context, screen, size, vec![egui::Event::PointerMoved(pos)]);
+        }
+        frame(context, screen, size, vec![button(to, false)]);
+    }
+
     #[test]
     fn windows_open_in_the_middle_of_the_body() {
         let context = Context::default();
@@ -236,7 +270,6 @@ mod tests {
         // Dragged by its title bar, left and down.
         let from = Pos2::new(pushed.center().x, pushed.top() + 8.0);
         let to = from + Vec2::new(-40.0, 50.0);
-        let button = |pos: Pos2, pressed: bool| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
         frame(&context, small, size, vec![egui::Event::PointerMoved(from)]);
         frame(&context, small, size, vec![button(from, true)]);
         frame(&context, small, size, vec![egui::Event::PointerMoved(from + Vec2::new(-20.0, 25.0))]);
@@ -246,6 +279,27 @@ mod tests {
         assert!((moved.min - pushed.min).length() > 10.0, "{moved:?} was not dragged from {pushed:?}");
         let after = settle(&context, large, size);
         assert!(close(after, moved), "{after:?} left where it was put, {moved:?}");
+    }
+
+    #[test]
+    fn sizing_a_window_by_its_corner_keeps_its_top_left_corner() {
+        let context = Context::default();
+        let screen = Vec2::new(1600.0, 960.0);
+        let size = Vec2::new(800.0, 600.0);
+        let opened = settle(&context, screen, size);
+        // The bottom right grip, dragged up and left.
+        let grip = opened.max - Vec2::splat(2.0);
+        let to = grip - Vec2::new(200.0, 160.0);
+        drag(&context, screen, size, grip, to);
+        let smaller = settle(&context, screen, size);
+        let wanted = Rect::from_min_max(opened.min, opened.max - Vec2::new(200.0, 160.0));
+        assert!(close(smaller, wanted), "{smaller:?} is not {wanted:?}: its top left moved, or its corner left the pointer");
+        // Then down and right, to make it larger again.
+        let back = to + Vec2::new(124.0, 129.0);
+        drag(&context, screen, size, to, back);
+        let larger = settle(&context, screen, size);
+        let wanted = Rect::from_min_max(opened.min, wanted.max + Vec2::new(124.0, 129.0));
+        assert!(close(larger, wanted), "{larger:?} is not {wanted:?}: its top left moved, or its corner left the pointer");
     }
 
     #[test]

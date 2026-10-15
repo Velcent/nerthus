@@ -262,7 +262,7 @@ impl ExportBuild {
     }
 
     /// A build that reports on `messages`.
-    fn following(project_name: String, resolution: usize, open_folder: bool, messages: Receiver<Message>) -> Self {
+    pub(crate) fn following(project_name: String, resolution: usize, open_folder: bool, messages: Receiver<Message>) -> Self {
         Self {
             kind: ExportKind::Build,
             project_name,
