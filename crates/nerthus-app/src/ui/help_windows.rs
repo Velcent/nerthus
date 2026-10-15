@@ -10,7 +10,7 @@ use egui::{Align, Align2, Color32, Id, Layout, RichText, Sense, Stroke, Ui, Vec2
 use crate::theme;
 use crate::ui::markdown;
 use crate::ui::tool_window;
-use crate::ui::widgets::{self, dialog_button, dialog_button_row};
+use crate::ui::widgets::{self, dialog_button, dialog_button_row, DialogFit};
 use crate::updates::{UpdateAnswer, UpdateToken};
 
 const SHORTCUTS: &str = include_str!("../../data/shortcuts.md");
@@ -120,10 +120,10 @@ pub fn show(ctx: &egui::Context, help: &mut HelpWindows) {
     }
 }
 
-/// The least room left beside a dialog in the body. Above and below it
-/// takes none: the title bar and the status bar already stand between it
-/// and the window's edges.
-const DIALOG_MARGIN: Vec2 = Vec2::new(20.0, 0.0);
+/// The least room left beside a dialog in the body: the dialogs' margin
+/// at each side. Above and below it takes none: the title bar and the
+/// status bar already stand between it and the window's edges.
+const DIALOG_MARGIN: Vec2 = Vec2::new(widgets::DIALOG_SCREEN_MARGIN, 0.0);
 
 /// A borderless dialog (`Window-Dark` on `Menu-Border`,
 /// rounded, with a shadow), centred in the shell's body at this size or
@@ -362,42 +362,48 @@ fn authors() -> String {
     names.join(", ")
 }
 
-/// About Nerthus. Returns whether it stays open.
+/// About Nerthus, 476 across with its frame where there is room. Returns
+/// whether it stays open.
 fn about_window(ctx: &egui::Context) -> bool {
     let mut open = true;
     let title = concat!("About Nerthus ", env!("CARGO_PKG_VERSION"));
+    let id = Id::new("about-nerthus");
+    let frame = egui::Frame::window(&ctx.global_style());
+    let fit = DialogFit::new(ctx, id, &frame);
     let mut window = egui::Window::new(title);
-    window = window.id(Id::new("about-nerthus"));
+    window = window.id(id);
     window = window.collapsible(false);
     window = window.resizable(false);
-    window = window.fixed_size(Vec2::new(476.0, 600.0));
+    window = fit.window(window, 476.0 - frame.total_margin().sum().x);
     window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
     window = window.order(egui::Order::Foreground);
     window = window.open(&mut open);
     let mut close = ctx.input(|input| input.key_pressed(egui::Key::Escape) || input.key_pressed(egui::Key::Enter));
-    window.show(ctx, |ui| {
-        ui.add_space(16.0);
-        let logo = egui::Image::new(egui::include_image!("../../assets/nerthus.svg"));
-        ui.vertical_centered(|ui| ui.add(logo.fit_to_exact_size(Vec2::splat(180.0))));
-        ui.add_space(24.0);
-        let caption = |text: &str| RichText::new(text).font(theme::semibold(10.0)).color(Color32::from_gray(0x80));
-        ui.label(caption("Developed by"));
-        ui.label(RichText::new(authors()).font(theme::interface(13.0)).color(theme::LABEL_DEFAULT));
-        ui.add_space(12.0);
-        ui.label(caption("Built with"));
-        let built_with = "Bevy, egui, wgpu, resvg, the Roboto and Roboto Mono fonts, and palettes from Copernicus Sentinel-2 imagery";
-        ui.add(egui::Label::new(RichText::new(built_with).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT)).wrap());
-        ui.label(RichText::new(nerthus_nodes::colour_library::NOTICE).font(theme::interface(10.0)).color(Color32::from_gray(0x80)));
-        ui.add_space(24.0);
-        let rows = [("Version", env!("CARGO_PKG_VERSION")), ("License", env!("CARGO_PKG_LICENSE"))];
-        for (name, value) in rows {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(name).font(theme::interface(12.0)).color(Color32::from_gray(0x80)));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(value).font(theme::monospace_bold(12.0)).color(Color32::from_gray(0x80)));
+    let shown = window.show(ctx, |ui| {
+        fit.body(ui, |ui| {
+            ui.add_space(16.0);
+            let logo = egui::Image::new(egui::include_image!("../../assets/nerthus.svg"));
+            ui.vertical_centered(|ui| ui.add(logo.fit_to_exact_size(Vec2::splat(180.0))));
+            ui.add_space(24.0);
+            let caption = |text: &str| RichText::new(text).font(theme::semibold(10.0)).color(Color32::from_gray(0x80));
+            ui.label(caption("Developed by"));
+            ui.label(RichText::new(authors()).font(theme::interface(13.0)).color(theme::LABEL_DEFAULT));
+            ui.add_space(12.0);
+            ui.label(caption("Built with"));
+            let built_with = "Bevy, egui, wgpu, resvg, the Roboto and Roboto Mono fonts, and palettes from Copernicus Sentinel-2 imagery";
+            ui.add(egui::Label::new(RichText::new(built_with).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT)).wrap());
+            ui.label(RichText::new(nerthus_nodes::colour_library::NOTICE).font(theme::interface(10.0)).color(Color32::from_gray(0x80)));
+            ui.add_space(24.0);
+            let rows = [("Version", env!("CARGO_PKG_VERSION")), ("License", env!("CARGO_PKG_LICENSE"))];
+            for (name, value) in rows {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(name).font(theme::interface(12.0)).color(Color32::from_gray(0x80)));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(value).font(theme::monospace_bold(12.0)).color(Color32::from_gray(0x80)));
+                    });
                 });
-            });
-        }
+            }
+        });
         ui.add_space(16.0);
         ui.separator();
         ui.add_space(8.0);
@@ -415,6 +421,9 @@ fn about_window(ctx: &egui::Context) -> bool {
             });
         });
     });
+    if let Some(shown) = shown {
+        fit.end(ctx, shown.response.rect);
+    }
     open && !close
 }
 
@@ -443,8 +452,10 @@ fn notes_text(token: &UpdateToken) -> String {
     format!("{start}...\n(read more on download page)")
 }
 
-/// The check's answer as a task dialog. Returns whether it stays open,
-/// and the release to download when Download Update was clicked.
+/// The check's answer as a task dialog: its words scroll when the window
+/// is too small for them, its buttons and link stay below them. Returns
+/// whether it stays open, and the release to download when Download Update
+/// was clicked.
 fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Option<UpdateToken>) {
     let mut open = true;
     let mut download = None;
@@ -452,11 +463,11 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
         UpdateAnswer::Available(_) => "Update available!".to_string(),
         _ => concat!("Nerthus ", env!("CARGO_PKG_VERSION")).to_string(),
     };
-    let modal = widgets::dialog(ctx, Id::new("update-check"));
+    let id = Id::new("update-check");
+    let fit = DialogFit::new(ctx, id, &widgets::dialog_frame(ctx));
+    let modal = widgets::dialog(ctx, id);
     let response = modal.show(ctx, |ui| {
-        ui.set_width(460.0);
-        ui.label(RichText::new(caption).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
-        ui.add_space(6.0);
+        ui.set_width(fit.width(460.0));
         let heading = |ui: &mut Ui, text: &str| {
             ui.label(RichText::new(text).font(theme::semibold(15.0)).color(theme::ACCENT_MUTED_BLUE));
             ui.add_space(8.0);
@@ -472,22 +483,46 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
             }
         };
         let releases = crate::updates::releases_page();
-        match &dialog.answer {
-            UpdateAnswer::UpToDate => {
-                heading(ui, "You're up-to-date!");
-                body(ui, "Congratulations! You're running the latest version of Nerthus with the most recent feature updates!\n\nIf you would like to re-install Nerthus, visit");
-                link(ui, &releases, &releases);
-                ui.add_space(12.0);
-                dialog_button_row(ui, |ui| {
-                    if dialog_button(ui, "OK", false).clicked() {
-                        open = false;
+        fit.body(ui, |ui| {
+            ui.label(RichText::new(caption).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
+            ui.add_space(6.0);
+            match &dialog.answer {
+                UpdateAnswer::UpToDate => {
+                    heading(ui, "You're up-to-date!");
+                    body(ui, "Congratulations! You're running the latest version of Nerthus with the most recent feature updates!\n\nIf you would like to re-install Nerthus, visit");
+                    link(ui, &releases, &releases);
+                }
+                UpdateAnswer::Failed(error) => {
+                    heading(ui, "Error loading update information.");
+                    body(ui, error);
+                }
+                UpdateAnswer::Available(token) => {
+                    heading(ui, &format!("Nerthus Version {} is available", token.version));
+                    // Without a download for this system, the page opens
+                    // instead.
+                    let question = if token.download.is_some() { "Would you like to download and install the update?" } else { "Would you like to download the update?" };
+                    let mut text = format!("{question}\n\n");
+                    if let Some(size) = token.size {
+                        text.push_str(&format!("Size: {}\n", byte_size(size)));
                     }
-                });
+                    text.push_str(&format!("Released date: {}", token.date));
+                    body(ui, &text);
+                    ui.add_space(8.0);
+                    let expander = egui::CollapsingHeader::new("Release Notes").id_salt("update-release-notes").open(Some(dialog.notes_open));
+                    let shown = expander.show(ui, |ui| {
+                        let mut scroll = egui::ScrollArea::vertical();
+                        scroll = scroll.max_height(240.0);
+                        scroll.show(ui, |ui| markdown::show(ui, &notes_text(token)));
+                    });
+                    if shown.header_response.clicked() {
+                        dialog.notes_open = !dialog.notes_open;
+                    }
+                }
             }
-            UpdateAnswer::Failed(error) => {
-                heading(ui, "Error loading update information.");
-                body(ui, error);
-                ui.add_space(12.0);
+        });
+        ui.add_space(12.0);
+        match &dialog.answer {
+            UpdateAnswer::UpToDate | UpdateAnswer::Failed(_) => {
                 dialog_button_row(ui, |ui| {
                     if dialog_button(ui, "OK", false).clicked() {
                         open = false;
@@ -495,27 +530,6 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
                 });
             }
             UpdateAnswer::Available(token) => {
-                heading(ui, &format!("Nerthus Version {} is available", token.version));
-                // Without a download for this system, the page opens
-                // instead.
-                let question = if token.download.is_some() { "Would you like to download and install the update?" } else { "Would you like to download the update?" };
-                let mut text = format!("{question}\n\n");
-                if let Some(size) = token.size {
-                    text.push_str(&format!("Size: {}\n", byte_size(size)));
-                }
-                text.push_str(&format!("Released date: {}", token.date));
-                body(ui, &text);
-                ui.add_space(8.0);
-                let expander = egui::CollapsingHeader::new("Release Notes").id_salt("update-release-notes").open(Some(dialog.notes_open));
-                let shown = expander.show(ui, |ui| {
-                    let mut scroll = egui::ScrollArea::vertical();
-                    scroll = scroll.max_height(240.0);
-                    scroll.show(ui, |ui| markdown::show(ui, &notes_text(token)));
-                });
-                if shown.header_response.clicked() {
-                    dialog.notes_open = !dialog.notes_open;
-                }
-                ui.add_space(12.0);
                 dialog_button_row(ui, |ui| {
                     if dialog_button(ui, "Cancel", false).clicked() {
                         open = false;
@@ -539,6 +553,7 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
             }
         }
     });
+    fit.end(ctx, response.response.rect);
     if response.should_close() {
         open = false;
     }
@@ -548,6 +563,7 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::widgets::fit_checks;
     use crate::ui::{status_bar, title_bar};
     use egui::{AreaState, Pos2, RawInput, Rect};
 
@@ -587,6 +603,39 @@ mod tests {
                 assert!(body.expand(0.5).contains_rect(window), "{id} at {window:?} leaves the body {body:?} at {screen:?}");
                 assert!((window.center() - body.center()).length() <= 1.0, "{id} at {window:?} is off the body's middle at {screen:?}");
             }
+        }
+    }
+
+    #[test]
+    fn about_keeps_its_title_and_close_in_small_windows() {
+        let context = fit_checks::context();
+        let title = concat!("About Nerthus ", env!("CARGO_PKG_VERSION"));
+        let id = Id::new("about-nerthus");
+        for screen in fit_checks::SMALL_SCREENS {
+            let words = fit_checks::settle(&context, screen, |ctx| {
+                about_window(ctx);
+            });
+            fit_checks::assert_fits(&context, screen, id, &words, &[title, "Close", "Open source information"]);
+        }
+        // Given the room back, it is 476 across and shows all it has.
+        let words = fit_checks::settle(&context, Vec2::new(1333.0, 800.0), |ctx| {
+            about_window(ctx);
+        });
+        fit_checks::assert_fits(&context, Vec2::new(1333.0, 800.0), id, &words, &[title, "Developed by", "Version", "License", "Close"]);
+        let about = context.memory(|memory| memory.area_rect(id)).expect("About shows");
+        assert!((about.width() - 476.0).abs() <= 1.0, "{about:?} is not 476 across");
+    }
+
+    #[test]
+    fn the_update_dialog_keeps_its_caption_and_link_in_small_windows() {
+        let context = fit_checks::context();
+        let mut dialog = UpdateDialog::sample();
+        for screen in fit_checks::SMALL_SCREENS {
+            let words = fit_checks::settle(&context, screen, |ctx| {
+                update_window(ctx, &mut dialog);
+            });
+            let expected = ["Update available!", "Nerthus Version 9.9.9", "Download Update", "Cancel", "Open download page"];
+            fit_checks::assert_fits(&context, screen, Id::new("update-check"), &words, &expected);
         }
     }
 

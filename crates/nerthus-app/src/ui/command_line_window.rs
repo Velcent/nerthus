@@ -13,7 +13,8 @@ use crate::icons;
 use crate::theme;
 use crate::ui::widgets;
 
-/// `TaskDialog.Width` (400 dialog units) in points, roughly.
+/// `TaskDialog.Width` (400 dialog units) in points, roughly, where there
+/// is room.
 const WIDTH: f32 = 600.0;
 
 /// The dialog while it shows: the command as shown and as copied.
@@ -64,24 +65,30 @@ impl CommandLineWindow {
 }
 
 /// The dialog; Copy to Clipboard copies the command and closes it, as
-/// Close and Escape do without copying.
+/// Close and Escape do without copying. The command scrolls when the
+/// window is too small for it, the buttons and footer staying below it.
 pub fn show(ctx: &egui::Context, window: &mut Option<CommandLineWindow>) {
     let Some(dialog) = window.as_ref() else {
         return;
     };
     let mut copy = false;
     let mut close = false;
+    let id = Id::new("build-command-line");
     let frame = widgets::dialog_frame(ctx).fill(theme::WINDOW_BACKGROUND);
-    let modal = egui::Modal::new(Id::new("build-command-line")).frame(frame);
+    let fit = widgets::DialogFit::new(ctx, id, &frame);
+    let modal = egui::Modal::new(id).frame(frame);
     let response = modal.show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        let instruction = RichText::new("Build Command Line").font(theme::semibold(15.0)).color(theme::ACCENT_BLUE);
-        ui.label(instruction);
-        ui.add_space(10.0);
-        let content = RichText::new(dialog.shown.as_str()).font(theme::interface(12.0)).color(theme::LABEL_EMPHASIS);
-        ui.add(egui::Label::new(content).wrap());
+        let width = fit.width(WIDTH);
+        ui.set_width(width);
+        fit.body(ui, |ui| {
+            let instruction = RichText::new("Build Command Line").font(theme::semibold(15.0)).color(theme::ACCENT_BLUE);
+            ui.label(instruction);
+            ui.add_space(10.0);
+            let content = RichText::new(dialog.shown.as_str()).font(theme::interface(12.0)).color(theme::LABEL_EMPHASIS);
+            ui.add(egui::Label::new(content).wrap());
+        });
         ui.add_space(16.0);
-        ui.allocate_ui_with_layout(Vec2::new(WIDTH, 26.0), Layout::right_to_left(Align::Center), |ui| {
+        ui.allocate_ui_with_layout(Vec2::new(width, 26.0), Layout::right_to_left(Align::Center), |ui| {
             if task_button(ui, "Close").clicked() {
                 close = true;
             }
@@ -97,9 +104,10 @@ pub fn show(ctx: &egui::Context, window: &mut Option<CommandLineWindow>) {
             let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(icons::DEFAULT_SIZE), egui::Sense::hover());
             icons::paint(ui, icon_rect, "info-square-rounded", theme::ACCENT_BLUE);
             let footer = RichText::new("You can use this command line directly from any command prompt.").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT);
-            ui.label(footer);
+            ui.add(egui::Label::new(footer).wrap());
         });
     });
+    fit.end(ctx, response.response.rect);
     if copy {
         ctx.copy_text(dialog.copied.clone());
     }
@@ -127,5 +135,19 @@ mod tests {
         let window = CommandLineWindow::from_parts("/bin/nerthus-build", "/p/a b.terrain", &variables);
         assert_eq!(window.shown, "\"/bin/nerthus-build\"\n    build \"/p/a b.terrain\"\n    -v Height=0.5\n    -v Style=\"Ridge\"");
         assert_eq!(window.copied, "\"/bin/nerthus-build\" build \"/p/a b.terrain\" -v Height=0.5 -v Style=\"Ridge\"");
+    }
+
+    #[test]
+    fn the_dialog_fits_small_windows() {
+        use crate::ui::widgets::fit_checks;
+        let context = fit_checks::context();
+        let variables: Vec<String> = (0..24).map(|index| format!("-v Variable{index}={index}")).collect();
+        let builder = "/home/someone/Applications/Nerthus/a rather long folder name/nerthus-build";
+        let mut window = Some(CommandLineWindow::from_parts(builder, "/home/someone/Documents/Nerthus/Projects/Alpine Valley.terrain", &variables));
+        for screen in fit_checks::SMALL_SCREENS {
+            let words = fit_checks::settle(&context, screen, |ctx| show(ctx, &mut window));
+            let expected = ["Build Command Line", "Copy to Clipboard", "Close", "You can use this command line"];
+            fit_checks::assert_fits(&context, screen, Id::new("build-command-line"), &words, &expected);
+        }
     }
 }

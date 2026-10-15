@@ -318,18 +318,30 @@ pub fn navigation_hint_text(navigation: &NavigationSettings) -> String {
 
 /// The viewport's status text (`Text (TMP)` in a 523.5 by 300 box 32 in
 /// from the view's bottom left): grey 16 px lines, bottom up, in Unity's
-/// pixels.
+/// pixels. A view narrower than the box wraps the lines to its width, as
+/// far in from its right as from its left; one too small for the hint's
+/// longest word, or for all of its lines, goes without it.
 fn navigation_hint(ui: &Ui, host: Rect, hint: &str) {
     let pixel = 1.0 / ui.ctx().zoom_factor();
     let box_size = Vec2::new(NAVIGATION_HINT_BOX.0, NAVIGATION_HINT_BOX.1) * pixel;
-    let bottom_left = Pos2::new(host.left() + NAVIGATION_HINT_INSET * pixel, host.bottom() - NAVIGATION_HINT_INSET * pixel);
+    let inset = NAVIGATION_HINT_INSET * pixel;
+    let bottom_left = Pos2::new(host.left() + inset, host.bottom() - inset);
+    let wrap_width = box_size.x.min(host.width() - 2.0 * inset);
     let font = theme::interface(NAVIGATION_HINT_SIZE * pixel);
-    let mut job = egui::text::LayoutJob::simple(hint.to_string(), font, NAVIGATION_HINT_COLOUR, box_size.x);
+    let painter = ui.painter().with_clip_rect(host);
+    // egui breaks a word wider than the row mid-word.
+    let longest_word = hint.split_whitespace().map(|word| painter.layout_no_wrap(word.to_string(), font.clone(), NAVIGATION_HINT_COLOUR).size().x).fold(0.0, f32::max);
+    if longest_word > wrap_width {
+        return;
+    }
+    let mut job = egui::text::LayoutJob::simple(hint.to_string(), font, NAVIGATION_HINT_COLOUR, wrap_width);
     job.halign = Align::LEFT;
-    let galley = ui.painter().layout_job(job);
+    let galley = painter.layout_job(job);
     let height = galley.size().y.min(box_size.y);
     let position = Pos2::new(bottom_left.x, bottom_left.y - height);
-    let painter = ui.painter().with_clip_rect(host);
+    if !host.contains_rect(Rect::from_min_size(position, galley.size())) {
+        return;
+    }
     painter.galley(position, galley, NAVIGATION_HINT_COLOUR);
 }
 
@@ -760,5 +772,69 @@ mod tests {
         let toggle = Pos2::new(x, foot - 2.5 * button - 17.0);
         let commands = click(&context, rect, &editor, &mut view_2d, toggle);
         assert!(commands.contains(&Command::Toggle2DViewport), "{commands:?}");
+    }
+
+    /// The navigation hint over a 3D view `size` big on a 1600 by 960
+    /// screen at 120%: the view, and where each of the hint's lines lies
+    /// and its text.
+    fn navigation_hint_rows(size: Vec2) -> (Rect, Vec<(Rect, String)>) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.set_zoom_factor(1.2);
+        let host = Rect::from_min_size(Pos2::new(10.0, 40.0), size);
+        let hint = navigation_hint_text(&NavigationSettings::default());
+        let mut shapes = Vec::new();
+        // The zoom holds from the second frame.
+        for _ in 0..2 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 960.0))), ..Default::default() };
+            let mut output = context.run_ui(input, |ui| navigation_hint(ui, host, &hint));
+            shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+        }
+        let mut rows = Vec::new();
+        for clipped in shapes {
+            if let Shape::Text(text) = clipped.shape {
+                rows.extend(text.galley.rows.iter().map(|row| (row.rect().translate(text.pos.to_vec2()), row.text())));
+            }
+        }
+        (host, rows)
+    }
+
+    #[test]
+    fn a_wide_view_keeps_the_navigation_hints_lines() {
+        let (_, rows) = navigation_hint_rows(Vec2::new(1000.0, 600.0));
+        let lines: Vec<&str> = rows.iter().map(|(_, text)| text.trim_end()).filter(|text| !text.is_empty()).collect();
+        let hint = navigation_hint_text(&NavigationSettings::default());
+        assert_eq!(lines, hint.lines().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_narrow_view_wraps_the_navigation_hint_inside_it_by_whole_words() {
+        // The 3D view beside the docked 2D view at 760 by 560 and 800 by
+        // 600, and narrower.
+        let hint = navigation_hint_text(&NavigationSettings::default());
+        let inset = NAVIGATION_HINT_INSET / 1.2;
+        for width in [250.0, 200.0, 150.0, 120.0] {
+            let (host, rows) = navigation_hint_rows(Vec2::new(width, 400.0));
+            let lines = rows.iter().filter(|(_, text)| !text.trim().is_empty()).count();
+            assert!(lines > hint.lines().count(), "{width}: {rows:?}");
+            // egui lets a row run half a point past its wrap width.
+            for (rect, text) in &rows {
+                assert!(rect.left() >= host.left() + inset - 0.01 && rect.right() <= host.right() - inset + 0.5, "{width}: {text:?} at {rect:?} in {host:?}");
+                assert!(host.contains_rect(*rect), "{width}: {text:?} at {rect:?} in {host:?}");
+            }
+            let words: Vec<&str> = rows.iter().flat_map(|(_, text)| text.split_whitespace()).collect();
+            assert_eq!(words, hint.split_whitespace().collect::<Vec<_>>(), "{width}");
+        }
+    }
+
+    #[test]
+    fn a_view_too_small_for_the_navigation_hint_goes_without_it() {
+        // Too narrow for a word between the insets, and too short for the
+        // lines.
+        for size in [Vec2::new(70.0, 400.0), Vec2::new(400.0, 60.0)] {
+            let (_, rows) = navigation_hint_rows(size);
+            assert!(rows.is_empty(), "{size:?}: {rows:?}");
+        }
     }
 }

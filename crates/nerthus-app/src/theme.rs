@@ -308,19 +308,23 @@ pub fn apply(context: &egui::Context) {
     fonts.font_data.insert("roboto-mono-semibold".into(), roboto_mono(600.0));
     fonts.font_data.insert("roboto-mono-bold".into(), roboto_mono(700.0));
 
-    // egui's own fonts stay behind ours for symbols Roboto lacks (⚠).
-    let fallbacks = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    let with_fallbacks = |primary: &str| {
+    // egui's own fonts stay behind ours for symbols Roboto lacks (⚠), and
+    // behind Roboto Mono its monospace Hack, for the box drawing (─ │ ├)
+    // of the docs' reports and folder trees.
+    let fallbacks = |family: FontFamily| fonts.families.get(&family).cloned().unwrap_or_default();
+    let interface_fallbacks = fallbacks(FontFamily::Proportional);
+    let monospace_fallbacks = fallbacks(FontFamily::Monospace);
+    let with_fallbacks = |primary: &str, fallbacks: &[String]| {
         let mut family = vec![primary.to_string()];
         family.extend(fallbacks.iter().cloned());
         family
     };
-    fonts.families.insert(FontFamily::Proportional, with_fallbacks("roboto"));
-    fonts.families.insert(FontFamily::Name(FONT_SEMIBOLD.into()), with_fallbacks("roboto-medium"));
-    fonts.families.insert(FontFamily::Name(FONT_BOLD.into()), with_fallbacks("roboto-bold"));
-    fonts.families.insert(FontFamily::Monospace, with_fallbacks("roboto-mono"));
-    fonts.families.insert(FontFamily::Name(FONT_MONO_SEMIBOLD.into()), with_fallbacks("roboto-mono-semibold"));
-    fonts.families.insert(FontFamily::Name(FONT_MONO_BOLD.into()), with_fallbacks("roboto-mono-bold"));
+    fonts.families.insert(FontFamily::Proportional, with_fallbacks("roboto", &interface_fallbacks));
+    fonts.families.insert(FontFamily::Name(FONT_SEMIBOLD.into()), with_fallbacks("roboto-medium", &interface_fallbacks));
+    fonts.families.insert(FontFamily::Name(FONT_BOLD.into()), with_fallbacks("roboto-bold", &interface_fallbacks));
+    fonts.families.insert(FontFamily::Monospace, with_fallbacks("roboto-mono", &monospace_fallbacks));
+    fonts.families.insert(FontFamily::Name(FONT_MONO_SEMIBOLD.into()), with_fallbacks("roboto-mono-semibold", &monospace_fallbacks));
+    fonts.families.insert(FontFamily::Name(FONT_MONO_BOLD.into()), with_fallbacks("roboto-mono-bold", &monospace_fallbacks));
     context.set_fonts(fonts);
 
     let mut visuals = Visuals::dark();

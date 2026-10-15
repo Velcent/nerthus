@@ -16,7 +16,7 @@ use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::data_view::{section_title, subtle_button, toolbar, toolbar_divider, toolbar_row};
-use crate::ui::editors::dropdown_box;
+use crate::ui::editors::{dropdown_box, fitted_line};
 use crate::ui::widgets::{check_item, dialog, dialog_button, icon_button, icon_menu, icon_menu_sized, menu_caption, menu_item, menu_item_enabled, menu_separator, Tooltips};
 
 /// `cboResolution`'s items: the size and its text.
@@ -333,6 +333,7 @@ fn savables(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, commands: 
             let mut header = egui::CollapsingHeader::new(egui::RichText::new(tab.name.as_str()).font(theme::semibold(12.0)).color(theme::EXPANDER_HEADER));
             header = header.id_salt(("data-view-export-tab", tab.index));
             header = header.default_open(true);
+            header = header.icon(group_chevron);
             header.show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 for id in in_tab {
@@ -342,6 +343,15 @@ fn savables(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, commands: 
             });
         }
     });
+}
+
+/// A graph tab's expander in the list: `chevron-down` while open,
+/// `chevron-right` while closed (as elsewhere in the Data View), in
+/// `Expander-Header`, `Accent-Gray` under the pointer.
+fn group_chevron(ui: &mut Ui, openness: f32, response: &egui::Response) {
+    let chevron = if openness > 0.5 { "chevron-down" } else { "chevron-right" };
+    let color = if response.hovered() { theme::ACCENT_GRAY } else { theme::EXPANDER_HEADER };
+    icons::paint(ui, Rect::from_center_size(response.rect.center(), Vec2::splat(icons::DEFAULT_SIZE)), chevron, color);
 }
 
 /// `Savable`: the toolbox colour bar, the ports menu (`menu-deep`), the
@@ -373,11 +383,12 @@ fn savable(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, id: i32, co
     let mut menu_ui = ui.new_child(egui::UiBuilder::new().max_rect(menu_rect));
     icon_menu_sized(&mut menu_ui, "menu-deep", "Ports", None, Vec2::splat(24.0), |ui| ports_menu(ui, editor, &node, &export, commands));
 
+    // The name and the format share a 20 high line through the bar's centre.
     let format_rect = Rect::from_min_max(Pos2::new(rect.right() - SAVABLE_FORMAT_COLUMN, bar.top()), Pos2::new(rect.right() - 6.0, bar.bottom()));
-    let name_rect = Rect::from_min_max(Pos2::new(bar.right() + SAVABLE_MENU_COLUMN + 8.0, bar.top() + 2.0), Pos2::new(format_rect.left() - 8.0, bar.bottom() - 6.0));
+    let format_center = Rect::from_center_size(format_rect.center(), Vec2::new(format_rect.width(), 20.0));
+    let name_rect = Rect::from_min_max(Pos2::new(bar.right() + SAVABLE_MENU_COLUMN + 8.0, format_center.top()), Pos2::new(format_rect.left() - 8.0, format_center.bottom()));
     filename_field(ui, editor, state, &node, &export, name_rect, color);
 
-    let format_center = Rect::from_center_size(format_rect.center(), Vec2::new(format_rect.width(), 20.0));
     let mut format_ui = ui.new_child(egui::UiBuilder::new().max_rect(format_center));
     format_ui.add_enabled_ui(export.enabled, |ui| {
         let entries: Vec<(String, String)> = FileFormat::ALL.iter().map(|format| (format.name().to_string(), format.name().to_string())).collect();
@@ -430,8 +441,10 @@ fn ports_menu(ui: &mut Ui, editor: &mut Editor, node: &nerthus_engine::NodeData,
     }
 }
 
-/// `displayLabel`: saved on Enter or Tab (empty: the node's name);
-/// Escape puts the saved name back.
+/// `displayLabel`: one line centred down `rect`, cut with an ellipsis
+/// while it isn't being typed in (the whole name in its tooltip). Saved
+/// on Enter or Tab (empty: the node's name); Escape puts the saved name
+/// back.
 fn filename_field(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, node: &nerthus_engine::NodeData, export: &ExportSettings, rect: Rect, color: Color32) {
     let index = match state.filenames.iter().position(|(node_id, _)| *node_id == node.id) {
         Some(index) => index,
@@ -441,14 +454,39 @@ fn filename_field(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, node
         }
     };
     let text_color = if export.enabled { color } else { theme::ACCENT_MUTED_RED };
+    let font = theme::semibold(11.0);
+    let field_id = ui.id().with(("data-view-filename", node.id));
+    // The box's own text shows only while typing; otherwise the name is
+    // painted over it, cut to fit.
+    let typing = ui.memory(|memory| memory.has_focus(field_id));
+    let mut frame = egui::Frame::NONE;
+    frame.inner_margin = egui::Margin::symmetric(4, 0);
     let mut edit = egui::TextEdit::singleline(&mut state.filenames[index].1);
-    edit = edit.frame(egui::Frame::NONE);
-    edit = edit.font(theme::semibold(11.0));
-    edit = edit.text_color(text_color);
-    edit = edit.margin(egui::Margin { left: 4, right: 4, top: 2, bottom: 0 });
+    edit = edit.id(field_id);
+    edit = edit.frame(frame);
+    edit = edit.font(font.clone());
+    edit = edit.text_color(if typing { text_color } else { Color32::TRANSPARENT });
     edit = edit.desired_width(rect.width());
+    edit = edit.min_size(Vec2::new(0.0, rect.height()));
+    edit = edit.vertical_align(Align::Center);
     let mut field_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-    let response = field_ui.add_enabled(export.enabled, edit);
+    let shown = field_ui.add_enabled_ui(export.enabled, |ui| {
+        let output = edit.show(ui);
+        let response = output.response.response;
+        if typing {
+            return response;
+        }
+        let name = output.galley.text().to_string();
+        let galley = fitted_line(ui, &name, font, text_color, output.text_clip_rect.width());
+        let elided = galley.elided;
+        ui.painter().galley(output.galley_pos, galley, text_color);
+        if elided { response.tooltip(name) } else { response }
+    });
+    let response = shown.inner;
+    // Show the change of look on the next frame without waiting for input.
+    if response.has_focus() != typing {
+        ui.ctx().request_repaint();
+    }
     let committed = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Tab));
     let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
     if committed {
@@ -463,5 +501,92 @@ fn filename_field(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, node
     let stale = !response.has_focus() && state.filenames[index].1 != export.filename;
     if cancelled || stale {
         state.filenames[index].1 = export.filename.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+
+    const LONG_NAME: &str = "export_file_name_that_is_rather_long_1_and_longer_still";
+
+    /// A text a frame painted: what it says, whether it was cut short,
+    /// where its line sits and whether it shows.
+    struct PaintedText {
+        text: String,
+        elided: bool,
+        rect: Rect,
+        shows: bool,
+    }
+
+    /// A 400 wide row for a Mountain exporting as PNG16 under `LONG_NAME`.
+    fn long_named_row() -> (egui::Context, Editor, BuildState, i32) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        let mut editor = Editor::new(Document::new());
+        let id = editor.document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        editor.document.toggle_export(&[id], FileFormat::Png16);
+        editor.document.rename_export_file(id, LONG_NAME);
+        (context, editor, BuildState::default(), id)
+    }
+
+    /// One frame of the row with these events, and the texts it painted.
+    fn row_frame(context: &egui::Context, editor: &mut Editor, state: &mut BuildState, id: i32, events: Vec<egui::Event>) -> Vec<PaintedText> {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut output = context.run_ui(input, |ui| {
+            let area = Rect::from_min_size(Pos2::new(0.0, 40.0), Vec2::new(400.0, 60.0));
+            let mut area = ui.new_child(egui::UiBuilder::new().max_rect(area));
+            savable(&mut area, editor, state, id, &mut Vec::new());
+        });
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        let texts = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some(PaintedText {
+                text: text.galley.text().to_string(),
+                elided: text.galley.elided,
+                rect: text.galley.rect.translate(text.pos.to_vec2()),
+                shows: text.galley.job.sections.iter().any(|section| section.format.color.a() > 0),
+            }),
+            _ => None,
+        });
+        texts.collect()
+    }
+
+    fn shown<'a>(texts: &'a [PaintedText], text: &str) -> &'a PaintedText {
+        texts.iter().find(|painted| painted.shows && painted.text == text).unwrap_or_else(|| panic!("{text:?} shows"))
+    }
+
+    #[test]
+    fn a_long_file_name_is_cut_short_level_with_its_format() {
+        let (context, mut editor, mut state, id) = long_named_row();
+        row_frame(&context, &mut editor, &mut state, id, Vec::new());
+        let texts = row_frame(&context, &mut editor, &mut state, id, Vec::new());
+        let name = shown(&texts, LONG_NAME);
+        let format = shown(&texts, FileFormat::Png16.name());
+        assert!(name.elided, "the name is cut short with an ellipsis");
+        assert!(name.rect.right() <= format.rect.left(), "the name {:?} runs into the format {:?}", name.rect, format.rect);
+        let offset = name.rect.center().y - format.rect.center().y;
+        assert!(offset.abs() <= 0.5, "the name's line sits {offset} below the format's");
+    }
+
+    #[test]
+    fn a_long_file_name_shows_whole_while_typed_in() {
+        let (context, mut editor, mut state, id) = long_named_row();
+        row_frame(&context, &mut editor, &mut state, id, Vec::new());
+        let texts = row_frame(&context, &mut editor, &mut state, id, Vec::new());
+        let name = shown(&texts, LONG_NAME).rect;
+        let at = Pos2::new(name.left() + 20.0, name.center().y);
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        row_frame(&context, &mut editor, &mut state, id, vec![egui::Event::PointerMoved(at)]);
+        row_frame(&context, &mut editor, &mut state, id, vec![button(true)]);
+        row_frame(&context, &mut editor, &mut state, id, vec![button(false)]);
+        let texts = row_frame(&context, &mut editor, &mut state, id, Vec::new());
+        let typed = shown(&texts, LONG_NAME);
+        assert!(!typed.elided, "the whole name is there to edit");
+        assert!((typed.rect.center().y - name.center().y).abs() <= 0.5, "the name stays on its line while typed in");
+        assert_eq!(texts.iter().filter(|painted| painted.shows && painted.text == LONG_NAME).count(), 1, "the name shows once");
     }
 }
