@@ -15,7 +15,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::{node_color, node_icon};
 use crate::ui::graph_commands::{GraphCommand, NodeSource, SearchPick};
-use crate::ui::widgets::{menu_style, scrolling_submenu, Tooltips};
+use crate::ui::widgets::{menu_style, submenu, Tooltips};
 
 /// Nodes that hand terrain to other programs, which Nerthus leaves out.
 const LEFT_OUT: [&str; 3] = ["HoudiniOut", "Unity", "Unreal"];
@@ -348,7 +348,7 @@ pub fn show(ui: &mut Ui, editor: &mut Editor, popup: &mut SearchPopup, commands:
         if overflow.is_empty() {
             return;
         }
-        scrolling_submenu(ui, None, None, "more...", |ui| {
+        submenu(ui, None, None, "more...", |ui| {
             for index in overflow {
                 if result_row(ui, editor, &found[index], false) {
                     chosen = Some(found[index].clone());

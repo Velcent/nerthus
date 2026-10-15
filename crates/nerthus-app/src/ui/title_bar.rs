@@ -21,7 +21,7 @@ use crate::ui::graph_canvas::elided_galley;
 use crate::ui::{menu_keys, menus};
 use crate::ui::tool_commands::ToolCommand;
 use crate::files::{FileCommand, AUTOSAVE_CHOICES};
-use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_button, Tooltips};
+use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_rows, menu_separator, menu_style, submenu, toolbar_button, Tooltips};
 use crate::ui::UiState;
 
 pub const HEIGHT: f32 = 36.0;
@@ -318,10 +318,7 @@ fn menu_items(ui: &mut Ui, shown: usize, editor: &Editor, ui_state: &UiState, co
             button = button.min_size(slot);
             button = button.frame_when_inactive(false);
             let menu = MenuButton::from_button(button);
-            let (response, _) = menu.ui(ui, |ui| {
-                menu_style(ui);
-                menu_contents(ui, name, editor, ui_state, commands);
-            });
+            let (response, _) = menu.ui(ui, |ui| menu_rows(ui, |ui| menu_contents(ui, name, editor, ui_state, commands)));
             popups.push(egui::Popup::default_response_id(&response));
         }
         if shown < MENU_NAMES.len() {
@@ -332,10 +329,11 @@ fn menu_items(ui: &mut Ui, shown: usize, editor: &Editor, ui_state: &UiState, co
             button = button.min_size(Vec2::new(OVERFLOW_WIDTH, TOP_LEVEL_HEIGHT));
             button = button.frame_when_inactive(false);
             let (response, _) = MenuButton::from_button(button).ui(ui, |ui| {
-                menu_style(ui);
-                for name in &MENU_NAMES[shown..] {
-                    submenu(ui, None, None, name, |ui| menu_contents(ui, name, editor, ui_state, commands));
-                }
+                menu_rows(ui, |ui| {
+                    for name in &MENU_NAMES[shown..] {
+                        submenu(ui, None, None, name, |ui| menu_contents(ui, name, editor, ui_state, commands));
+                    }
+                });
             });
             popups.push(egui::Popup::default_response_id(&response));
             response.tooltip("Menu");
@@ -580,7 +578,11 @@ mod tests {
     }
 
     fn input(width: f32, events: Vec<egui::Event>) -> egui::RawInput {
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 600.0));
+        sized_input(Vec2::new(width, 600.0), events)
+    }
+
+    fn sized_input(screen: Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+        let screen = Rect::from_min_size(Pos2::ZERO, screen);
         egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }
     }
 
@@ -712,14 +714,137 @@ mod tests {
 
     /// Clicks at `at`: the pointer moves there, presses and lets go.
     fn click(context: &egui::Context, width: f32, editor: &Editor, ui_state: &UiState, at: Pos2) -> Vec<Command> {
+        click_in(context, Vec2::new(width, 600.0), editor, ui_state, at)
+    }
+
+    /// Clicks at `at` on a window of `screen`.
+    fn click_in(context: &egui::Context, screen: Vec2, editor: &Editor, ui_state: &UiState, at: Pos2) -> Vec<Command> {
         let button = |pressed: bool| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
         let mut commands = Vec::new();
         for events in [vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)], Vec::new()] {
-            let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, HEIGHT));
-            let output = context.run_ui(input(width, events), |ui| show(ui, rect, editor, ui_state, &mut commands));
-            output.drop_without_applying_deltas();
+            commands.extend(bar_frame(context, screen, editor, ui_state, events));
         }
         commands
+    }
+
+    /// A frame of the bar across a window of `screen`.
+    fn bar_frame(context: &egui::Context, screen: Vec2, editor: &Editor, ui_state: &UiState, events: Vec<egui::Event>) -> Vec<Command> {
+        let mut commands = Vec::new();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(screen.x, HEIGHT));
+        let output = context.run_ui(sized_input(screen, events), |ui| show(ui, rect, editor, ui_state, &mut commands));
+        output.drop_without_applying_deltas();
+        commands
+    }
+
+    /// `bar_frame` with `events`, then the frames after as the app draws
+    /// them, for the menus to settle.
+    fn settle(context: &egui::Context, screen: Vec2, editor: &Editor, ui_state: &UiState, events: Vec<egui::Event>) {
+        bar_frame(context, screen, editor, ui_state, events);
+        for _ in 0..3 {
+            bar_frame(context, screen, editor, ui_state, Vec::new());
+        }
+    }
+
+    /// The menus open, as their areas were laid out: a menu before its
+    /// submenu.
+    fn open_menus(context: &egui::Context) -> Vec<Rect> {
+        context.memory(|memory| {
+            let visible = memory.areas().visible_layer_ids();
+            let open = memory.layer_ids().filter(|layer| layer.order == egui::Order::Foreground && visible.contains(layer));
+            open.filter_map(|layer| memory.area_rect(layer.id)).collect()
+        })
+    }
+
+    /// The middle of the `index`th menu's title in the bar `plan` lays
+    /// out or, once it is folded, of the menu of menus' button.
+    fn title_at(widths: &Widths, plan: &Plan, index: usize) -> Pos2 {
+        let lead = if plan.brand { widths.brand } else { LEAD_WITHOUT_BRAND };
+        let x = if index < plan.menus {
+            lead + widths.menus[..index].iter().sum::<f32>() + widths.menus[index] / 2.0
+        } else {
+            lead + widths.menu_bar(plan.menus) - OVERFLOW_WIDTH / 2.0
+        };
+        Pos2::new(x, BAR_TOP + (HEIGHT - BAR_TOP) / 2.0)
+    }
+
+    /// Windows 400 high (480 pixels at the default 120%), where the
+    /// Preview menu is taller than the room under the bar: 1000 wide, the
+    /// bar has all its menus; 640 pixels wide, Preview is folded into the
+    /// menu of menus.
+    const SHORT_WIDE: Vec2 = Vec2::new(1000.0, 400.0);
+    const SHORT_NARROW: Vec2 = Vec2::new(533.3, 400.0);
+
+    /// Opens Preview from the bar on a window of `screen` (from the menu
+    /// of menus when it is folded there) and lets it settle: the context,
+    /// the title clicked and the menus open, Preview's last.
+    fn open_preview(editor: &Editor, ui_state: &UiState, screen: Vec2) -> (egui::Context, Pos2, Vec<Rect>) {
+        let widths = measured(editor, None);
+        let plan = plan(&widths, screen.x);
+        let preview = MENU_NAMES.iter().position(|name| *name == "Preview").unwrap();
+        let title = title_at(&widths, &plan, preview);
+        let context = themed_context(screen.x);
+        let commands = click_in(&context, screen, editor, ui_state, title);
+        assert!(commands.is_empty(), "opening Preview gave {commands:?}");
+        settle(&context, screen, editor, ui_state, Vec::new());
+        if plan.menus <= preview {
+            // Its row in the menu of menus, which has a row a menu.
+            let [menus] = open_menus(&context)[..] else { panic!("the menu of menus does not open at {screen:?}") };
+            let rows = (MENU_NAMES.len() - plan.menus) as f32;
+            let row = (preview - plan.menus) as f32 + 0.5;
+            let at = Pos2::new(menus.center().x, menus.top() + menus.height() * row / rows);
+            settle(&context, screen, editor, ui_state, vec![egui::Event::PointerMoved(at)]);
+        }
+        let menus = open_menus(&context);
+        (context, title, menus)
+    }
+
+    /// On `screen`, Preview opens under the bar it drops from, in the
+    /// window (beside the menu of menus when it is folded there), the
+    /// wheel scrolls it to its last row, and its title only closes it.
+    fn preview_fits_under_the_bar(screen: Vec2, folded: bool) {
+        let editor = editor_named(NAMES[0]);
+        let ui_state = UiState::default();
+        let (context, title, menus) = open_preview(&editor, &ui_state, screen);
+        assert_eq!(menus.len(), if folded { 2 } else { 1 }, "the menus open at {screen:?}: {menus:?}");
+        let title_bottom = title.y + TOP_LEVEL_HEIGHT / 2.0;
+        for menu in &menus {
+            assert!(menu.top() >= title_bottom - 0.5, "the menu at {menu:?} covers the bar, its title ending at {title_bottom}, at {screen:?}");
+            assert!(menu.bottom() <= screen.y + 0.5, "the menu at {menu:?} runs past the window's bottom at {screen:?}");
+        }
+        let preview = *menus.last().unwrap();
+        if let [folded, _] = menus[..] {
+            let beside = preview.left() >= folded.right() - 0.5 || preview.right() <= folded.left() + 0.5;
+            assert!(beside, "Preview at {preview:?} covers the menu of menus at {folded:?}");
+        }
+        let over = Pos2::new(preview.left() + 40.0, preview.center().y);
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        bar_frame(&context, screen, &editor, &ui_state, vec![egui::Event::PointerMoved(over)]);
+        bar_frame(&context, screen, &editor, &ui_state, vec![wheel]);
+        for _ in 0..60 {
+            bar_frame(&context, screen, &editor, &ui_state, Vec::new());
+        }
+        let last = Pos2::new(preview.left() + 40.0, preview.bottom() - 6.0);
+        let commands = click_in(&context, screen, &editor, &ui_state, last);
+        assert_eq!(commands, [Command::SetRenderMode(crate::editor::RenderMode::Realistic)], "at {screen:?}");
+
+        let (context, title, _) = open_preview(&editor, &ui_state, screen);
+        let commands = click_in(&context, screen, &editor, &ui_state, title);
+        assert!(commands.is_empty(), "clicking Preview's title again gave {commands:?} at {screen:?}");
+        assert!(!egui::Popup::is_any_open(&context), "clicking Preview's title again leaves it open at {screen:?}");
+    }
+
+    #[test]
+    fn a_menu_taller_than_the_window_opens_under_the_bar_and_scrolls() {
+        let widths = measured(&editor_named(NAMES[0]), None);
+        assert_eq!(plan(&widths, SHORT_WIDE.x).menus, MENU_NAMES.len());
+        preview_fits_under_the_bar(SHORT_WIDE, false);
+    }
+
+    #[test]
+    fn a_folded_menu_taller_than_the_window_opens_under_the_bar_and_scrolls() {
+        let widths = measured(&editor_named(NAMES[0]), None);
+        assert!(plan(&widths, SHORT_NARROW.x).menus <= 4, "Preview is in the bar at {SHORT_NARROW:?}");
+        preview_fits_under_the_bar(SHORT_NARROW, true);
     }
 
     #[test]
