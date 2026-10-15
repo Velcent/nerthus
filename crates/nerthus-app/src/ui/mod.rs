@@ -1025,6 +1025,18 @@ fn node_key(command: &Command) -> bool {
     graph_editing || node_editing
 }
 
+/// Whether `shortcut` was pressed, its key press consumed if so. egui's
+/// `consume_shortcut` lets extra Shift and Alt through, so a key bound
+/// with no modifier needs none held: Alt+F is not F.
+fn consume_shortcut(input: &mut egui::InputState, shortcut: &KeyboardShortcut) -> bool {
+    if !shortcut.modifiers.is_none() {
+        return input.consume_shortcut(shortcut);
+    }
+    let before = input.events.len();
+    input.events.retain(|event| !matches!(event, egui::Event::Key { key, modifiers, pressed: true, .. } if *key == shortcut.logical_key && modifiers.is_none()));
+    input.events.len() != before
+}
+
 /// The keyboard shortcuts. Graph keys only act when no text field has
 /// the keyboard, and the node keys only when `node_keys` allows them.
 fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
@@ -1065,7 +1077,7 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
         if !node_keys && node_key(&action) {
             continue;
         }
-        if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+        if ctx.input_mut(|input| consume_shortcut(input, &shortcut)) {
             pending.push(action);
         }
     }
@@ -1098,7 +1110,7 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
         if !node_keys && node_key(&command) {
             continue;
         }
-        if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+        if ctx.input_mut(|input| consume_shortcut(input, &shortcut)) {
             pending.push(command);
         }
     }
@@ -1121,7 +1133,7 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
             continue;
         }
         let shortcut = KeyboardShortcut::new(Modifiers::NONE, key);
-        if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+        if ctx.input_mut(|input| consume_shortcut(input, &shortcut)) {
             pending.push(action);
         }
     }
@@ -1158,6 +1170,34 @@ mod tests {
         assert_eq!(pressed(search, false), vec![Command::Graph(GraphCommand::NodeSearch)]);
         let copy = vec![key(Key::C, Modifiers::COMMAND)];
         assert!(pressed(copy, false).is_empty());
+    }
+
+    #[test]
+    fn bare_keys_need_no_modifier() {
+        let lock = Command::Graph(GraphCommand::LockSelection);
+        assert_eq!(pressed(vec![key(Key::F, Modifiers::NONE)], true), vec![lock]);
+        // Alt+F is the File menu's key, not Lock Preview to Node.
+        for modifiers in [Modifiers::ALT, Modifiers::SHIFT, Modifiers::ALT | Modifiers::SHIFT] {
+            for bare in [Key::F, Key::G, Key::B, Key::Delete, Key::Tab, Key::F8] {
+                assert!(pressed(vec![key(bare, modifiers)], true).is_empty(), "{modifiers:?} {bare:?}");
+            }
+        }
+        // The shortcuts with a modifier still take their own.
+        assert_eq!(pressed(vec![key(Key::S, Modifiers::COMMAND | Modifiers::SHIFT)], true), vec![Command::SaveAs]);
+        assert_eq!(pressed(vec![key(Key::O, Modifiers::COMMAND | Modifiers::ALT)], true), vec![Command::ShowOptions(None)]);
+        let mixer = Command::Graph(GraphCommand::Combine(CombineKind::Mixer));
+        assert_eq!(pressed(vec![key(Key::F8, Modifiers::COMMAND)], true), vec![mixer]);
+        // And the shell's own: F12 for the console.
+        let console = |modifiers| {
+            let context = egui::Context::default();
+            let input = egui::RawInput { events: vec![key(Key::F12, modifiers)], ..Default::default() };
+            let mut pending = Vec::new();
+            let output = context.run_ui(input, |ui| tool_commands::shortcuts(ui.ctx(), &mut pending));
+            output.drop_without_applying_deltas();
+            pending
+        };
+        assert_eq!(console(Modifiers::NONE), vec![Command::Tools(tool_commands::ToolCommand::ShowConsole)]);
+        assert!(console(Modifiers::ALT).is_empty());
     }
 
     #[test]
