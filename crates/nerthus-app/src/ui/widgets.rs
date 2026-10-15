@@ -183,6 +183,16 @@ pub fn menu_rows<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
     menu_rows_within(ui, room, contents)
 }
 
+/// The rows of a menu that opens beside `anchor` (the toolbox's category
+/// menus, `RectAlign::RIGHT_START`), in at most the room there is beside
+/// it (`room_beside`). The menu then fits beside its button, rather than
+/// egui moving it up over the title bar with its last rows cut off at the
+/// window's bottom.
+pub fn menu_rows_beside<R>(ui: &mut Ui, anchor: Rect, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let room = room_beside(ui, anchor);
+    menu_rows_within(ui, room, contents)
+}
+
 /// A menu's rows (`menu_style`) in at most `room` high with the menu's
 /// frame, scrolling once they are taller. While they scroll, the bar's
 /// handle shows, beside them (`scroll_bar_gutter`).
@@ -378,18 +388,23 @@ fn submenu_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R, draw: impl F
     shown.map(|inner| inner.inner)
 }
 
-/// The most room a submenu has beside its row and under the title bar:
-/// down from the row's top, where egui opens it first
-/// (`RectAlign::RIGHT_START`), or up from the row's bottom (`RIGHT_END`,
-/// or the same on the left), a pixel short against rounding. No taller,
-/// the submenu fits one of them, so egui opens it beside the row rather
-/// than centred across it (over the bar) or, when nothing fits, moved
-/// over its menu and still past the window's edge.
+/// The most room a submenu has beside its row (`room_beside`).
 fn submenu_room(ui: &Ui, row: &Response) -> f32 {
-    let window = ui.ctx().content_rect();
     // egui's anchor: the row, taller by half the submenu's frame each way.
     let frame = Frame::menu(ui.style()).total_margin().sum().y;
-    let anchor = row.interact_rect.expand2(Vec2::new(0.0, frame / 2.0));
+    room_beside(ui, row.interact_rect.expand2(Vec2::new(0.0, frame / 2.0)))
+}
+
+/// The most room a menu has beside `anchor` and under the title bar:
+/// down from the anchor's top, where egui opens it first
+/// (`RectAlign::RIGHT_START`), or up from the anchor's bottom
+/// (`RIGHT_END`, or the same on the left), a pixel short against
+/// rounding. No taller, the menu fits one of them, so egui opens it
+/// beside the anchor rather than centred across it (over the bar) or,
+/// when nothing fits, moved over its menu and still past the window's
+/// edge.
+fn room_beside(ui: &Ui, anchor: Rect) -> f32 {
+    let window = ui.ctx().content_rect();
     let below = window.bottom() - anchor.top();
     let above = anchor.bottom() - (window.top() + title_bar::HEIGHT);
     below.max(above) - 1.0

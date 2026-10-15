@@ -15,7 +15,7 @@ use crate::theme;
 use crate::ui::colour_picker::{colour_button, linear_to_srgb, picked_linear};
 use crate::ui::commands::Command;
 use crate::ui::data_view::{toolbar, toolbar_divider, toolbar_row};
-use crate::ui::editors::{dropdown_box, palette_color, range_slider, slider, toggle, RangeSpec, SliderSpec};
+use crate::ui::editors::{dropdown_box, fitted_line, palette_color, range_slider, slider, toggle, RangeSpec, SliderSpec};
 use crate::ui::slider_popups::{self, BoxWidth, TypingLook};
 use crate::ui::widgets::{dialog, dialog_button, icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator};
 
@@ -39,6 +39,12 @@ const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xdd, 0xed, 0xf2);
 /// `VariableEditorBase.AddControl` gives it among the editors.
 const ROW_MARGIN_LEFT: f32 = 20.0;
 const EDITOR_ROW_MARGIN_LEFT: f32 = 24.0;
+/// An unbound row's padding left and right.
+const ROW_PADDING: f32 = 16.0;
+/// The name's column in an unbound row and a colour row, and the gap
+/// between it and the value.
+const NAME_COLUMN: f32 = 96.0;
+const NAME_GAP: f32 = 8.0;
 /// `UserControl_PreviewMouseDown`: a press this close to a row's left
 /// edge (its grip) may drag the row.
 const GRIP_REACH: f32 = 24.0;
@@ -577,10 +583,13 @@ fn color_row(ui: &mut Ui, editor: &mut Editor, key: &str, variable: &Variable) {
     let width = ui.available_width();
     let (outer, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
     let rect = Rect::from_min_max(outer.min + Vec2::new(24.0, 2.0), outer.max - Vec2::new(4.0, 2.0));
-    let galley = ui.painter().layout_no_wrap(variable.name.clone(), theme::interface(12.0), theme::LABEL_DEFAULT);
-    ui.painter().galley(Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0), galley, theme::LABEL_DEFAULT);
+    // The name is trimmed short of the swatch and kept inside the row.
+    let name_room = (NAME_COLUMN - NAME_GAP).min(rect.width());
+    let galley = fitted_line(ui, &variable.name, theme::interface(12.0), theme::LABEL_DEFAULT, name_room);
+    let name_painter = ui.painter_at(rect);
+    name_painter.galley(Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0), galley, theme::LABEL_DEFAULT);
     // A row narrower than the name column leaves the swatch no width, not less.
-    let swatch_left = rect.left() + 96.0;
+    let swatch_left = rect.left() + NAME_COLUMN;
     let swatch = Rect::from_min_max(Pos2::new(swatch_left, rect.top()), Pos2::new(rect.right().max(swatch_left), rect.bottom()));
     let mut swatch_ui = ui.new_child(egui::UiBuilder::new().max_rect(swatch));
     if let Some(colour) = colour_button(&mut swatch_ui, swatch.size(), linear.map(linear_to_srgb)) {
@@ -629,14 +638,21 @@ fn unbound_row(ui: &mut Ui, editor: &mut Editor, key: &str, variable: &Variable,
         icons::paint(ui, icon_rect, icon, theme::ICON_DEFAULT);
         x = icon_rect.right() + 6.0;
     }
+    // The name is trimmed to its column (a decoration's to the row) and
+    // the value to the rest of the row; neither crosses the border.
+    let text_painter = ui.painter_at(rect.shrink(1.0));
+    let name_left = x + 6.0;
+    let text_right = rect.right() - ROW_PADDING;
     let header_color = if decoration { ACCENT_BRIGHT } else { theme::LABEL_DEFAULT };
-    let header = ui.painter().layout_no_wrap(variable.name.clone(), theme::monospace(12.0), header_color);
-    ui.painter().galley(Pos2::new(x + 6.0, rect.center().y - header.size().y / 2.0), header, header_color);
-    if !decoration {
+    let name_room = if decoration { text_right - name_left } else { NAME_COLUMN };
+    let header = fitted_line(ui, &variable.name, theme::monospace(12.0), header_color, name_room);
+    text_painter.galley(Pos2::new(name_left, rect.center().y - header.size().y / 2.0), header, header_color);
+    let value_left = name_left + NAME_COLUMN + NAME_GAP;
+    if !decoration && value_left < text_right {
         let value = value_text(variable);
-        let value_galley = ui.painter().layout_no_wrap(value, theme::monospace(12.0), theme::ACCENT_MUTED_GREEN);
-        let value_position = Pos2::new(x + 6.0 + 96.0 + 8.0, rect.center().y - value_galley.size().y / 2.0);
-        ui.painter().galley(value_position, value_galley, theme::ACCENT_MUTED_GREEN);
+        let value_galley = fitted_line(ui, &value, theme::monospace(12.0), theme::ACCENT_MUTED_GREEN, text_right - value_left);
+        let value_position = Pos2::new(value_left, rect.center().y - value_galley.size().y / 2.0);
+        text_painter.galley(value_position, value_galley, theme::ACCENT_MUTED_GREEN);
     }
     response.context_menu(|ui| {
         crate::ui::widgets::menu_style(ui);
@@ -876,6 +892,113 @@ mod tests {
             });
             output.drop_without_applying_deltas();
         }
+    }
+
+    const LONG_NAME: &str = "ExtremelyLongVariableNameForTestingOverflowInTheVariablesList";
+
+    /// A painted text: what it says, whether it was cut short, and as much
+    /// of it as shows.
+    struct PaintedText {
+        text: String,
+        elided: bool,
+        shown: Rect,
+    }
+
+    /// One frame of `draw` given `width` with the editor's fonts: the rect
+    /// it returns and the texts it painted.
+    fn painted_texts(width: f32, mut draw: impl FnMut(&mut Ui, &mut Editor) -> Rect) -> (Rect, Vec<PaintedText>) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        egui_extras::install_image_loaders(&context);
+        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let mut editor = Editor::new(Document::new());
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut drawn = Rect::NOTHING;
+        let mut output = context.run_ui(input, |ui| {
+            let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 60.0));
+            let mut area = ui.new_child(egui::UiBuilder::new().max_rect(area));
+            drawn = draw(&mut area, &mut editor);
+        });
+        let shapes = std::mem::take(&mut output.shapes);
+        output.drop_without_applying_deltas();
+        let texts = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some(PaintedText {
+                text: text.galley.text().to_string(),
+                elided: text.galley.elided,
+                shown: text.visual_bounding_rect().intersect(clipped.clip_rect),
+            }),
+            _ => None,
+        });
+        (drawn, texts.collect())
+    }
+
+    /// An edit-mode row of `variable`, `width` wide.
+    fn unbound_row_texts(variable: &Variable, width: f32) -> (Rect, Vec<PaintedText>) {
+        painted_texts(width, |ui, editor| {
+            let style = RowStyle { margin_left: ROW_MARGIN_LEFT, border: theme::BUTTON_BORDER, dragging: false };
+            unbound_row(ui, editor, "key", variable, style, &mut Vec::new()).0
+        })
+    }
+
+    fn assert_inside(row: Rect, texts: &[PaintedText]) {
+        for painted in texts {
+            let shows = painted.shown.is_positive();
+            assert!(!shows || row.contains_rect(painted.shown), "{:?} shows at {:?}, past the row {row:?}", painted.text, painted.shown);
+        }
+    }
+
+    fn painted<'a>(texts: &'a [PaintedText], text: &str) -> &'a PaintedText {
+        texts.iter().find(|painted| painted.text == text).unwrap_or_else(|| panic!("{text:?} is painted"))
+    }
+
+    #[test]
+    fn a_long_name_is_cut_short_of_its_rows_value() {
+        for (kind, value) in [("Float", json!(0.5)), ("Int", json!(0)), ("Choice", json!(0)), ("Bool", json!(false))] {
+            let variable = Variable::from_json(&json!({"Name": LONG_NAME, "Type": kind, "Value": value, "Min": 0, "Max": 1}));
+            let (row, texts) = unbound_row_texts(&variable, 300.0);
+            let name = painted(&texts, LONG_NAME);
+            let value = painted(&texts, &value_text(&variable));
+            assert!(name.elided, "{kind}: the name is cut short");
+            assert!(name.shown.right() <= value.shown.left(), "{kind}: the name {:?} runs into the value {:?}", name.shown, value.shown);
+            assert_inside(row, &texts);
+        }
+    }
+
+    #[test]
+    fn a_long_value_stays_inside_its_row() {
+        let string = Variable::from_json(&json!({"Name": "Caption", "Type": "Undefined", "Value": "A string value that is quite long, longer than the row"}));
+        let colour = Variable::from_json(&json!({"Name": "Tint", "Type": "Color", "Value": {"R": 0.8, "G": 0.2, "B": 0.0}}));
+        for variable in [string, colour] {
+            let (row, texts) = unbound_row_texts(&variable, 300.0);
+            assert!(painted(&texts, &value_text(&variable)).elided, "{}: the value is cut short", variable.name);
+            assert_inside(row, &texts);
+        }
+        // Too narrow for the value: the name alone shows, inside the row.
+        let variable = Variable::from_json(&json!({"Name": LONG_NAME, "Type": "Float", "Value": 0.5, "Min": 0, "Max": 1}));
+        let (row, texts) = unbound_row_texts(&variable, 120.0);
+        assert!(texts.iter().all(|painted| painted.text != value_text(&variable)), "the value has no room");
+        assert_inside(row, &texts);
+    }
+
+    #[test]
+    fn a_long_decoration_name_stays_inside_its_row() {
+        let variable = Variable::from_json(&json!({"Name": format!("{LONG_NAME}{LONG_NAME}"), "Type": "Decoration", "Value": "StartGroup"}));
+        let (row, texts) = unbound_row_texts(&variable, 300.0);
+        assert!(painted(&texts, &variable.name).elided, "the name is cut short");
+        assert_inside(row, &texts);
+    }
+
+    #[test]
+    fn a_long_colour_name_is_cut_short_of_its_swatch() {
+        let variable = Variable::from_json(&json!({"Name": LONG_NAME, "Type": "Color", "Value": {"R": 1.0, "G": 0.5, "B": 0.0}}));
+        let (outer, texts) = painted_texts(300.0, |ui, editor| {
+            color_row(ui, editor, "Tint", &variable);
+            ui.min_rect()
+        });
+        let name = painted(&texts, LONG_NAME);
+        assert!(name.elided, "the name is cut short");
+        assert!(name.shown.right() <= outer.left() + 24.0 + NAME_COLUMN, "the name {:?} runs into the swatch", name.shown);
     }
 
     /// One frame of a row's typing box with these events.
