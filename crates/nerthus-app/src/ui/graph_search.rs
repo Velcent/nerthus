@@ -286,20 +286,25 @@ pub fn show(ui: &mut Ui, editor: &mut Editor, popup: &mut SearchPopup, commands:
     let down = ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowDown));
     let up = ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowUp));
     let found = results(editor, popup);
+    let limit = editor.user.options.maximum_search_results();
     let choosable: Vec<usize> = found.iter().enumerate().filter(|(_, item)| !matches!(item, Found::TabCaption(..))).map(|(index, _)| index).collect();
+    // The results past the limit wait, unseen, in "more...": the arrows
+    // stay on the ones shown.
+    let visible = &choosable[..choosable.len().min(limit)];
     let multi = matches!(popup.mode, SearchMode::Nodes { .. });
 
     if comma && multi && let Some(first) = choosable.first() {
         add_selection(popup, &found[*first]);
     }
     if down {
-        popup.highlighted = next_choice(&choosable, popup.highlighted, true);
+        popup.highlighted = next_choice(visible, popup.highlighted, true);
     }
     if up {
-        popup.highlighted = next_choice(&choosable, popup.highlighted, false);
+        popup.highlighted = next_choice(visible, popup.highlighted, false);
     }
     if enter {
-        let chosen = popup.highlighted.or_else(|| choosable.first().copied());
+        let highlighted = popup.highlighted.filter(|index| visible.contains(index));
+        let chosen = highlighted.or_else(|| choosable.first().copied());
         let picked = chosen.and_then(|index| found.get(index));
         if multi && popup.text.contains(',') {
             choose_many(editor, popup, picked, commands);
@@ -327,7 +332,6 @@ pub fn show(ui: &mut Ui, editor: &mut Editor, popup: &mut SearchPopup, commands:
         menu_style(ui);
         ui.set_min_width(RESULT_WIDTH + 30.0);
         search_box(ui, popup);
-        let limit = editor.user.options.maximum_search_results();
         let mut counted = 0;
         let mut overflow: Vec<usize> = Vec::new();
         for (index, item) in found.iter().enumerate() {
@@ -374,8 +378,8 @@ pub fn show(ui: &mut Ui, editor: &mut Editor, popup: &mut SearchPopup, commands:
     open
 }
 
-/// The arrows: Down from the text box to the first result, Up to the
-/// last; on through the results, round again.
+/// The arrows: Down from the text box to the first result shown, Up to the
+/// last; on through the results shown, round again.
 fn next_choice(choosable: &[usize], current: Option<usize>, down: bool) -> Option<usize> {
     if choosable.is_empty() {
         return None;
@@ -736,6 +740,60 @@ mod tests {
         assert!(overflow > 0, "nothing overflows");
         // Its rows and its frame, and no more.
         assert!(submenu.height() < overflow as f32 * RESULT_HEIGHT + 10.0, "{overflow} rows in {submenu:?}");
+    }
+
+    /// One frame of the search with `key` pressed: what it asked for.
+    fn press(context: &egui::Context, editor: &mut Editor, popup: &mut SearchPopup, key: Key) -> Vec<Command> {
+        let event = Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let input = RawInput { screen_rect: Some(SCREEN), events: vec![event], ..Default::default() };
+        let mut commands = Vec::new();
+        let output = context.run_ui(input, |ui| {
+            show(ui, editor, popup, &mut commands);
+        });
+        output.drop_without_applying_deltas();
+        commands
+    }
+
+    /// The node types of the results shown, before "more...".
+    fn shown_types(editor: &Editor, popup: &SearchPopup) -> Vec<String> {
+        let found = results(editor, popup);
+        assert!(found.len() > editor.user.options.maximum_search_results(), "nothing overflows");
+        let shown = found.iter().take(editor.user.options.maximum_search_results());
+        shown.map(|found| match found {
+            Found::Node(spec) => spec.key().to_string(),
+            Found::Preset { node_type, .. } => node_type.clone(),
+            other => panic!("a node search found {other:?}"),
+        }).collect()
+    }
+
+    /// The node type Enter makes.
+    fn made(commands: &[Command]) -> String {
+        match commands {
+            [Command::Graph(GraphCommand::CreateNodes { picks, .. })] if picks.len() == 1 => picks[0].type_name.clone(),
+            other => panic!("Enter asked for {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_arrows_stay_on_the_results_shown() {
+        let (context, mut editor, mut popup) = search_for("e");
+        let shown = shown_types(&editor, &popup);
+        let found = results(&editor, &popup);
+        let last = shown.len() - 1;
+        for _ in 0..shown.len() {
+            press(&context, &mut editor, &mut popup, Key::ArrowDown);
+        }
+        assert_eq!(popup.highlighted, Some(last), "Down {} times", shown.len());
+        // Past the last shown, round to the first, not into "more...".
+        press(&context, &mut editor, &mut popup, Key::ArrowDown);
+        assert_eq!(popup.highlighted, Some(0), "Down past the last shown reached {:?}", popup.highlighted.map(|index| found_name(&found[index])));
+        assert_eq!(made(&press(&context, &mut editor, &mut popup, Key::Enter)), shown[0]);
+
+        // Up from the text box: the last shown, not the last found.
+        let (context, mut editor, mut popup) = search_for("e");
+        press(&context, &mut editor, &mut popup, Key::ArrowUp);
+        assert_eq!(popup.highlighted, Some(last), "Up from the text box reached {:?}", popup.highlighted.map(|index| found_name(&found[index])));
+        assert_eq!(made(&press(&context, &mut editor, &mut popup, Key::Enter)), shown[last]);
     }
 
     #[test]
