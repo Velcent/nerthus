@@ -53,6 +53,9 @@ const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 2.0;
 /// The room Extents and Selection leave around what they frame.
 const FRAME_MARGIN: f32 = 60.0;
+/// The gap Extents and Selection leave right of the toolbox (its own
+/// margin from the graph's edge).
+const TOOLBOX_GAP: f32 = 10.0;
 /// How far from a port a dragged connection still snaps to it.
 const SNAP_DISTANCE: f32 = 18.0;
 /// `SnapToOtherShapes`: how near (canvas units) an edge or a centre snaps.
@@ -245,8 +248,9 @@ pub struct GraphState {
     /// the toolbox's own state.
     pub toolbox_drag: Option<String>,
     pub toolbox: crate::ui::toolbox::ToolboxState,
-    /// Where the toolbox was last frame: the wheel over it is the
-    /// toolbox's, not the graph's.
+    /// Where the toolbox goes this frame, placed before the graph lays
+    /// out: the wheel over it is the toolbox's, not the graph's, and
+    /// Extents and Selection leave room for it.
     pub toolbox_rect: Rect,
     /// The editor's areas this frame, and where the Lazy Menu asked the
     /// pointer to go.
@@ -973,6 +977,7 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &Gr
     let Some(request) = state.zoom_request.take() else {
         return;
     };
+    let fit = fit_rect(rect, state.toolbox_rect);
     let tab = state.tab;
     let view = state.view_mut();
     if request == ZoomRequest::Reset {
@@ -1004,18 +1009,28 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &Gr
             nodes.chain(groups).chain(shown_notes).collect()
         }
     };
-    let reach = rect.size() / MIN_ZOOM - Vec2::splat(2.0 * FRAME_MARGIN);
-    let focus = view.location + rect.size() / (2.0 * view.zoom);
+    let reach = fit.size() / MIN_ZOOM - Vec2::splat(2.0 * FRAME_MARGIN);
+    let focus = view.location + (fit.center() - rect.min) / view.zoom;
     let Some(bounds) = framed_bounds(&items, reach, focus.to_pos2()) else {
         return;
     };
     let bounds = bounds.expand(FRAME_MARGIN);
-    let zoom_x = rect.width() / bounds.width();
-    let zoom_y = rect.height() / bounds.height();
+    let zoom_x = fit.width() / bounds.width();
+    let zoom_y = fit.height() / bounds.height();
     let zoom = zoom_x.min(zoom_y).clamp(MIN_ZOOM, 1.0);
     view.zoom = zoom;
-    let visible = rect.size() / zoom;
-    view.location = bounds.center().to_vec2() - visible / 2.0;
+    view.location = bounds.center().to_vec2() - (fit.center() - rect.min) / zoom;
+}
+
+/// Where Extents and Selection fit what they frame on the graph `rect`:
+/// right of the toolbox floating over it, so nothing starts hidden under
+/// it, though never in less than the graph's right half.
+fn fit_rect(rect: Rect, toolbox: Rect) -> Rect {
+    if !toolbox.intersects(rect) {
+        return rect;
+    }
+    let left = (toolbox.right() + TOOLBOX_GAP).clamp(rect.left(), rect.center().x);
+    Rect::from_min_max(Pos2::new(left, rect.top()), rect.max)
 }
 
 /// What Extents and Selection frame: the bounds of all `items` when they
@@ -2555,6 +2570,42 @@ mod tests {
         let layout = layout_node(data, editor.user.options.default_node_size());
         let dot = layout.port(port, is_input).unwrap().dot.center();
         state.view().to_screen(state.rect.min, dot)
+    }
+
+    #[test]
+    fn extents_leave_room_for_the_toolbox() {
+        let mut document = Document::new();
+        let leftmost = document.add_node("Mountain", [20000.0, 26000.0]).unwrap();
+        let other = document.add_node("ErosionPro", [32000.0, 30000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+        let context = themed_context();
+        // The menus' column down the graph's left edge.
+        state.toolbox_rect = Rect::from_min_size(Pos2::new(10.0, 45.0), Vec2::new(36.0, 400.0));
+        state.zoom_request = Some(ZoomRequest::Extents);
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        let shown = |id: i32| {
+            let layout = layout_node(editor.document.node(id).unwrap(), editor.user.options.default_node_size());
+            state.view().rect_to_screen(state.rect.min, layout.rect)
+        };
+        assert!(shown(leftmost).left() >= state.toolbox_rect.right() + TOOLBOX_GAP);
+        for id in [leftmost, other] {
+            assert!(SCREEN.contains_rect(shown(id)));
+        }
+    }
+
+    #[test]
+    fn fits_keep_to_the_right_of_the_toolbox() {
+        let graph = Rect::from_min_max(Pos2::new(4.0, 30.0), Pos2::new(1004.0, 630.0));
+        // No toolbox over the graph: all of it.
+        assert_eq!(fit_rect(graph, Rect::NOTHING), graph);
+        assert_eq!(fit_rect(graph, Rect::from_min_size(Pos2::new(1100.0, 30.0), Vec2::splat(40.0))), graph);
+        // The menus' column: past its right edge and the gap.
+        let column = Rect::from_min_size(Pos2::new(10.0, 45.0), Vec2::new(36.0, 400.0));
+        assert_eq!(fit_rect(graph, column), Rect::from_min_max(Pos2::new(56.0, 30.0), graph.max));
+        // A panel wider than half the graph leaves the right half.
+        let panel = Rect::from_min_max(graph.min, Pos2::new(700.0, graph.bottom()));
+        assert_eq!(fit_rect(graph, panel), Rect::from_min_max(Pos2::new(504.0, 30.0), graph.max));
     }
 
     #[test]

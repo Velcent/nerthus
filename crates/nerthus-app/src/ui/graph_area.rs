@@ -75,9 +75,9 @@ pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut U
         graph_border(ui, border, selected_color);
         Rect::from_min_max(border.min + Vec2::new(TAB_BORDER + 2.0, 2.0), border.max - Vec2::splat(TAB_BORDER + 2.0))
     };
-    graph_canvas::show(ui, graph_rect, editor, &mut ui_state.graph, commands);
     // `Toolbox`: margin 0, 35, 0, 0 for the menus and 0, 16, 0, 24 for the
-    // panel; none without tabs.
+    // panel; none without tabs. It is placed before the graph lays out,
+    // for Extents and Selection to leave room for it, and drawn over it.
     let toolbox_area = if tabs_hidden {
         grid
     } else if editor.user.options.toolbox_style() == ToolboxStyle::Menus {
@@ -85,6 +85,8 @@ pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut U
     } else {
         Rect::from_min_max(grid.min + Vec2::new(0.0, 16.0), grid.max - Vec2::new(0.0, 24.0))
     };
+    ui_state.graph.toolbox_rect = toolbox::place(ui, toolbox_area, &editor.user.options);
+    graph_canvas::show(ui, graph_rect, editor, &mut ui_state.graph, commands);
     toolbox::show(ui, toolbox_area, editor, &mut ui_state.graph, commands);
     if !tabs_hidden {
         tabs(ui, grid, editor, ui_state, selected_color, commands);
