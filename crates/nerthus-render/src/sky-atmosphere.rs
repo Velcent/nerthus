@@ -1,12 +1,14 @@
 //! Four-order Bruneton lookup tables, with the parameters and texture
-//! packing used by Gaea's viewport. See tools/sky-atmosphere for their
-//! reproducible precomputation and the independent reference comparison.
-
-use std::io::Read;
+//! packing used by the editor's viewport. Their hexadecimal bit patterns
+//! live beside them in sky-atmosphere-data.rs. See tools/sky-atmosphere
+//! for their reproducible precomputation and the independent reference
+//! comparison.
 
 use bevy::prelude::Vec3;
-use flate2::read::ZlibDecoder;
 use half::f16;
+
+#[path = "sky-atmosphere-data.rs"]
+mod data;
 
 use super::{add, mie_phase, multiply, rayleigh_phase, scale, Atmosphere, Rgb, SHOWN_GROUND_ALBEDO, SUN_ANGULAR_RADIUS};
 
@@ -26,7 +28,6 @@ const BOTTOM_RADIUS: f32 = 6360.0;
 const TOP_RADIUS: f32 = 6420.0;
 // Demo.UseHalfPrecision selects a maximum solar zenith angle of 102 degrees.
 const MU_S_MIN: f32 = -0.207_911_74;
-const TABLE_BYTES: &[u8] = include_bytes!("../assets/sky-atmosphere.bin.zlib");
 
 type Rgba = [f32; 4];
 
@@ -41,17 +42,9 @@ impl PrecomputedAtmosphere {
         let transmittance_count = TRANSMITTANCE_WIDTH * TRANSMITTANCE_HEIGHT;
         let scattering_count = SCATTERING_WIDTH * SCATTERING_VIEWS * SCATTERING_HEIGHTS;
         let irradiance_count = IRRADIANCE_WIDTH * IRRADIANCE_HEIGHT;
-        let expected_size = 8 + (transmittance_count + scattering_count + irradiance_count) * 8;
-        let mut decoded = Vec::with_capacity(expected_size);
-        let mut decoder = ZlibDecoder::new(TABLE_BYTES);
-        decoder.read_to_end(&mut decoded).expect("the bundled atmosphere tables decompress");
-        assert_eq!(decoded.len(), expected_size, "the bundled atmosphere tables have their declared dimensions");
-        assert_eq!(&decoded[..8], b"NTHSKY01", "the bundled atmosphere tables have the supported format");
-
-        let mut texels = decoded[8..].chunks_exact(8);
-        let transmittance = read_texels(&mut texels, transmittance_count);
-        let scattering = read_texels(&mut texels, scattering_count);
-        let irradiance = read_texels(&mut texels, irradiance_count);
+        let transmittance = hex_texels(data::TRANSMITTANCE_HEX, transmittance_count);
+        let scattering = hex_texels(data::SCATTERING_HEX, scattering_count);
+        let irradiance = hex_texels(data::IRRADIANCE_HEX, irradiance_count);
         Self { transmittance, scattering, irradiance }
     }
 
@@ -141,16 +134,25 @@ impl PrecomputedAtmosphere {
     }
 }
 
-fn read_texels(texels: &mut std::slice::ChunksExact<'_, u8>, count: usize) -> Vec<Rgba> {
-    let mut values = Vec::with_capacity(count);
-    for texel in texels.take(count) {
-        let value = std::array::from_fn(|channel| {
-            let offset = channel * 2;
-            let bits = u16::from_le_bytes([texel[offset], texel[offset + 1]]);
-            f16::from_bits(bits).to_f32()
-        });
-        values.push(value);
+/// The tables' texels, decoded from their hexadecimal bit patterns: one
+/// RGBA texel per sixteen characters, in the tables' RGBA channel order.
+fn hex_texels(source: &str, texels: usize) -> Vec<Rgba> {
+    let mut characters = source.chars().filter(|character| *character != '\n');
+    let mut values = Vec::with_capacity(texels);
+    for _ in 0..texels {
+        let mut texel = [0.0; 4];
+        for channel in 0..4 {
+            let mut bits = 0u16;
+            for _ in 0..4 {
+                let character = characters.next().expect("the tables hold their stated length");
+                let digit = character.to_digit(16).expect("the tables are hexadecimal");
+                bits = bits * 16 + digit as u16;
+            }
+            texel[channel] = f16::from_bits(bits).to_f32();
+        }
+        values.push(texel);
     }
+    assert!(characters.next().is_none(), "the tables hold no texels beyond their stated length");
     values
 }
 

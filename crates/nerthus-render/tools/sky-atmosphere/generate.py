@@ -13,7 +13,6 @@ import struct
 import subprocess
 import tempfile
 import urllib.request
-import zlib
 
 UPSTREAM_COMMIT = "34f14e745cff948f4ca3157d1b62a445ffa7286f"
 UPSTREAM_URL = (
@@ -26,7 +25,7 @@ UPSTREAM_HASHES = {
 }
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_OUTPUT = (
-    REPOSITORY_ROOT / "crates/nerthus-render/assets/sky-atmosphere.bin.zlib"
+    REPOSITORY_ROOT / "crates/nerthus-render/src/sky-atmosphere-data.rs"
 )
 
 SOLAR_IRRADIANCE = [1.474, 1.8504, 1.91198]
@@ -265,19 +264,57 @@ void main() {
     (build_directory / "config.json").write_text(json.dumps(configuration, indent=2))
 
 
+def rsDataRows(float_values):
+    """Hex rows of eight half-precision RGBA texels, one texel per sixteen characters."""
+    texel_rows = []
+    for index in range(0, len(float_values), 4):
+        texel = float_values[index:index + 4]
+        bits = [struct.unpack_from("<e", struct.pack("<f", value))[0] for value in texel]
+        texel_rows.append("".join(format(word, "04x") for word in bits))
+    return ["".join(texel_rows[row:row + 8]) for row in range(0, len(texel_rows), 8)]
+
+
+def rsDataFile(tables):
+    """Assemble sky-atmosphere-data.rs from the exported float tables."""
+    constants = {"transmittance": "TRANSMITTANCE_HEX", "scattering": "SCATTERING_HEX", "irradiance": "IRRADIANCE_HEX"}
+    blocks = []
+    for name in ["transmittance", "scattering", "irradiance"]:
+        rows = rsDataRows(tables[name])
+        # One string literal spanning every data line, opened by the
+        # declaration and closed on the final row.
+        opening = f"pub(super) const {constants[name]}_HEX: &str = \"{rows[0]}"
+        if len(rows) == 1:
+            blocks.append(f"{opening}\";\n")
+            continue
+        lines = [opening]
+        lines.extend(rows[1:-1])
+        lines.append(f"{rows[-1]}\";")
+        blocks.append("\n".join(lines) + "\n")
+    header = """//! The four-order Bruneton precomputed atmosphere, as the editor's
+//! viewport samples it, in the tables' packed order and dimensions: the
+//! transmittance texture (256 x 64), the combined scattering texture
+//! (256 x 128 x 32) and the indirect irradiance texture (64 x 16). One
+//! texel is sixteen hexadecimal characters: red, green, blue and the
+//! packed single-Mie channel, each a half-precision bit pattern, and a
+//! line holds eight texels in the texture's row-major layout. Their
+//! reproducible precomputation and the independent reference comparison
+//! live in tools/sky-atmosphere; regeneration writes this file. The
+//! sampler that reads them is sky-atmosphere.rs.
+"""
+    return header + "\n".join(blocks)
+
+
 def packageTables(build_directory, output_file):
-    table_names = ["transmittance", "scattering", "irradiance"]
-    contents = bytearray(b"NTHSKY01")
-    for name in table_names:
+    tables = {}
+    for name in ["transmittance", "scattering", "irradiance"]:
         float_values = array("f")
         float_values.frombytes((build_directory / (name + ".rgba32f")).read_bytes())
-        half_values = bytearray(len(float_values) * 2)
-        for index, value in enumerate(float_values):
-            struct.pack_into("<e", half_values, index * 2, value)
-        contents.extend(half_values)
+        assert len(float_values) == {"transmittance": 256 * 64, "scattering": 256 * 128 * 32, "irradiance": 64 * 16}[name] * 4, f"{name} has the declared texel count"
+        tables[name] = float_values
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_bytes(zlib.compress(contents, level=9))
-    print(f"Wrote {output_file}: {len(contents):,} bytes uncompressed")
+    data_file = rsDataFile(tables)
+    output_file.write_text(data_file)
+    print(f"Wrote {output_file}: {len(data_file):,} characters")
 
 
 def main():

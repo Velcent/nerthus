@@ -1,8 +1,10 @@
 # Atmosphere table generation
 
-The renderer's `assets/sky-atmosphere.bin.zlib` contains four orders of Eric
-Bruneton's precomputed atmospheric scattering model. This tool regenerates the
-asset from public source, independently of Gaea's compiled shaders.
+The renderer's `src/sky-atmosphere-data.rs` holds four orders of Eric
+Bruneton's precomputed atmospheric scattering model as hexadecimal literals
+in the code itself, so nothing has to be trusted as binary data. This tool
+regenerates that source file from public upstream source, independently of
+the editor's compiled shaders.
 
 Run on an Apple Silicon Mac with macOS 15 or later, Swift, Python 3, and the
 `glslang` and `spirv-cross` command line tools:
@@ -40,10 +42,11 @@ scattering texture stores phase-free Rayleigh and higher scattering orders in
 RGB, with the red single-Mie component in alpha. The sky reconstructs the other
 Mie components using the upstream combined-texture formula.
 
-The zlib payload starts with ASCII `NTHSKY01`, followed by the transmittance,
-combined scattering, and irradiance tables in that order. All texels contain
-four little-endian binary16 components; X varies fastest, then Y, then Z. GPU
-math and texture filtering can produce small differences between machines or
-shader compiler versions. The five canonical samples cover daylight, sunset,
-looking away from the sun, high altitude, and twilight; their JSON includes
-radiance before exposure or white balance, plus atmospheric transmittance.
+In the generated source file each texel is sixteen hexadecimal characters (the
+RGBA bit patterns, sixteen bits each, red first) and a line holds eight texels
+in the texture's row-major layout; the tables are listed transmittance,
+combined scattering, and irradiance in that order. GPU math and texture
+filtering can produce small differences between machines or shader compiler
+versions. The five canonical samples cover daylight, sunset, looking away from
+the sun, high altitude, and twilight; their JSON includes radiance before
+exposure or white balance, plus atmospheric transmittance.

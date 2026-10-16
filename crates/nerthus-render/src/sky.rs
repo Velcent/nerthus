@@ -111,7 +111,8 @@ fn mie_phase(nu: f32) -> f32 {
 }
 
 /// The tables that do not depend on the sun or the camera. Their expensive
-/// precomputation is shipped with the renderer; loading and sampling them
+/// precomputation is stored in the source (sky-atmosphere-data.rs);
+/// loading and sampling them
 /// happens on the sky worker, once per process.
 struct Tables {
     atmosphere: Atmosphere,
