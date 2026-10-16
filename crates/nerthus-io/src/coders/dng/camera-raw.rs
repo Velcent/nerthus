@@ -9,17 +9,76 @@ use rawler::rawsource::RawSource;
 use rawler::{RawImage, RawImageData};
 
 use super::camera_colors::{apply_camera_colors, normalized_make};
+use super::camera_loaders::unpack_camera;
+use super::camera_raw_meta::{CameraMeta, parse_camera_meta, SensorKind};
 use super::identify::{CBLACK_SIZE, Decoder, NOT_TILED, Raw, cam_xyz_coeff};
 use super::process::{self, Output};
 use super::stream::LITTLE_ENDIAN;
 use super::unpack::RawData;
 
 pub(super) fn decode_camera_raw(bytes: &[u8]) -> Result<Output> {
+    // The engine's own pixel loaders run for the makers whose loader is
+    // ported; rawler still decodes the remainder.
+    let engine_metadata = parse_camera_meta(bytes)
+        .filter(|meta| matches!(meta.loader, SensorKind::Samsung));
+    if let Some(mut meta) = engine_metadata {
+        ensure!(
+            (22..=64000).contains(&meta.raw_width) && (22..=64000).contains(&meta.raw_height),
+            "invalid camera raw dimensions"
+        );
+        let mut state = unpacked_camera_state(&meta);
+        let raw_data = unpack_camera(&mut meta, &mut state, bytes)?;
+        return process::process(&mut state, raw_data);
+    }
+
     let source = RawSource::new_from_slice(bytes);
     let parameters = RawDecodeParams::default();
     let decoded = rawler::decode(&source, &parameters).context("cannot unpack the camera raw image")?;
     let (mut state, samples) = prepare_camera_raw(decoded)?;
     process::process(&mut state, samples)
+}
+
+/// The engine's `Raw` state from the walker's resolved metadata, the path
+/// the ported pixel loaders take. The walker carries the colour state the
+/// engine's identify reaches, so the ported processing runs on it directly.
+fn unpacked_camera_state(meta: &CameraMeta) -> Raw {
+    Raw {
+        order: LITTLE_ENDIAN,
+        make: meta.make.clone(),
+        model: meta.model.clone(),
+        dng_version: 0,
+        raw_width: meta.raw_width,
+        raw_height: meta.raw_height,
+        width: meta.width,
+        height: meta.height,
+        top_margin: meta.top_margin,
+        left_margin: meta.left_margin,
+        pixel_aspect: meta.pixel_aspect,
+        fuji_width: meta.fuji_width,
+        fuji_raw_rotated: meta.fuji_layout != 0,
+        filters: meta.filters,
+        colors: meta.colors,
+        tiff_bps: meta.tiff_bps,
+        tiff_samples: meta.tiff_samples,
+        data_offset: meta.data_offset,
+        tile_width: NOT_TILED,
+        tile_length: NOT_TILED,
+        meta_offset: 0,
+        decoder: Decoder::Packed,
+        curve: meta.curve.clone(),
+        black: meta.black,
+        cblack: meta.cblack.to_vec(),
+        maximum: meta.maximum,
+        pre_mul: meta.pre_mul,
+        cam_mul: meta.cam_mul,
+        rgb_cam: meta.rgb_cam,
+        raw_color: meta.raw_color,
+        mask: meta.mask,
+        xtrans: meta.xtrans,
+        zero_is_bad: meta.zero_is_bad,
+        ifds: Vec::new(),
+        raw_ifd: 0,
+    }
 }
 
 fn prepare_camera_raw(decoded: RawImage) -> Result<(Raw, RawData)> {
@@ -145,6 +204,7 @@ fn prepare_camera_raw(decoded: RawImage) -> Result<(Raw, RawData)> {
         xtrans,
         ifds: Vec::new(),
         raw_ifd: 0,
+        zero_is_bad: false,
     };
     let make = normalized_make(&decoded.clean_make);
     let has_camera_color = apply_camera_colors(&mut state, make, &decoded.clean_model);
@@ -246,6 +306,66 @@ mod diagnostics {
                     let values: Vec<String> = row.iter().map(|&value| format!("{value:?}")).collect();
                     println!("CASE {index:02} rgb_cam {}", values.join(" "));
                 }
+            }
+        }
+    }
+
+    /// The engine's own pixel decoding for byte comparisons with the LibRaw
+    /// probe's `raw.bin` and `final.bin` dumps: NERTHUS_RAW_DIAGNOSTICS=<case
+    /// dirs> NERTHUS_RAW_DECODE=<out dir> cargo test -p nerthus-io
+    /// inspect_raw_decode -- --ignored
+    #[test]
+    #[ignore]
+    fn inspect_raw_decode() {
+        let directory = std::env::var("NERTHUS_RAW_DIAGNOSTICS").unwrap();
+        let decoded_directory = std::env::var("NERTHUS_RAW_DECODE").unwrap();
+        let suffixes = ["cr2", "cr3", "crw", "nef", "arw", "orf", "raf", "rw2", "pef", "srw"];
+        let wanted: Vec<usize> = std::env::var("NERTHUS_RAW_CASES")
+            .ok()
+            .map(|list| list.split(',').map(|case| case.trim().parse().unwrap()).collect())
+            .unwrap_or((1..=20).collect());
+        for index in wanted {
+            let folder = std::path::Path::new(&directory).join(format!("{index:02}"));
+            let entries = std::fs::read_dir(folder).unwrap().collect::<Vec<_>>();
+            for entry in entries {
+                let path = entry.unwrap().path();
+                let extension = path.extension().unwrap().to_str().unwrap().to_ascii_lowercase();
+                if !suffixes.contains(&extension.as_str()) { continue; }
+                let source_bytes = std::fs::read(&path).unwrap();
+                // Only cases the engine's own loader runs on dump; the rest
+                // stay with rawler.
+                let metadata = parse_camera_meta(&source_bytes)
+                    .filter(|meta| matches!(meta.loader, SensorKind::Samsung));
+                let Some(mut meta) = metadata else { continue; };
+                let mut state = unpacked_camera_state(&meta);
+                let raw_data = unpack_camera(&mut meta, &mut state, &source_bytes).unwrap();
+
+                let raw_header = [meta.raw_width, meta.raw_height, meta.raw_pitch, 1];
+                let mut raw_dump = Vec::new();
+                for value in raw_header {
+                    raw_dump.extend_from_slice(&value.to_le_bytes());
+                }
+                if let RawData::Bayer(ref buffer) = raw_data {
+                    for &sample in buffer {
+                        raw_dump.extend_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                let raw_path = std::path::Path::new(&decoded_directory).join(format!("{index:02}-raw.bin"));
+                std::fs::write(raw_path, raw_dump).unwrap();
+
+                let output = process::process(&mut state, raw_data).unwrap();
+                let final_header = [output.width as u32, output.height as u32, output.colors as u32, 16u32];
+                let mut final_dump = Vec::new();
+                for value in final_header {
+                    final_dump.extend_from_slice(&value.to_le_bytes());
+                }
+                for &sample in &output.samples {
+                    final_dump.extend_from_slice(&sample.to_le_bytes());
+                }
+                let final_path = std::path::Path::new(&decoded_directory).join(format!("{index:02}-final.bin"));
+                std::fs::write(final_path, final_dump).unwrap();
+
+                println!("CASE {index:02} decoded {}x{} colours {}", output.width, output.height, output.colors);
             }
         }
     }

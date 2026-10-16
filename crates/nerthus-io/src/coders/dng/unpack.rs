@@ -72,7 +72,16 @@ pub(super) fn unpack(data: &[u8], state: &mut Raw) -> Result<RawData> {
     if let RawData::Bayer(raw_image) = &raw_data {
         crop_masked_pixels(state, raw_image);
     }
-    // Move the smallest channel black into the common black.
+    fold_black_to_common(state);
+    if let RawData::Bayer(raw_image) = &mut raw_data {
+        raw_image.truncate(state.raw_width as usize * state.raw_height as usize);
+    }
+    Ok(raw_data)
+}
+
+/// unpack's black fold: the channels' common part (compared as unsigned
+/// int) into the common black.
+pub(super) fn fold_black_to_common(state: &mut Raw) {
     let mut common = state.cblack[3];
     for channel in 0..3 {
         if common > state.cblack[channel] {
@@ -83,10 +92,6 @@ pub(super) fn unpack(data: &[u8], state: &mut Raw) -> Result<RawData> {
         state.cblack[channel] -= common;
     }
     state.black = state.black.wrapping_add(common);
-    if let RawData::Bayer(raw_image) = &mut raw_data {
-        raw_image.truncate(state.raw_width as usize * state.raw_height as usize);
-    }
-    Ok(raw_data)
 }
 
 impl Unpacker<'_, '_> {

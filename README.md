@@ -253,17 +253,18 @@ These parts of Gaea 2.3.1.0 are not in Nerthus yet.
 ### Files
 
 - Camera raw files other than DNG (CR2, CR3, CRW, NEF, ARW, ORF, RAF,
-  RW2, PEF, SRW and so on) don't open yet. The port of LibRaw's
-  format-specific path that reads them is underway in
+  RW2, PEF, SRW and so on) open and go through the same processing path
+  as DNG files, but only some of them read their pixels from a decoder
+  of this port's own. The port of LibRaw's format-specific path is
+  underway in `crates/nerthus-io/src/coders/dng/camera-loaders.rs`,
   `crates/nerthus-io/src/coders/dng/camera-raw-meta.rs` and
-  `crates/nerthus-io/src/coders/dng/camera-raw.rs`, with the maker
-  notes carried maker by maker (Canon, Nikon, Sony, Fujifilm, Olympus,
+  `crates/nerthus-io/src/coders/dng/camera-raw.rs`: the maker notes are
+  carried maker by maker (Canon, Nikon, Sony, Fujifilm, Olympus,
   Panasonic, Pentax and Samsung are each checked against the reference
-  engine's own numbers) and the pixel loaders still to wire in; the
-  DNG-only path, which opens DNG files exactly, is what's wired in. Nor do a few rarer DNGs, such as Fuji
-  SuperCCD ones, and a DNG without a colour matrix of its own stays in
-  the camera's colours, where Gaea takes the camera's matrix from
-  LibRaw's table.
+  engine's own numbers) and Samsung's first SRW generation's pixel
+  loader is carried and verified byte-exact; the rest of the makers'
+  pixel loaders are still to port, and until they are those files read
+  their pixels with Rawler's own decoders.
 
 ### Builds
 

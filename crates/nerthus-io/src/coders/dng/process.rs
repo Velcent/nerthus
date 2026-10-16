@@ -44,11 +44,14 @@ pub(super) fn process(state: &mut Raw, raw: RawData) -> Result<Output> {
     let width = state.width as usize;
     let height = state.height as usize;
     let is_bayer = state.filters != 0 || state.colors == 1;
-    let subtract_inline = is_bayer;
+    let subtract_inline = is_bayer && !state.zero_is_bad;
     let mut image = Image { state, pixels: Vec::new(), width, height, data_maximum: 0 };
     image.raw2image(&raw, subtract_inline);
     drop(raw);
 
+    if image.state.zero_is_bad {
+        image.remove_zeroes();
+    }
     if !subtract_inline || image.data_maximum == 0 {
         adjust_bl(image.state);
         image.subtract_black();
@@ -320,6 +323,42 @@ impl Image<'_> {
         let maximum = self.state.maximum;
         if real_maximum > 0 && real_maximum < maximum && real_maximum as f32 > maximum as f32 * 0.75 {
             self.state.maximum = real_maximum;
+        }
+    }
+
+    /// `remove_zeroes`: a zero pixel takes the mean, in integer arithmetic,
+    /// of the same colour's decoded pixels within two rows and columns.
+    fn remove_zeroes(&mut self) {
+        let width = self.width as i32;
+        let height = self.height as i32;
+        for row in 0..height {
+            for column in 0..width {
+                let colour = self.colour(row as usize, column as usize);
+                let index = row as usize * self.width + column as usize;
+                if self.pixels[index][colour] != 0 {
+                    continue;
+                }
+                let mut total = 0u32;
+                let mut count = 0u32;
+                for near_row in row - 2..=row + 2 {
+                    for near_column in column - 2..=column + 2 {
+                        if near_row < 0 || near_row >= height || near_column < 0 || near_column >= width {
+                            continue;
+                        }
+                        if self.colour(near_row as usize, near_column as usize) != colour {
+                            continue;
+                        }
+                        let value = self.pixels[near_row as usize * self.width + near_column as usize][colour];
+                        if value != 0 {
+                            total += value as u32;
+                            count += 1;
+                        }
+                    }
+                }
+                if count > 0 {
+                    self.pixels[index][colour] = (total / count) as u16;
+                }
+            }
         }
     }
 

@@ -707,6 +707,13 @@ pub(super) struct CameraMeta {
     pub tiff_samples: u32,
     pub data_offset: i64,
     pub data_size: i64,
+    /// `strip_offset`: the Samsung strip-table offset, `unpacker_data`'s
+    /// record of tag 0xa010; the other loaders never read it.
+    pub strip_offset: i64,
+    /// `fuji_layout`: the SuperCCD interleave mark the body's 0x0130
+    /// layout record sets; the processing path keys its pixel placement on
+    /// it.
+    pub fuji_layout: u32,
     pub tile_width: u32,
     pub tile_length: u32,
     pub curve: Vec<u16>,
@@ -773,6 +780,9 @@ struct Walker<'a> {
     tile_width: u32,
     tile_length: u32,
     meta_offset: i64,
+    /// `strip_offset`: the Samsung bodies' strip-table offset, the 0xa010
+    /// record's first read.
+    strip_offset: i64,
     mask: [[i32; 4]; 8],
     xtrans: [[u8; 6]; 6],
     ifds: Vec<Ifd>,
@@ -970,6 +980,7 @@ impl<'a> Walker<'a> {
             tile_width: 0,
             tile_length: 0,
             meta_offset: 0,
+            strip_offset: 0,
             mask: [[0; 4]; 8],
             xtrans: [[0; 6]; 6],
             ifds: Vec::new(),
@@ -2078,10 +2089,10 @@ impl<'a> Walker<'a> {
             }
             0xa010 => {
                 // The Samsung raw IFD's size record names the file's own
-                // loader through the IFD's compression mark; other
-                // compression values leave the choice to the engine's own
-                // loader pass.
-                let _strip_offset = self.stream.get4();
+                // loader through the IFD's compression mark, and hands the
+                // strip-table offset to the loader; other compression values
+                // leave the choice to the engine's own loader pass.
+                self.strip_offset = self.stream.get4() as i64;
                 match self.ifds[ifd].comp {
                     0x8002 => self.loader = Some(SensorKind::Samsung),
                     0x8004 => self.loader = Some(SensorKind::Samsung2),
@@ -7494,6 +7505,8 @@ impl<'a> Walker<'a> {
             tiff_samples: self.tiff_samples,
             data_offset: self.data_offset,
             data_size: self.data_size,
+            strip_offset: self.strip_offset,
+            fuji_layout: self.fuji_layout as u32,
             tile_width: self.tile_width,
             tile_length: self.tile_length,
             curve,

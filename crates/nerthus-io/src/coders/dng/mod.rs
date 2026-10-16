@@ -25,6 +25,8 @@ mod camera_colors;
 mod camera_raw;
 #[path = "camera-raw-meta.rs"]
 mod camera_raw_meta;
+#[path = "camera-loaders.rs"]
+mod camera_loaders;
 mod demosaic;
 mod identify;
 mod ljpeg;

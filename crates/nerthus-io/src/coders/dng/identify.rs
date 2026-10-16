@@ -198,6 +198,9 @@ pub(super) struct Raw {
     pub mask: [[i32; 4]; 8],
     /// `xtrans`: the 6×6 pattern of an X-Trans CFA (`filters` 9).
     pub xtrans: [[u8; 6]; 6],
+    /// `zero_is_bad`: a Panasonic body's mark to treat zero samples as
+    /// dead pixels; the loaders for other bodies never set it.
+    pub zero_is_bad: bool,
     pub ifds: Vec<Ifd>,
     /// The raw IFD (`find_ifd_by_offset(data_offset)`).
     pub raw_ifd: usize,
@@ -866,6 +869,7 @@ impl Parser<'_> {
             raw_color: true,
             mask: self.mask,
             xtrans: self.xtrans,
+            zero_is_bad: false,
             ifds: Vec::new(),
             raw_ifd: raw,
         };
