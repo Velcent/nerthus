@@ -425,7 +425,9 @@ fn footer(ui: &mut Ui, area: Rect, editor: &Editor) {
 
     // `SetStateIcon`: the heartbeat, blue while building, the engine off
     // in red while suspended.
-    let (icon, icon_color) = if !editor.engine_active {
+    let (icon, icon_color) = if editor.cancelling && editor.building {
+        ("circle-dashed-x", theme::ACCENT_YELLOW)
+    } else if !editor.engine_active {
         ("engine-off", theme::ACCENT_RED)
     } else if editor.building {
         ("heartbeat", theme::ACCENT_BLUE)
@@ -434,7 +436,21 @@ fn footer(ui: &mut Ui, area: Rect, editor: &Editor) {
     };
     let mut icon_ui = ui.new_child(UiBuilder::new().max_rect(layout.icon));
     icon_ui.set_clip_rect(painter.clip_rect());
-    icons::paint(&icon_ui, layout.icon, icon, icon_color);
+    if editor.building && !editor.cancelling && editor.engine_active {
+        // Status-IconX's ShineBoard moves a bright opacity mask across
+        // the heartbeat every half-second, leaving its outline at 20%.
+        let time = ui.input(|state| state.time) as f32;
+        let clip = icon_ui.clip_rect();
+        for slice in 0..16 {
+            let left = layout.icon.left() + slice as f32;
+            let slice_rect = Rect::from_min_max(Pos2::new(left, layout.icon.top()), Pos2::new(left + 1.0, layout.icon.bottom()));
+            icon_ui.set_clip_rect(slice_rect.intersect(clip));
+            let opacity = build_icon_opacity(time, (slice as f32 + 0.5) / 16.0);
+            icons::paint(&icon_ui, layout.icon, icon, icon_color.gamma_multiply(opacity));
+        }
+    } else {
+        icons::paint(&icon_ui, layout.icon, icon, icon_color);
+    }
     painter.galley(Pos2::new(layout.clock.x, layout.clock.y - galley.size().y / 2.0), galley, theme::LABEL_DEFAULT);
 
     let center = layout.rect.center().y;
@@ -442,9 +458,10 @@ fn footer(ui: &mut Ui, area: Rect, editor: &Editor) {
     let separator_x = layout.separator_x + 0.5;
     painter.line_segment([Pos2::new(separator_x, center - 4.0), Pos2::new(separator_x, center + 4.0)], stroke);
 
-    // `Progress` (Lines): the build's share of 100 lights its lines in
+    // `Progress` (Lines): the building node's share of 100 lights its lines in
     // `Accent-Blue`.
-    let progress = if editor.building { editor.build_progress.clamp(0.0, 1.0) } else { 0.0 };
+    let progress = editor.building_node.map(|node| editor.status(node).progress).unwrap_or(0.0);
+    let progress = if editor.building { progress.clamp(0.0, 1.0) } else { 0.0 };
     let lit = (PROGRESS_LINES as f32 * progress) as usize;
     let lines_top = layout.rect.top() + 6.0 + 0.75;
     let lines_bottom = layout.rect.bottom() - 6.0 - 0.75;
@@ -477,6 +494,22 @@ fn footer(ui: &mut Ui, area: Rect, editor: &Editor) {
     if editor.building {
         ui.ctx().request_repaint();
     }
+}
+
+/// `Status-IconX.ShineBoard`: the three gradient stops' offsets and opacity.
+fn build_icon_opacity(time: f32, position: f32) -> f32 {
+    let phase = time.rem_euclid(0.5);
+    let outer_time = phase / 0.5;
+    let inner_time = (phase / 0.45).min(1.0);
+    let left = -0.65 + 1.9 * outer_time;
+    let peak = -0.4 + 1.7 * inner_time;
+    let right = -0.2 + 1.51 * inner_time;
+    let strength = if position < peak {
+        (position - left) / (peak - left)
+    } else {
+        (right - position) / (right - peak)
+    };
+    0.2 + 0.8 * strength.clamp(0.0, 1.0)
 }
 
 /// The crawling red outline while the engine is suspended (`EngineRect`),
@@ -548,7 +581,8 @@ fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, data_shown: bool, editor: &Edi
         dock.bottom(column);
         let refresh = icon_button(column, "rotate-360", "Refresh", None);
         if refresh.clicked() {
-            commands.push(Command::Refresh);
+            let command = if editor.selection.is_empty() { Command::RefreshAll } else { Command::Refresh };
+            commands.push(command);
         }
         refresh.context_menu(|ui| {
             menu_style(ui);
@@ -657,6 +691,28 @@ mod tests {
             let dots_left = dots.iter().map(|dot| dot.left()).fold(f32::MAX, f32::min);
             assert!((dots_right - dots_left - (columns * PROGRESS_CELL - 1.5)).abs() < 0.01, "{nodes} nodes");
         }
+    }
+
+    #[test]
+    fn the_footer_lines_follow_the_building_node_instead_of_finished_node_counts() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut document = Document::new();
+        let node = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.building = true;
+        editor.building_node = Some(node);
+        editor.build_progress = 0.9;
+        let status = crate::editor::NodeStatus { building: true, progress: 0.5, ..Default::default() };
+        editor.statuses.insert(node, status);
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 400.0));
+        let output = context.run_ui(egui::RawInput::default(), |ui| footer(ui, area, &editor));
+        let lit_lines = output.shapes.iter().filter(|clipped| match &clipped.shape {
+            Shape::Rect(shape) => shape.fill == theme::ACCENT_BLUE && shape.rect.height() > PROGRESS_SLICE,
+            _ => false,
+        }).count();
+        output.drop_without_applying_deltas();
+        assert_eq!(lit_lines, PROGRESS_LINES / 2);
     }
 
     #[test]
@@ -937,6 +993,23 @@ mod tests {
         let mutate = Pos2::new(chevron.x, foot - 3.5 * sizes.toolbar_button - 2.0 * 17.0);
         let commands = click(&context, grid, &mut editor, &mut ui_state, mutate);
         assert!(!commands.iter().any(|command| matches!(command, Command::Graph(GraphCommand::MutateButton))), "{commands:?}");
+    }
+
+    #[test]
+    fn toolbar_refresh_uses_all_nodes_when_the_selection_is_empty() {
+        let (context, mut editor, mut ui_state) = graph_grid_context();
+        let grid = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(900.0, 800.0));
+        let chevron = chevron_at(&context, grid);
+        let sizes = theme::sizes(&context);
+        let foot = grid.bottom() - AREA_MARGIN - 1.5 - sizes.toolbar_padding[1];
+        let refresh = Pos2::new(chevron.x, foot - 3.5 * sizes.toolbar_button - 2.0 * 17.0);
+        let commands = click(&context, grid, &mut editor, &mut ui_state, refresh);
+        assert_eq!(commands, vec![Command::RefreshAll]);
+
+        let node = editor.document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        editor.select(Some(node));
+        let commands = click(&context, grid, &mut editor, &mut ui_state, refresh);
+        assert_eq!(commands, vec![Command::Refresh]);
     }
 
     #[test]

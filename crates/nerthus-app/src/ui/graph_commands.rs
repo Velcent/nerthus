@@ -135,6 +135,9 @@ pub enum GraphCommand {
     MutateAll,
     /// F4.
     AutoLayout,
+    /// Shift with an arrow key: every selected node moves ten graph units
+    /// (`GraphArea_KeyUp`).
+    NudgeSelection([f32; 2]),
     /// T.
     CycleRenderIntent,
     /// Node › Move to Tab.
@@ -173,6 +176,19 @@ fn extent_of(sizes: &HashMap<i32, [f32; 2]>, id: i32) -> [f32; 2] {
 
 pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
     match command {
+        GraphCommand::NudgeSelection(delta) => {
+            let mut moves = Vec::new();
+            for id in &editor.selection {
+                let Some(node) = editor.document.node(*id) else {
+                    continue;
+                };
+                let position = [node.position[0] + delta[0], node.position[1] + delta[1]];
+                moves.push((*id, position));
+            }
+            if !moves.is_empty() {
+                editor.document.move_nodes(&moves, true);
+            }
+        }
         GraphCommand::Cut => {
             let selected = editor.selection.clone();
             let clipboard = editor.document.cut_nodes(&selected);
@@ -1179,6 +1195,32 @@ fn lazy_action(tag: &str, editor: &mut Editor, ui_state: &mut UiState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nudging_moves_the_whole_selection_ten_units_and_undoes_together() {
+        let mut document = crate::document::Document::new();
+        let first = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let second = document.add_node("Blur", [26400.0, 26200.0]).unwrap();
+        let separate = document.add_node("Mountain", [26000.0, 26400.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.set_selection(vec![first, second]);
+        let mut ui_state = UiState::default();
+        let steps = editor.document.undo_labels().len();
+
+        run(GraphCommand::NudgeSelection([10.0, 0.0]), &mut editor, &mut ui_state);
+        assert_eq!(editor.document.node(first).unwrap().position, [26010.0, 26000.0]);
+        assert_eq!(editor.document.node(second).unwrap().position, [26410.0, 26200.0]);
+        assert_eq!(editor.document.node(separate).unwrap().position, [26000.0, 26400.0]);
+        assert_eq!(editor.document.undo_labels().len(), steps + 1);
+        assert!(editor.document.undo());
+        assert_eq!(editor.document.node(first).unwrap().position, [26000.0, 26000.0]);
+        assert_eq!(editor.document.node(second).unwrap().position, [26400.0, 26200.0]);
+
+        editor.select(None);
+        let steps = editor.document.undo_labels().len();
+        run(GraphCommand::NudgeSelection([0.0, -10.0]), &mut editor, &mut ui_state);
+        assert_eq!(editor.document.undo_labels().len(), steps);
+    }
 
     #[test]
     fn an_output_let_go_on_another_output_makes_a_combine() {

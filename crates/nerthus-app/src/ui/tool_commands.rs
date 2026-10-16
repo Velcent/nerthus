@@ -136,6 +136,7 @@ pub fn run(command: ToolCommand, editor: &mut Editor, ui_state: &mut UiState) {
         ToolCommand::ResetCancellation => {
             log::info!("Manual reset of Cancellation Token.");
             editor.cancel_build = false;
+            editor.cancelling = false;
         }
         ToolCommand::ShowNahimicWarning => {
             if ui_state.nahimic_warning.is_none() {

@@ -390,6 +390,7 @@ pub fn run_tasks(
     settings: &DiskCacheSettings,
     tasks: Vec<DiskCacheTask>,
     events: &Sender<crate::worker::BuildEvent>,
+    generation: u64,
 ) {
     for task in tasks {
         match task {
@@ -403,7 +404,7 @@ pub fn run_tasks(
                 };
                 for node in disk.thaw(engine, terrain, store, resolution, &mut report) {
                     let range = engine.cache.get(node, "Out").filter(|map| map.channel_count() == 1).map(|map| nerthus_nodes::maths::min_max(map.data()));
-                    let finished = crate::worker::BuildEvent::NodeFinished { node, milliseconds: 0.0, state: NodeState::Built, error: None, range };
+                    let finished = crate::worker::BuildEvent::NodeFinished { generation, node, milliseconds: 0.0, state: NodeState::Built, error: None, range };
                     let _ = events.send(finished);
                 }
             }

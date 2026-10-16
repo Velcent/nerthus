@@ -483,7 +483,7 @@ pub(crate) fn deposition_boost(index: i32, has_precipitation: bool, settings: &E
 
 impl Simulation {
     /// Every round of droplets on one level.
-    fn erode_level(&mut self, level: &mut Level) {
+    fn erode_level(&mut self, level: &mut Level, report: &dyn Fn(f32)) {
         let index = self.finished_levels;
         let plan = plan_level(index, self.octaves, self.detail_octave, &self.settings, level.width, level.height);
         let rounds = plan.rounds;
@@ -493,7 +493,7 @@ impl Simulation {
 
         let count = plan.droplets;
         let mut first_droplet = 0u32;
-        for _ in 0..rounds {
+        for round in 0..rounds {
             let mut droplets = self.spawn(level, first_droplet, count);
             let mut active: Vec<usize> = (0..droplets.len()).collect();
             while !active.is_empty() {
@@ -521,6 +521,7 @@ impl Simulation {
                 }
             }
             first_droplet = first_droplet.wrapping_add(count);
+            report((round + 1) as f32 / rounds as f32);
         }
     }
 
@@ -982,17 +983,26 @@ pub(crate) fn prepare(settings: &ErosionSettings, width: usize, terrain: (f32, f
 /// It runs as SYCL kernels on a discrete GPU for builds wider than 2560
 /// pixels (`Erosions.PE`); otherwise as native CPU code.
 pub fn erode(heightmap: &Map, precipitation: Option<&Map>, settings: &ErosionSettings, terrain: (f32, f32)) -> ErosionMaps {
-    let cpu = || erode_cpu(heightmap, precipitation, settings, terrain);
+    erode_with_progress(heightmap, precipitation, settings, terrain, &|_| {})
+}
+
+/// [`erode`] with progress from each completed round of droplets.
+pub fn erode_with_progress(heightmap: &Map, precipitation: Option<&Map>, settings: &ErosionSettings, terrain: (f32, f32), report: &dyn Fn(f32)) -> ErosionMaps {
+    let cpu = || erode_cpu_with_progress(heightmap, precipitation, settings, terrain, report);
     let on_gpu = sycl::discrete_gpu_active() && heightmap.width() > 2560;
     if !on_gpu {
         return cpu();
     }
-    let gpu = |device: &nerthus_compute::GpuDevice| gpu::parallel_erosion::erode(device, heightmap, precipitation, settings, terrain);
+    let gpu = |device: &nerthus_compute::GpuDevice| gpu::parallel_erosion::erode_with_progress(device, heightmap, precipitation, settings, terrain, report);
     sycl::run("ParallelErosionSimulation", heightmap.width(), sycl::DISCRETE, gpu, cpu)
 }
 
 /// [`erode`] on the CPU (the native `ParallelErosion_Erode`).
 pub fn erode_cpu(heightmap: &Map, precipitation: Option<&Map>, settings: &ErosionSettings, terrain: (f32, f32)) -> ErosionMaps {
+    erode_cpu_with_progress(heightmap, precipitation, settings, terrain, &|_| {})
+}
+
+fn erode_cpu_with_progress(heightmap: &Map, precipitation: Option<&Map>, settings: &ErosionSettings, terrain: (f32, f32), report: &dyn Fn(f32)) -> ErosionMaps {
     let resolution = heightmap.resolution();
     let (terrain_width, terrain_height) = terrain;
     let prepared = prepare(settings, resolution.x, terrain);
@@ -1026,14 +1036,19 @@ pub fn erode_cpu(heightmap: &Map, precipitation: Option<&Map>, settings: &Erosio
     };
     while levels.len() > 1 {
         let mut coarser = levels.pop().expect("more than one level is left");
-        simulation.erode_level(&mut coarser);
+        let completed = simulation.finished_levels as f32;
+        let report_level = |fraction| report((completed + fraction) / level_count.max(1) as f32);
+        simulation.erode_level(&mut coarser, &report_level);
         let cell_size = (terrain_width / coarser.width as f32) / terrain_height;
         let finer = levels.last_mut().expect("a finer level is left");
         finer.refine(&coarser, cell_size);
         simulation.finished_levels += 1;
     }
     let mut finest = levels.pop().expect("the finest level is left");
-    simulation.erode_level(&mut finest);
+    let completed = simulation.finished_levels as f32;
+    let report_level = |fraction| report((completed + fraction) / level_count.max(1) as f32);
+    simulation.erode_level(&mut finest, &report_level);
+    report(1.0);
 
     let flow: Vec<f32> = finest.flow.iter().map(|&visits| minss(1.0, FLOW_SCALE * visits)).collect();
     ErosionMaps {
@@ -1041,5 +1056,43 @@ pub fn erode_cpu(heightmap: &Map, precipitation: Option<&Map>, settings: &Erosio
         flow: Map::from_data(resolution, flow),
         deposition: Map::from_data(resolution, finest.deposition),
         wear: Map::from_data(resolution, finest.wear),
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    #[test]
+    fn erosion_reports_intermediate_rounds_without_changing_its_maps() {
+        let resolution = nerthus_engine::Resolution::square(32);
+        let mut heights = Vec::new();
+        for y in 0..32 {
+            for x in 0..32 {
+                heights.push((x + y) as f32 / 64.0);
+            }
+        }
+        let input = Map::from_data(resolution, heights);
+        let settings = ErosionSettings { duration: 0.1, erosion_scale: 2000.0, ..Default::default() };
+        let terrain = (5000.0, 2600.0);
+        let fractions = RefCell::new(Vec::new());
+        let report = |fraction| fractions.borrow_mut().push(fraction);
+        let reported = erode_cpu_with_progress(&input, None, &settings, terrain, &report);
+        let ordinary = erode_cpu(&input, None, &settings, terrain);
+        for (actual, expected) in [
+            (&reported.height, &ordinary.height),
+            (&reported.flow, &ordinary.flow),
+            (&reported.deposition, &ordinary.deposition),
+            (&reported.wear, &ordinary.wear),
+        ] {
+            assert_eq!(actual.data(), expected.data());
+        }
+        let fractions = fractions.into_inner();
+        assert_eq!(fractions.last(), Some(&1.0));
+        assert!(fractions.iter().any(|fraction| *fraction > 0.0 && *fraction < 1.0));
+        assert!(fractions.iter().all(|fraction| fraction.is_finite() && (0.0..=1.0).contains(fraction)));
+        assert!(fractions.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 }

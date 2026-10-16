@@ -144,6 +144,12 @@ pub struct SedimentMaps {
 /// `Erosions.Sediments` ("Bulky"): erosion passes that only deposit, kept
 /// where they raise the map.
 pub fn sediments(map: &Map, passes: i32, scale: f32, seed: i32, terrain: TerrainSize) -> SedimentMaps {
+    sediments_with_progress(map, passes, scale, seed, terrain, |_, _| {})
+}
+
+/// The sediment recipe with the rendering pass reported before it runs.
+pub fn sediments_with_progress(map: &Map, passes: i32, scale: f32, seed: i32, terrain: TerrainSize, report: impl Fn(i32, i32)) -> SedimentMaps {
+    report(0, passes.max(1));
     let first = ErosionSettings {
         duration: 100.0 * scale,
         downcutting: 0.0,
@@ -158,6 +164,7 @@ pub fn sediments(map: &Map, passes: i32, scale: f32, seed: i32, terrain: Terrain
     let mut raised = eroded.height;
     let mut deposits = eroded.deposition;
     for pass in 1..passes.max(1) {
+        report(pass, passes.max(1));
         let settings = ErosionSettings {
             duration: 200.0 * scale,
             bed_load_amount: 0.2,

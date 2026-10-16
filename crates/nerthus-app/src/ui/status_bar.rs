@@ -95,7 +95,9 @@ fn readout(ui: &mut Ui, editor: &Editor, process_gib: Option<f64>, commands: &mu
             commands.push(Command::Tools(ToolCommand::ShowNahimicWarning));
         }
     }
-    let state = if !editor.engine_active {
+    let state = if editor.cancelling && editor.building {
+        "Cancelling"
+    } else if !editor.engine_active {
         "Engine suspended"
     } else if editor.building {
         "Building"

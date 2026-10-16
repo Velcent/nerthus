@@ -438,6 +438,11 @@ pub(crate) fn undo(arguments: &Arguments, context: &mut ToolContext, redo: bool)
     editor.selection.retain(|id| editor.document.terrain().nodes.contains_key(id));
     context.ui_state.graph.clear_element_selection();
     editor.changed();
+    if !redo {
+        if let Some(label) = labels.last() {
+            editor.report(format!("Undid: {label}"));
+        }
+    }
     let key = if redo { "redone" } else { "undone" };
     let mut outcome = json!({"can_undo": editor.document.can_undo(), "can_redo": editor.document.can_redo()});
     outcome[key] = json!(labels);

@@ -10,7 +10,7 @@ use std::iter::Peekable;
 use std::ops::Range;
 
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Align, Color32, CornerRadius, FontId, Galley, Margin, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Align, Color32, CornerRadius, FontId, Galley, Margin, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 use pulldown_cmark::{Alignment, BlockQuoteKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use std::sync::Arc;
 
@@ -67,6 +67,15 @@ pub struct Drawn {
     pub clicked: Option<String>,
     /// The heading scrolled to.
     pub scrolled: bool,
+    /// Link rectangles in the drawing's coordinates. Canvas notes use
+    /// these after applying the graph's visual transform.
+    pub links: Vec<LinkRegion>,
+}
+
+#[derive(Debug)]
+pub struct LinkRegion {
+    pub rect: Rect,
+    pub destination: String,
 }
 
 /// How a text is drawn: the heading to scroll to.
@@ -94,8 +103,50 @@ pub fn show(ui: &mut Ui, text: &str) {
 
 /// Draws `document`, leaving the links clicked to the caller.
 pub fn draw(ui: &mut Ui, document: &Document, view: View) -> Drawn {
+    draw_document(ui, document, view, false)
+}
+
+/// Notes use the same Markdown features as the help, with the 12-point
+/// body and heading sizes of Gaea's `MarkdownScrollViewer` style.
+pub fn show_note(ui: &mut Ui, text: &str) {
+    let document = parse(text);
+    let drawn = draw_document(ui, &document, View::default(), true);
+    if let Some(link) = drawn.clicked {
+        crate::export_build::open_url(&link);
+    }
+}
+
+/// Paints a canvas note at its graph zoom and returns its links in screen
+/// coordinates. The note decides when those links receive pointer input
+/// (`PART_NoteText.AllowSelection`), keeping its other space draggable.
+pub fn paint_note(ui: &mut Ui, text: &str, rect: Rect, zoom: f32, id: egui::Id) -> Vec<LinkRegion> {
+    let document = parse(text);
+    let transform = egui::emath::TSTransform { translation: rect.min.to_vec2() * (1.0 - zoom), scaling: zoom };
+    let natural_rect = Rect::from_min_size(rect.min, rect.size() / zoom);
+    let clip = rect.intersect(ui.clip_rect());
+    let natural_clip = transform.inverse().mul_rect(clip);
+    let opacity = ui.painter().opacity();
+    let mut builder = UiBuilder::new();
+    builder = builder.id(id);
+    builder = builder.max_rect(natural_rect);
+    builder = builder.layout(egui::Layout::top_down(Align::Min));
+    builder = builder.disabled();
+    let mut note_ui = ui.new_child(builder);
+    note_ui.set_opacity(opacity);
+    note_ui.set_clip_rect(natural_clip);
+    note_ui.spacing_mut().item_spacing.y = 0.0;
+    let drawn = note_ui.with_visual_transform(transform, |ui| draw_document(ui, &document, View::default(), true)).inner;
+    let mut links = drawn.links;
+    for link in &mut links {
+        link.rect = transform.mul_rect(link.rect).intersect(clip);
+    }
+    links.retain(|link| link.rect.is_positive());
+    links
+}
+
+fn draw_document(ui: &mut Ui, document: &Document, view: View, note: bool) -> Drawn {
     let mut drawn = Drawn::default();
-    let mut context = DrawContext { view, drawn: &mut drawn, in_item: false, depth: 0 };
+    let mut context = DrawContext { view, drawn: &mut drawn, in_item: false, depth: 0, note };
     draw_blocks(ui, &document.blocks, &mut context);
     drawn
 }
@@ -289,6 +340,13 @@ struct DrawContext<'a, 'b> {
     drawn: &'b mut Drawn,
     in_item: bool,
     depth: usize,
+    note: bool,
+}
+
+impl DrawContext<'_, '_> {
+    fn text_size(&self) -> f32 {
+        if self.note { 12.0 } else { TEXT_SIZE }
+    }
 }
 
 fn draw_blocks(ui: &mut Ui, blocks: &[Block], context: &mut DrawContext) {
@@ -296,14 +354,14 @@ fn draw_blocks(ui: &mut Ui, blocks: &[Block], context: &mut DrawContext) {
         match block {
             Block::Heading { level, anchor, spans } => heading(ui, *level, anchor, spans, context),
             Block::Paragraph(spans) => {
-                let style = TextStyle { size: TEXT_SIZE, color: theme::LABEL_DEFAULT, bold: false };
+                let style = TextStyle { size: context.text_size(), color: theme::LABEL_DEFAULT, bold: false };
                 paragraph(ui, spans, style, context);
                 let gap = if context.in_item { ITEM_PARAGRAPH_GAP } else { PARAGRAPH_GAP };
                 ui.add_space(gap);
             }
             Block::List { start, items } => list(ui, *start, items, context),
             Block::Quote { alert, blocks } => quote(ui, *alert, blocks, context),
-            Block::Code(code) => code_block(ui, code),
+            Block::Code(code) => code_block(ui, code, context),
             Block::Table { alignments, header, rows } => {
                 table(ui, alignments, header, rows, context);
                 ui.add_space(12.0);
@@ -326,10 +384,14 @@ struct TextStyle {
 }
 
 fn heading(ui: &mut Ui, level: usize, anchor: &str, spans: &[Span], context: &mut DrawContext) {
-    let (size, bold, color, above, below) = match level {
-        1 => (26.0, false, theme::LABEL_EMPHASIS, 12.0, 10.0),
-        2 => (21.0, false, theme::LABEL_EMPHASIS, 14.0, 8.0),
-        3 => (16.0, true, theme::LABEL_EMPHASIS, 10.0, 6.0),
+    let (size, bold, color, above, below) = match (context.note, level) {
+        (true, 1) => (36.0, false, theme::LABEL_EMPHASIS, 24.0, 24.0),
+        (true, 2) => (28.0, false, theme::LABEL_EMPHASIS, 24.0, 24.0),
+        (true, 3) => (22.0, false, theme::LABEL_DEFAULT, 16.0, 16.0),
+        (true, _) => (18.0, false, theme::LABEL_DEFAULT, 6.0, 2.0),
+        (false, 1) => (26.0, false, theme::LABEL_EMPHASIS, 12.0, 10.0),
+        (false, 2) => (21.0, false, theme::LABEL_EMPHASIS, 14.0, 8.0),
+        (false, 3) => (16.0, true, theme::LABEL_EMPHASIS, 10.0, 6.0),
         _ => (14.0, true, theme::ACCENT_PRIMARY, 10.0, 6.0),
     };
     ui.add_space(above);
@@ -425,6 +487,28 @@ fn glyph_rects(galley: &Galley) -> Vec<(usize, Rect)> {
     rects
 }
 
+fn link_regions(glyphs: &[(usize, Rect)], marks: &Marks, origin: Pos2) -> Vec<LinkRegion> {
+    let mut links: Vec<LinkRegion> = Vec::new();
+    for (range, destination) in &marks.links {
+        for (character, glyph) in glyphs {
+            if !range.contains(character) {
+                continue;
+            }
+            let rect = glyph.translate(origin.to_vec2());
+            let previous = links.last_mut();
+            if let Some(previous) = previous
+                && previous.destination == *destination
+                && (previous.rect.top() - rect.top()).abs() < 1.0
+            {
+                previous.rect = previous.rect.union(rect);
+            } else {
+                links.push(LinkRegion { rect, destination: destination.clone() });
+            }
+        }
+    }
+    links
+}
+
 /// The code's plates: per row, the span of its glyphs.
 fn code_plates(glyphs: &[(usize, Rect)], code: &[Range<usize>]) -> Vec<Rect> {
     let mut plates: Vec<Rect> = Vec::new();
@@ -460,6 +544,10 @@ fn paragraph(ui: &mut Ui, spans: &[Span], style: TextStyle, context: &mut DrawCo
     let (rect, response) = ui.allocate_exact_size(galley.size(), sense);
     paint_text(ui, rect.min, &galley, &marks, style.color);
     let glyphs = glyph_rects(&galley);
+    if context.note {
+        let links = link_regions(&glyphs, &marks, rect.min);
+        context.drawn.links.extend(links);
+    }
     if let Some(pointer) = response.hover_pos() {
         let local = pointer - rect.min.to_vec2();
         let hovered = glyphs.iter().find(|(_, glyph)| glyph.contains(local)).map(|(character, _)| *character);
@@ -506,7 +594,8 @@ fn paint_text(ui: &Ui, origin: Pos2, galley: &Arc<Galley>, marks: &Marks, color:
 
 fn list(ui: &mut Ui, start: Option<u64>, items: &[Vec<Block>], context: &mut DrawContext) {
     let marker_width = if start.is_some() { NUMBER_WIDTH } else { BULLET_WIDTH };
-    let line_height = ui.fonts_mut(|fonts| fonts.row_height(&theme::interface(TEXT_SIZE)));
+    let text_size = context.text_size();
+    let line_height = ui.fonts_mut(|fonts| fonts.row_height(&theme::interface(text_size)));
     for (index, item) in items.iter().enumerate() {
         let marker = match start {
             Some(first) => format!("{}.", first + index as u64),
@@ -517,7 +606,7 @@ fn list(ui: &mut Ui, start: Option<u64>, items: &[Vec<Block>], context: &mut Dra
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(LIST_INDENT);
             let (marker_rect, _) = ui.allocate_exact_size(Vec2::new(marker_width, line_height), Sense::hover());
-            let galley = ui.painter().layout_no_wrap(marker, theme::interface(TEXT_SIZE), theme::LABEL_DEFAULT);
+            let galley = ui.painter().layout_no_wrap(marker, theme::interface(text_size), theme::LABEL_DEFAULT);
             let left = if start.is_some() { marker_rect.right() - galley.size().x } else { marker_rect.left() };
             ui.painter().galley(Pos2::new(left, marker_rect.top()), galley, theme::LABEL_DEFAULT);
             ui.add_space(MARKER_GAP);
@@ -567,7 +656,7 @@ fn quote(ui: &mut Ui, alert: Option<BlockQuoteKind>, blocks: &[Block], context: 
 }
 
 /// Code on a dark plate, selectable, scrolling sideways when long.
-fn code_block(ui: &mut Ui, code: &str) {
+fn code_block(ui: &mut Ui, code: &str, context: &DrawContext) {
     let mut frame = egui::Frame::new();
     frame = frame.fill(theme::TEXTBOX_BACKGROUND);
     frame = frame.stroke(Stroke::new(1.0, theme::BUTTON_BORDER));
@@ -575,9 +664,15 @@ fn code_block(ui: &mut Ui, code: &str) {
     frame = frame.inner_margin(Margin::same(8));
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let mut scroll = egui::ScrollArea::horizontal();
-        scroll = scroll.id_salt(("code-block", code.len(), code.get(..code.len().min(32))));
-        scroll.show(ui, |ui| code_field(ui, code));
+        if context.note {
+            let font = theme::monospace(context.text_size());
+            let job = LayoutJob::simple(code.to_string(), font, theme::ACCENT_MUTED_GREEN, ui.available_width());
+            ui.label(job);
+        } else {
+            let mut scroll = egui::ScrollArea::horizontal();
+            scroll = scroll.id_salt(("code-block", code.len(), code.get(..code.len().min(32))));
+            scroll.show(ui, |ui| code_field(ui, code));
+        }
     });
     ui.add_space(PARAGRAPH_GAP);
 }
@@ -606,18 +701,18 @@ fn code_field(ui: &mut Ui, code: &str) -> egui::Response {
 
 /// The columns' widths: each its text's width when all fit, else at least
 /// its longest word's and the rest shared out by what each would like.
-fn column_widths(ui: &Ui, header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], width: f32, padding: f32) -> Vec<f32> {
+fn column_widths(ui: &Ui, header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], width: f32, padding: f32, text_size: f32) -> Vec<f32> {
     let columns = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
     let mut natural = vec![0.0f32; columns];
     let mut narrowest = vec![0.0f32; columns];
     let mut measure = |cells: &[Vec<Span>], bold: bool| {
         for (column, cell) in cells.iter().enumerate().take(columns) {
-            let style = TextStyle { size: TEXT_SIZE, color: theme::LABEL_DEFAULT, bold };
+            let style = TextStyle { size: text_size, color: theme::LABEL_DEFAULT, bold };
             let (job, _) = layout_job(cell, style, f32::INFINITY);
             let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
             natural[column] = natural[column].max(galley.size().x + padding);
             for word in plain(cell).split_whitespace() {
-                let word_galley = ui.painter().layout_no_wrap(word.to_string(), theme::interface(TEXT_SIZE), Color32::WHITE);
+                let word_galley = ui.painter().layout_no_wrap(word.to_string(), theme::interface(text_size), Color32::WHITE);
                 narrowest[column] = narrowest[column].max(word_galley.size().x + padding);
             }
         }
@@ -649,14 +744,15 @@ fn column_widths(ui: &Ui, header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], width: 
 fn table(ui: &mut Ui, alignments: &[Alignment], header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], context: &mut DrawContext) {
     let padding = 8.0;
     let width = ui.available_width();
-    let widths = column_widths(ui, header, rows, width, padding * 2.0);
+    let text_size = context.text_size();
+    let widths = column_widths(ui, header, rows, width, padding * 2.0, text_size);
     let total: f32 = widths.iter().sum();
     let mut draw_row = |ui: &mut Ui, cells: &[Vec<Span>], is_header: bool, shaded: bool| {
         let mut galleys = Vec::new();
         let mut height: f32 = 26.0;
         for (column, cell_width) in widths.iter().enumerate() {
             let spans = cells.get(column).map(Vec::as_slice).unwrap_or_default();
-            let style = TextStyle { size: TEXT_SIZE, color: theme::LABEL_DEFAULT, bold: is_header };
+            let style = TextStyle { size: text_size, color: theme::LABEL_DEFAULT, bold: is_header };
             let (job, marks) = layout_job(spans, style, cell_width - padding * 2.0);
             let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
             height = height.max(galley.size().y + 10.0);
@@ -673,6 +769,10 @@ fn table(ui: &mut Ui, alignments: &[Alignment], header: &[Vec<Span>], rows: &[Ve
         let mut left = rect.left();
         for (column, (galley, marks)) in galleys.iter().enumerate() {
             let cell_width = widths[column];
+            if context.note {
+                let cell_rect = Rect::from_min_size(Pos2::new(left, rect.top()), Vec2::new(cell_width, height));
+                ui.painter().rect_stroke(cell_rect, 0.0, Stroke::new(1.0, theme::BUTTON_BORDER_ALT), egui::StrokeKind::Inside);
+            }
             let alignment = alignments.get(column).copied().unwrap_or(Alignment::None);
             let text_left = match alignment {
                 Alignment::Right => left + cell_width - padding - galley.size().x,
@@ -681,6 +781,11 @@ fn table(ui: &mut Ui, alignments: &[Alignment], header: &[Vec<Span>], rows: &[Ve
             };
             let origin = Pos2::new(text_left, rect.center().y - galley.size().y / 2.0);
             paint_text(ui, origin, galley, marks, theme::LABEL_DEFAULT);
+            if context.note {
+                let glyphs = glyph_rects(galley);
+                let links = link_regions(&glyphs, marks, origin);
+                context.drawn.links.extend(links);
+            }
             if let Some(pointer) = response.hover_pos() {
                 let local = pointer - origin.to_vec2();
                 let glyphs = glyph_rects(galley);
@@ -770,6 +875,40 @@ mod tests {
             panic!("not a paragraph: {document:?}");
         };
         assert_eq!(plain(spans), "a\nb  c");
+    }
+
+    #[test]
+    fn canvas_notes_draw_rich_markdown_at_each_zoom_within_the_note() {
+        let text = "**Bold** and *italic* [link](https://example.com) with `code`\n\n3. First\n4. Second\n\n| Name | Value |\n| --- | --- |\n| Height | 0.7 |\n\n```text\nterrain = 1\n```";
+        let context = egui::Context::default();
+        theme::apply(&context);
+        for zoom in [0.5, 1.0, 2.0] {
+            let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(300.0, 500.0) * zoom);
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(1600.0))), ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                paint_note(ui, text, rect, zoom, egui::Id::new("markdown-note-test"));
+            });
+            let text_shapes: Vec<_> = output.shapes.iter().filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) => Some((clipped.clip_rect, shape)),
+                _ => None,
+            }).collect();
+            let shape_for = |text: &str| {
+                text_shapes.iter().find(|(_, shape)| shape.galley.text() == text).map(|(_, shape)| *shape).unwrap_or_else(|| panic!("{text:?} was not drawn at {zoom}"))
+            };
+            let body = shape_for("Bold and italic link with code");
+            let sections = &body.galley.job.sections;
+            assert!(sections.iter().any(|section| section.format.italics));
+            assert!(sections.iter().any(|section| section.format.font_id.family == theme::semibold(12.0).family));
+            assert!(sections.iter().any(|section| section.format.color == theme::ACCENT_MUTED_GREEN));
+            assert!(sections.iter().any(|section| section.format.font_id.family == theme::monospace(12.0).family));
+            for rendered in ["3.", "4.", "First", "Second", "Name", "Value", "Height", "0.7", "terrain = 1"] {
+                shape_for(rendered);
+            }
+            for (clip, _) in text_shapes {
+                assert!((clip.min - rect.min).length() < 0.01 && (clip.max - rect.max).length() < 0.01, "{clip:?} leaves {rect:?}");
+            }
+            output.drop_without_applying_deltas();
+        }
     }
 
     /// Runs `check` in a frame with the app's fonts.

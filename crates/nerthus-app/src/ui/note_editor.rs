@@ -8,7 +8,7 @@ use egui::{Align, Frame, Id, Key, Layout, Margin, RichText, ScrollArea, Stroke, 
 use crate::editor::Editor;
 use crate::theme;
 use crate::ui::graph_canvas::GraphState;
-use crate::ui::graph_notes::markdown_job;
+use crate::ui::markdown;
 
 /// `Width="720" Height="640"` less the grid's margin (20, 10, 20, 30).
 const PANEL_SIZE: Vec2 = Vec2::new(680.0, 600.0);
@@ -67,11 +67,10 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut GraphState) {
                 });
             });
             ui.add_space(10.0);
-            ui.allocate_ui(Vec2::new(column_width, column_height), |ui| {
+            ui.allocate_ui_with_layout(Vec2::new(column_width, column_height), Layout::top_down(Align::Min), |ui| {
                 ScrollArea::vertical().id_salt("note-editor-output").max_height(column_height).show(ui, |ui| {
-                    let job = markdown_job(&text, 1.0, column_width - 10.0);
-                    let galley = ui.painter().layout_job(job);
-                    ui.label(galley);
+                    ui.set_max_width(column_width - 10.0);
+                    markdown::show_note(ui, &text);
                 });
             });
         });

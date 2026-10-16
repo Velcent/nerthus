@@ -7,7 +7,7 @@ use nerthus_engine::editing::modifier_order;
 use nerthus_engine::ModifierData;
 use serde_json::Value;
 
-use super::Document;
+use super::{Document, UndoKind};
 
 /// The `Order` Min and Max are made with: they stay last, cannot be
 /// dragged and keep it when the others are numbered again.
@@ -34,7 +34,7 @@ impl Document {
             return false;
         };
         let name = self.node(node).map(|data| data.name.clone()).unwrap_or_default();
-        self.checkpoint(format!("{name} modifier removed"));
+        self.checkpoint_node(node, UndoKind::NodeModifier, format!("{name} modifier removed"));
         if let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) {
             target.modifiers.remove(index);
         }
@@ -59,7 +59,7 @@ impl Document {
             return false;
         }
         let name = data.name.clone();
-        self.checkpoint(format!("{name} modifier order changed"));
+        self.checkpoint_node(node, UndoKind::NodeModifier, format!("{name} modifier order changed"));
         let moved = places.remove(from);
         places.insert(to, moved);
         let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) else {

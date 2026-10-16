@@ -213,6 +213,7 @@ pub struct BuildContext<'a> {
     node_memory: &'a NodeMemory,
     /// The build's mutation, which a macro's graph builds with too.
     mutation: i32,
+    progress: Option<Arc<crate::BuildProgressFn>>,
 }
 
 /// What nodes keep between their builds (a node object's own fields,
@@ -224,6 +225,22 @@ pub(crate) type NodeMemory = Mutex<HashMap<i32, Arc<dyn Any + Send + Sync>>>;
 pub type PortIntents = HashMap<String, RenderIntent>;
 
 impl<'a> BuildContext<'a> {
+    /// Reports this node's own progress, from zero to one.
+    pub fn report_progress(&self, fraction: f32) {
+        if fraction.is_finite()
+            && let Some(progress) = &self.progress
+        {
+            progress(self.node.id, crate::BuildProgress::Fraction(fraction.clamp(0.0, 1.0)));
+        }
+    }
+
+    /// Reports the current simulation or rendering pass to the editor.
+    pub fn report_progress_text(&self, text: impl Into<String>) {
+        if let Some(progress) = &self.progress {
+            progress(self.node.id, crate::BuildProgress::Text(text.into()));
+        }
+    }
+
     /// The node's id (`Node.Id`), which some nodes use as a seed.
     pub fn node_id(&self) -> i32 {
         self.node.id
@@ -519,6 +536,7 @@ impl<'a> BuildContext<'a> {
         engine.macros = self.macros.clone();
         engine.project_path = self.project_path.map(Path::to_path_buf);
         engine.mutation = self.mutation;
+        engine.progress = self.progress.clone();
         run_macro(&mut engine, asset, variables, inputs, self.resolution)
     }
 
@@ -624,6 +642,7 @@ impl<'a> BuildContext<'a> {
             project_path: self.project_path,
             node_memory: self.node_memory,
             mutation: self.mutation,
+            progress: self.progress.clone(),
         };
         builder.build(&mut nested)?;
         let committed = nested.committed;
@@ -909,6 +928,8 @@ pub struct Engine {
     /// none), which a `LoopEnd` with Mutate Seeds adds to its loop's seeds
     /// before every pass ([`crate::mutation`]).
     pub mutation: i32,
+    /// A node's progress as it builds (also used inside macros and variants).
+    pub progress: Option<Arc<crate::BuildProgressFn>>,
 }
 
 /// `ApplicationMode`: what kind of application is building (loops run
@@ -943,6 +964,7 @@ impl Engine {
             project_path: None,
             node_memory: NodeMemory::default(),
             mutation: 0,
+            progress: None,
         }
     }
 
@@ -1281,6 +1303,7 @@ impl Engine {
             project_path: self.project_path.as_deref(),
             node_memory: &self.node_memory,
             mutation: self.mutation,
+            progress: self.progress.clone(),
         };
         Ok(context)
     }
@@ -1298,7 +1321,9 @@ impl Engine {
     pub(crate) fn run_node(&self, terrain: &Terrain, node: &NodeData, resolution: Resolution) -> Result<NodeOutputs, NodeError> {
         let builder = self.registry.node(&node.type_name).ok_or_else(|| NodeError::Unimplemented(node.type_name.clone()))?;
         let mut context = self.context_for(terrain, node, resolution)?;
+        context.report_progress(0.0);
         builder.build(&mut context)?;
+        context.report_progress(1.0);
         let port_intents = context.output_intents();
         let outputs = NodeOutputs {
             committed: context.committed,

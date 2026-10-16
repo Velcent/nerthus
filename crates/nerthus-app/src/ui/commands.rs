@@ -305,10 +305,14 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
         Command::SaveAs => editor.dialog = Some(DialogRequest::SaveAs),
         Command::Exit => crate::ui::file_commands::run(crate::files::FileCommand::Exit, editor, ui_state),
         Command::Undo => {
+            let label = editor.document.undo_label().map(str::to_string);
             if editor.document.undo() {
                 editor.selection.retain(|id| editor.document.terrain().nodes.contains_key(id));
                 ui_state.graph.clear_element_selection();
                 editor.changed();
+                if let Some(label) = label {
+                    editor.report(format!("Undid: {label}"));
+                }
             }
         }
         Command::Redo => {
@@ -371,14 +375,12 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
         Command::ToggleGrid => ui_state.graph.show_grid = !ui_state.graph.show_grid,
         Command::ToggleSnapToGrid => ui_state.graph.snap_to_grid = !ui_state.graph.snap_to_grid,
         Command::Refresh => {
-            if let Some(node) = editor.active_node() {
-                editor.document.mark_stale(node);
-                editor.changed();
-            }
+            let selected = editor.selection.clone();
+            editor.refresh_nodes(&selected);
         }
         Command::RefreshAll => {
-            editor.document.mark_all_stale();
-            editor.changed();
+            let nodes: Vec<i32> = editor.document.terrain().nodes.keys().copied().collect();
+            editor.refresh_nodes(&nodes);
         }
         Command::Bypass => {
             for node in editor.selection.clone() {
@@ -396,8 +398,9 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
         }
         Command::MarkForExport => mark_for_export(editor),
         Command::ResetNode => {
-            if let Some(node) = editor.active_node() {
-                editor.document.reset_node(node);
+            if !editor.selection.is_empty() {
+                let selected = editor.selection.clone();
+                editor.document.reset_nodes(&selected);
                 editor.changed();
             }
         }
@@ -1055,6 +1058,85 @@ mod tests {
 
     use super::*;
     use crate::document::Document;
+
+    #[test]
+    fn refresh_marks_every_selected_node_stale_and_reports_each_name() {
+        let mut document = Document::new();
+        let first = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let second = document.add_node("Blur", [26400.0, 26000.0]).unwrap();
+        let separate = document.add_node("Mountain", [26000.0, 26400.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.set_selection(vec![first, second]);
+        editor.document.take_stale();
+        let mut ui_state = UiState::default();
+        let mut window = Window::default();
+
+        run(vec![Command::Refresh], &mut editor, &mut ui_state, &mut window);
+        let (stale, all) = editor.document.take_stale();
+        assert_eq!(stale.into_iter().collect::<HashSet<i32>>(), HashSet::from([first, second]));
+        assert!(!all);
+        assert_eq!(editor.messages[editor.messages.len() - 2..], ["Mountain refreshed.", "Blur refreshed."]);
+        assert!(!editor.selection.contains(&separate));
+
+        editor.building = true;
+        run(vec![Command::Refresh], &mut editor, &mut ui_state, &mut window);
+        assert!(editor.document.take_stale().0.is_empty());
+        assert_eq!(editor.messages.last().unwrap(), "Did not refresh. An existing build is in progress.");
+
+        // The toolbar's no-selection command invalidates every node even
+        // with no viewport currently selected.
+        editor.building = false;
+        editor.select(None);
+        run(vec![Command::RefreshAll], &mut editor, &mut ui_state, &mut window);
+        let (stale, _) = editor.document.take_stale();
+        assert_eq!(stale.into_iter().collect::<HashSet<i32>>(), HashSet::from([first, second, separate]));
+        assert!(editor.needs_build);
+    }
+
+    #[test]
+    fn reset_restores_every_selected_node_and_keeps_seeds_in_one_undo_step() {
+        let mut document = Document::new();
+        let first = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let second = document.add_node("Mountain", [26400.0, 26000.0]).unwrap();
+        let separate = document.add_node("Mountain", [26000.0, 26400.0]).unwrap();
+        document.set_value(first, "Height", json!(0.7));
+        document.set_value(second, "Height", json!(0.8));
+        document.set_value(separate, "Height", json!(0.9));
+        document.set_value(first, "Seed", json!(1234));
+        document.set_value(second, "Seed", json!(4321));
+        let default_height = nerthus_engine::Catalogue::get().node("Mountain").unwrap().defaults["Height"].clone();
+        let mut editor = Editor::new(document);
+        editor.set_selection(vec![first, second]);
+        let mut ui_state = UiState::default();
+        let mut window = Window::default();
+        let steps = editor.document.undo_labels().len();
+
+        run(vec![Command::ResetNode], &mut editor, &mut ui_state, &mut window);
+        assert_eq!(editor.document.node(first).unwrap().values["Height"], default_height);
+        assert_eq!(editor.document.node(second).unwrap().values["Height"], default_height);
+        assert_eq!(editor.document.node(separate).unwrap().values["Height"], json!(0.9));
+        assert_eq!(editor.document.node(first).unwrap().values["Seed"], json!(1234));
+        assert_eq!(editor.document.node(second).unwrap().values["Seed"], json!(4321));
+        assert_eq!(editor.document.undo_labels().len(), steps + 1);
+        assert!(editor.document.undo());
+        assert_eq!(editor.document.node(first).unwrap().values["Height"], json!(0.7));
+        assert_eq!(editor.document.node(second).unwrap().values["Height"], json!(0.8));
+    }
+
+    #[test]
+    fn undo_reports_the_description_in_the_status_bar() {
+        let mut document = Document::new();
+        let mountain = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        document.set_value(mountain, "Height", json!(0.7));
+        let label = document.undo_label().unwrap().to_string();
+        let mut editor = Editor::new(document);
+        let mut ui_state = UiState::default();
+        let mut window = Window::default();
+
+        run(vec![Command::Undo], &mut editor, &mut ui_state, &mut window);
+
+        assert_eq!(editor.messages.last(), Some(&format!("Undid: {label}")));
+    }
 
     #[test]
     fn a_bypassed_node_upstream_offers_to_filter_the_data_view() {

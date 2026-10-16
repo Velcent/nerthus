@@ -216,7 +216,7 @@ impl Run<'_> {
 
     /// Every round of droplets on one level, `index` levels finer than the
     /// coarsest.
-    fn erode_level(&self, batch: &mut Batch, level: &mut Level, index: i32) -> Result<(), GpuError> {
+    fn erode_level(&self, batch: &mut Batch, level: &mut Level, index: i32, report: &dyn Fn(f32)) -> Result<(), GpuError> {
         let gpu = self.gpu;
         let prepared = &self.prepared;
         let settings = &prepared.settings;
@@ -246,7 +246,8 @@ impl Run<'_> {
         let apply = gpu.kernel(&SHADER, "apply")?;
 
         let mut first_droplet = 0u32;
-        for _ in 0..plan.rounds {
+        for round_index in 0..plan.rounds {
+            report(round_index as f32 / plan.rounds as f32);
             let round = Parameters { first_droplet, ..base };
             let uniform = gpu.uniform(&round);
             if count > 0 {
@@ -335,6 +336,11 @@ impl Run<'_> {
 
 /// `ParallelErosion_Erode` on `gpu`.
 pub fn erode(gpu: &GpuDevice, heightmap: &Map, precipitation: Option<&Map>, settings: &ErosionSettings, terrain: (f32, f32)) -> Result<ErosionMaps, GpuError> {
+    erode_with_progress(gpu, heightmap, precipitation, settings, terrain, &|_| {})
+}
+
+/// The GPU erosion with its current level and round reported.
+pub fn erode_with_progress(gpu: &GpuDevice, heightmap: &Map, precipitation: Option<&Map>, settings: &ErosionSettings, terrain: (f32, f32), report: &dyn Fn(f32)) -> Result<ErosionMaps, GpuError> {
     let resolution = heightmap.resolution();
     let prepared = parallel_erosion::prepare(settings, resolution.x, terrain);
     let level_count = prepared.level_count;
@@ -364,14 +370,17 @@ pub fn erode(gpu: &GpuDevice, heightmap: &Map, precipitation: Option<&Map>, sett
     let mut finished_levels = 0;
     while levels.len() > 1 {
         let mut coarser = levels.pop().expect("more than one level is left");
-        run.erode_level(&mut batch, &mut coarser, finished_levels)?;
+        let report_level = |fraction| report((finished_levels as f32 + fraction) / level_count.max(1) as f32);
+        run.erode_level(&mut batch, &mut coarser, finished_levels, &report_level)?;
         let finer = levels.last_mut().expect("a finer level is left");
         run.refine(&mut batch, finer, &coarser)?;
         finished_levels += 1;
     }
     let mut finest = levels.pop().expect("the finest level is left");
-    run.erode_level(&mut batch, &mut finest, finished_levels)?;
+    let report_level = |fraction| report((finished_levels as f32 + fraction) / level_count.max(1) as f32);
+    run.erode_level(&mut batch, &mut finest, finished_levels, &report_level)?;
     batch.finish()?;
+    report(1.0);
 
     let cells = resolution.x * resolution.y;
     let visits: Vec<u32> = gpu.read(&finest.flow, cells)?;

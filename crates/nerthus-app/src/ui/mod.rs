@@ -686,6 +686,9 @@ fn draw_editor(
     ui_state.store_options(&mut editor.user.options, settings);
     editor.user.save_if_changed();
 
+    if editor.building {
+        ctx.set_cursor_icon(CursorIcon::Wait);
+    }
     if floating {
         return Ok(());
     }
@@ -1114,6 +1117,10 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
     }
     // The graph's; Shift and Ctrl together come first.
     let graph_bindings = [
+        (KeyboardShortcut::new(Modifiers::SHIFT, Key::ArrowLeft), GraphCommand::NudgeSelection([-10.0, 0.0])),
+        (KeyboardShortcut::new(Modifiers::SHIFT, Key::ArrowRight), GraphCommand::NudgeSelection([10.0, 0.0])),
+        (KeyboardShortcut::new(Modifiers::SHIFT, Key::ArrowUp), GraphCommand::NudgeSelection([0.0, -10.0])),
+        (KeyboardShortcut::new(Modifiers::SHIFT, Key::ArrowDown), GraphCommand::NudgeSelection([0.0, 10.0])),
         (KeyboardShortcut::new(command, Key::X), GraphCommand::Cut),
         (KeyboardShortcut::new(command, Key::C), GraphCommand::Copy),
         (KeyboardShortcut::new(command, Key::V), GraphCommand::Paste),
@@ -1187,6 +1194,22 @@ mod tests {
 
     fn key(key: Key, modifiers: Modifiers) -> egui::Event {
         egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn shift_arrow_keys_nudge_ten_graph_units() {
+        let directions = [
+            (Key::ArrowLeft, [-10.0, 0.0]),
+            (Key::ArrowRight, [10.0, 0.0]),
+            (Key::ArrowUp, [0.0, -10.0]),
+            (Key::ArrowDown, [0.0, 10.0]),
+        ];
+        for (arrow, delta) in directions {
+            let expected = vec![Command::Graph(GraphCommand::NudgeSelection(delta))];
+            assert_eq!(pressed(vec![key(arrow, Modifiers::SHIFT)], true), expected);
+            assert!(pressed(vec![key(arrow, Modifiers::NONE)], true).is_empty());
+            assert!(pressed(vec![key(arrow, Modifiers::SHIFT)], false).is_empty());
+        }
     }
 
     #[test]

@@ -432,18 +432,23 @@ fn autosave_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
 fn undo_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     icon_menu(ui, "arrow-back-up", "Undo", None, |ui| {
         menu_style(ui);
-        let labels = editor.document.undo_labels();
-        if labels.is_empty() {
+        let history = editor.document.undo_history();
+        if history.is_empty() {
             menu_caption(ui, "No undo history");
             return;
         }
-        for (steps, label) in labels.iter().enumerate().take(20) {
-            if menu_item(ui, None, None, label, "").clicked() {
-                for _ in 0..=steps {
-                    commands.push(Command::Undo);
+        menu_rows(ui, |ui| {
+            for (steps, item) in history.iter().enumerate() {
+                if item.separator_before {
+                    menu_separator(ui);
+                }
+                if menu_item(ui, Some(item.icon), None, item.label, "").clicked() {
+                    for _ in 0..=steps {
+                        commands.push(Command::Undo);
+                    }
                 }
             }
-        }
+        });
     });
 }
 

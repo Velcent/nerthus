@@ -7,7 +7,7 @@
 use serde_json::Value;
 
 use super::links::PortalState;
-use super::{node_tab, Document};
+use super::{node_tab, Document, UndoKind};
 
 /// The node menu's Move to Tab offers "New Graph" after the tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +100,7 @@ impl Document {
     /// Manage Portals' Disconnect (`MiInputConsumingPort_Click`): the input
     /// stops consuming and is fed by nothing.
     pub fn disconnect_portal_input(&mut self, node: i32, port: &str) {
-        self.checkpoint("Connection deleted.");
+        self.checkpoint_node(node, UndoKind::Connection, "Connection deleted.");
         self.write_portal_state(node, port, PortalState::None);
         self.unlink(node, port);
     }
@@ -111,7 +111,8 @@ impl Document {
         if self.would_cycle(from, to) {
             return;
         }
-        self.checkpoint("Connect");
+        let label = self.connection_label(from, from_port, to, to_port);
+        self.checkpoint_node(to, UndoKind::Connection, label);
         self.link(from, from_port, to, to_port);
         self.write_portal_state(to, to_port, PortalState::Consuming);
     }

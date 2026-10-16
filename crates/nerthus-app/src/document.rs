@@ -52,10 +52,42 @@ pub const FORMAT_VERSION: &str = "2.3.1.0";
 /// Edits kept for undo.
 const UNDO_LIMIT: usize = 100;
 
+/// The kind of edit supplies the history menu's icon, as `UndoType` does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UndoKind {
+    Graph,
+    NodeStructure,
+    NodeModifier,
+    NodeParameter,
+    NodeProperty,
+    Connection,
+}
+
+impl UndoKind {
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Graph => "tournament",
+            Self::NodeStructure | Self::NodeModifier => "code-plus",
+            Self::NodeParameter | Self::NodeProperty => "code-dots",
+            Self::Connection => "port-connect",
+        }
+    }
+}
+
+/// One visible history row, newest first. Runs of edits to one element
+/// stay together, with a separator when the element or kind changes.
+pub struct UndoHistoryItem<'a> {
+    pub label: &'a str,
+    pub icon: &'static str,
+    pub separator_before: bool,
+}
+
 /// A state of the project to return to, named after the edit that left it.
 struct UndoEntry {
     label: String,
     project: Project,
+    kind: UndoKind,
+    element: Option<i32>,
     /// The node and property a value edit changed: further edits of the
     /// same one join this entry.
     merge_key: Option<(i32, String)>,
@@ -189,11 +221,23 @@ impl Document {
         self.push_undo(label.into(), None);
     }
 
+    fn checkpoint_node(&mut self, node: i32, kind: UndoKind, label: impl Into<String>) {
+        self.checkpoint(label);
+        if let Some(entry) = self.undo.last_mut() {
+            entry.kind = kind;
+            entry.element = Some(node);
+        }
+    }
+
     fn push_undo(&mut self, label: String, merge_key: Option<(i32, String)>) {
         let restores_view = merge_key.is_none();
+        let kind = if merge_key.is_some() { UndoKind::NodeParameter } else { UndoKind::Graph };
+        let element = merge_key.as_ref().map(|(node, _)| *node);
         let entry = UndoEntry {
             label,
             project: self.project.clone(),
+            kind,
+            element,
             merge_key,
             restores_view,
         };
@@ -226,6 +270,8 @@ impl Document {
         let entry = &mut self.undo[first];
         entry.label = label.into();
         entry.merge_key = None;
+        entry.kind = UndoKind::Graph;
+        entry.element = None;
         entry.restores_view = true;
         true
     }
@@ -253,6 +299,27 @@ impl Document {
         self.undo.iter().rev().map(|entry| entry.label.clone()).collect()
     }
 
+    pub fn undo_history(&self) -> Vec<UndoHistoryItem<'_>> {
+        let mut history = Vec::with_capacity(self.undo.len());
+        let mut previous = None;
+        for entry in self.undo.iter().rev() {
+            let subject = (entry.kind, entry.element);
+            let separator_before = previous.is_some_and(|previous| previous != subject);
+            let item = UndoHistoryItem {
+                label: entry.label.trim_end_matches('.'),
+                icon: entry.kind.icon(),
+                separator_before,
+            };
+            history.push(item);
+            previous = Some(subject);
+        }
+        history
+    }
+
+    pub fn undo_label(&self) -> Option<&str> {
+        self.undo.last().map(|entry| entry.label.as_str())
+    }
+
     /// Labels of the edits that can be redone, next first.
     pub fn redo_labels(&self) -> Vec<String> {
         self.redo.iter().rev().map(|entry| entry.label.clone()).collect()
@@ -275,7 +342,14 @@ impl Document {
         if entry.restores_view {
             self.view_generation += 1;
         }
-        let redo_entry = UndoEntry { label: entry.label, project: current, merge_key: None, restores_view: entry.restores_view };
+        let redo_entry = UndoEntry {
+            label: entry.label,
+            project: current,
+            kind: entry.kind,
+            element: entry.element,
+            merge_key: None,
+            restores_view: entry.restores_view,
+        };
         self.redo.push(redo_entry);
         self.dirty = true;
         true
@@ -290,7 +364,14 @@ impl Document {
         if entry.restores_view {
             self.view_generation += 1;
         }
-        let undo_entry = UndoEntry { label: entry.label, project: current, merge_key: None, restores_view: entry.restores_view };
+        let undo_entry = UndoEntry {
+            label: entry.label,
+            project: current,
+            kind: entry.kind,
+            element: entry.element,
+            merge_key: None,
+            restores_view: entry.restores_view,
+        };
         self.undo.push(undo_entry);
         self.dirty = true;
         true
@@ -341,7 +422,7 @@ impl Document {
     /// Adds a node of `type_name` at `position` (canvas units).
     pub fn add_node(&mut self, type_name: &str, position: [f32; 2]) -> Option<i32> {
         let spec = Catalogue::get().node(type_name)?;
-        self.checkpoint(format!("Add {}", spec.display_name.as_deref().unwrap_or(&spec.name)));
+        self.checkpoint(format!("Node added: {}", spec.name));
         let id = self.new_node_id();
         let seed = self.random_seed();
         let mut node = NodeData::new(spec, id, seed);
@@ -363,7 +444,8 @@ impl Document {
         if already {
             return;
         }
-        self.checkpoint("Connect");
+        let label = self.connection_label(from, from_port, to, to_port);
+        self.checkpoint_node(to, UndoKind::Connection, label);
         let record = ConnectionRecord {
             from,
             to,
@@ -383,13 +465,19 @@ impl Document {
         self.convey_render_intent(from, from_port, to, to_port);
     }
 
+    fn connection_label(&self, from: i32, from_port: &str, to: i32, to_port: &str) -> String {
+        let from_name = self.node(from).map(|node| node.name.as_str()).unwrap_or_default();
+        let to_name = self.node(to).map(|node| node.name.as_str()).unwrap_or_default();
+        format!("Connection: {from_name}-{from_port} ⇢ {to_name}-{to_port}")
+    }
+
     /// `AddNewPort` (the Add Input command).
     pub fn add_input(&mut self, node: i32) -> bool {
         let can_add = self.node(node).is_some_and(|data| nerthus_engine::editing::can_add_ports(&data.type_name));
         if !can_add {
             return false;
         }
-        self.checkpoint("Add Input");
+        self.checkpoint_node(node, UndoKind::NodeStructure, "Add Input");
         let added = self.project.terrain_mut().nodes.get_mut(&node).and_then(nerthus_engine::editing::add_new_port);
         if added.is_none() {
             self.undo.pop();
@@ -409,8 +497,9 @@ impl Document {
             return;
         };
         let present = data.modifiers.iter().any(|modifier| modifier_name(modifier) == name);
-        let label = if present { format!("Remove {name}") } else { format!("Add {name}") };
-        self.checkpoint(label);
+        let action = if present { "removed" } else { "added" };
+        let label = format!("{} modifier {action}", data.name);
+        self.checkpoint_node(node, UndoKind::NodeModifier, label);
         let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) else {
             return;
         };
@@ -450,14 +539,23 @@ impl Document {
 
     /// Sets a modifier parameter (`index` into the node's modifiers).
     pub fn set_modifier_value(&mut self, node: i32, index: usize, name: &str, value: Value) {
-        let current = self.node(node).and_then(|data| data.modifiers.get(index)).map(|modifier| modifier.values.get(name) == Some(&value));
-        if current != Some(false) {
+        let Some(data) = self.node(node) else {
+            return;
+        };
+        let Some(modifier) = data.modifiers.get(index) else {
+            return;
+        };
+        if modifier.values.get(name) == Some(&value) {
             return;
         }
+        let label = format!("{} modifier updated", data.name);
         let merge_key = (node, format!("modifier {index} {name}"));
         let continues = self.undo.last().is_some_and(|entry| entry.merge_key.as_ref() == Some(&merge_key));
         if !(continues && self.redo.is_empty()) {
-            self.push_undo(format!("Change {name}"), Some(merge_key));
+            self.push_undo(label, Some(merge_key));
+            if let Some(entry) = self.undo.last_mut() {
+                entry.kind = UndoKind::NodeModifier;
+            }
         }
         self.dirty = true;
         let modifier = self.project.terrain_mut().nodes.get_mut(&node).and_then(|data| data.modifiers.get_mut(index));
@@ -482,7 +580,7 @@ impl Document {
         let (Some(mut first_record), Some(mut second_record)) = (first_record, second_record) else {
             return;
         };
-        self.checkpoint("Swap Inputs");
+        self.checkpoint_node(node, UndoKind::Connection, "Swap Inputs");
         std::mem::swap(&mut first_record.to_port, &mut second_record.to_port);
         let target = self.project.terrain_mut().nodes.get_mut(&node);
         if let Some(target) = target {
@@ -501,7 +599,7 @@ impl Document {
         if !connected {
             return;
         }
-        self.checkpoint("Disconnect");
+        self.checkpoint_node(to, UndoKind::Connection, "Connection deleted.");
         if let Some(port) = self.project.terrain_mut().nodes.get_mut(&to).and_then(|node| node.port_mut(to_port)) {
             port.record = None;
         }
@@ -546,8 +644,24 @@ impl Document {
         // After an undo the redo history must go, so the edit starts anew.
         let continues = self.undo.last().is_some_and(|entry| entry.merge_key.as_ref() == Some(&merge_key));
         let merges = continues && self.redo.is_empty();
+        // A drag keeps its original value in the description and updates
+        // its destination as the control moves.
+        let previous = if merges {
+            self.undo.last().and_then(|entry| entry.project.terrain().nodes.get(&node))
+        } else {
+            Some(current)
+        };
+        let previous_value = previous.and_then(|node| node.values.get(name));
+        let spec = Catalogue::get().node(&current.type_name);
+        let parameter = spec.and_then(|spec| spec.parameter(name));
+        let is_float = parameter.is_some_and(|parameter| parameter.value_type == nerthus_engine::ValueType::Float);
+        let before = undo_value(previous_value, is_float);
+        let after = undo_value(Some(&value), is_float);
+        let label = format!("{}: {name} {before} → {after}", current.name);
         if !merges {
-            self.push_undo(format!("Change {name}"), Some(merge_key));
+            self.push_undo(label, Some(merge_key));
+        } else if let Some(entry) = self.undo.last_mut() {
+            entry.label = label;
         }
         self.dirty = true;
         if let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) {
@@ -566,7 +680,7 @@ impl Document {
         if !changes {
             return false;
         }
-        self.checkpoint(label);
+        self.checkpoint_node(node, UndoKind::NodeParameter, label);
         self.set_values_quietly(node, values);
         true
     }
@@ -591,7 +705,7 @@ impl Document {
         if current.values.get(name) == Some(&value) {
             return;
         }
-        self.checkpoint(label);
+        self.checkpoint_node(node, UndoKind::NodeParameter, label);
         if let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) {
             target.values.insert(name.to_string(), value);
         }
@@ -600,7 +714,7 @@ impl Document {
 
     /// Sets a `Node` base member (`StateOverride`, `NodeSize`, …).
     pub fn set_member(&mut self, node: i32, name: &str, value: Value, label: &str, rebuilds: bool) {
-        self.checkpoint(label);
+        self.checkpoint_node(node, UndoKind::NodeProperty, label);
         if let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) {
             target.set_member(name, value);
         }
@@ -626,7 +740,7 @@ impl Document {
             return false;
         }
         let label = format!("Node renamed: {} renamed to {name}.", current.name);
-        self.checkpoint(label);
+        self.checkpoint_node(node, UndoKind::NodeProperty, label);
         if let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) {
             target.name = name.to_string();
         }
@@ -647,25 +761,43 @@ impl Document {
         }
     }
 
-    /// `Reset`: the node's properties back to a fresh node's, its seeds kept.
-    pub fn reset_node(&mut self, node: i32) {
-        let Some(current) = self.node(node) else {
-            return;
-        };
-        let Some(spec) = Catalogue::get().node(&current.type_name) else {
-            return;
-        };
-        let mut values = spec.defaults.clone();
-        for parameter in spec.parameters.iter().filter(|parameter| parameter.is_seed()) {
-            if let Some(seed) = current.values.get(&parameter.name) {
-                values.insert(parameter.name.clone(), seed.clone());
+    /// `GraphControl.ResetNode`: all selected nodes reset together as one
+    /// undo step, preserving each node's seeds.
+    pub fn reset_nodes(&mut self, nodes: &[i32]) {
+        let mut resets = Vec::new();
+        for node in nodes {
+            let Some(current) = self.node(*node) else {
+                continue;
+            };
+            let Some(spec) = Catalogue::get().node(&current.type_name) else {
+                continue;
+            };
+            let mut values = spec.defaults.clone();
+            for parameter in spec.parameters.iter().filter(|parameter| parameter.is_seed()) {
+                if let Some(seed) = current.values.get(&parameter.name) {
+                    values.insert(parameter.name.clone(), seed.clone());
+                }
             }
+            resets.push((*node, current.name.clone(), values));
         }
-        self.checkpoint("Reset");
-        if let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) {
-            target.values = values;
+        if resets.is_empty() {
+            return;
         }
-        self.mark_stale(node);
+        let label = match resets.as_slice() {
+            [(_, name, _)] => format!("{name} was reset"),
+            _ => "Node(s) were reset.".to_string(),
+        };
+        if let [(node, _, _)] = resets.as_slice() {
+            self.checkpoint_node(*node, UndoKind::NodeStructure, label);
+        } else {
+            self.checkpoint(label);
+        }
+        for (node, _, values) in resets {
+            if let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) {
+                target.values = values;
+            }
+            self.mark_stale(node);
+        }
     }
 
     /// Puts back a node's parameters and modifiers from an earlier copy of
@@ -688,7 +820,7 @@ impl Document {
         if unchanged {
             return false;
         }
-        self.checkpoint(label);
+        self.checkpoint_node(node, UndoKind::NodeStructure, label);
         if let Some(target) = self.project.terrain_mut().nodes.get_mut(&node) {
             target.values = values;
             target.modifiers = state.modifiers.clone();
@@ -1718,6 +1850,25 @@ impl Document {
     }
 }
 
+/// `WPF.Sanitize`: floating point values have one or two decimal
+/// places; enum and text values keep their names without JSON quotes.
+fn undo_value(value: Option<&Value>, is_float: bool) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Bool(true)) => "True".to_string(),
+        Some(Value::Bool(false)) => "False".to_string(),
+        Some(Value::Number(number)) if is_float => {
+            let mut text = format!("{:.2}", number.as_f64().unwrap_or_default());
+            if text.ends_with('0') {
+                text.pop();
+            }
+            text
+        }
+        Some(value) => value.to_string(),
+    }
+}
+
 /// `BuildDefinition`'s members in declaration order (how Newtonsoft
 /// writes them).
 pub(crate) const BUILD_DEFINITION_MEMBERS: [&str; 26] = [
@@ -2135,6 +2286,57 @@ mod tests {
         assert_eq!(document.undo_labels().len(), before + 2);
         document.undo();
         assert_eq!(document.node(erosion).unwrap().values["Duration"], Value::from(0.3));
+    }
+
+    #[test]
+    fn history_names_parameter_values_and_keeps_the_start_of_a_drag() {
+        let mut document = Document::new();
+        let mountain = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        document.project.terrain_mut().nodes.get_mut(&mountain).unwrap().values.insert("Height".to_string(), json!(0.5));
+
+        document.set_value(mountain, "Height", json!(0.6));
+        document.set_value(mountain, "Height", json!(0.7));
+        assert_eq!(document.undo_label(), Some("Mountain: Height 0.5 → 0.7"));
+        assert!(document.undo());
+        assert_eq!(document.node(mountain).unwrap().values["Height"], json!(0.5));
+        assert!(document.redo());
+        assert_eq!(document.undo_label(), Some("Mountain: Height 0.5 → 0.7"));
+        assert_eq!(document.undo_history()[0].icon, "code-dots");
+
+        document.set_value(mountain, "Height", json!(0.123456));
+        assert_eq!(document.undo_label(), Some("Mountain: Height 0.7 → 0.12"));
+        assert_eq!(undo_value(Some(&json!(1)), true), "1.0");
+        assert_eq!(undo_value(Some(&json!(37)), false), "37");
+        assert_eq!(undo_value(Some(&json!("Ridged")), false), "Ridged");
+    }
+
+    #[test]
+    fn history_has_every_retained_step_with_icons_and_element_separators() {
+        let (mut document, mountain, erosion) = chain();
+        document.rename(erosion, "Erosion");
+        document.disconnect(erosion, "In");
+        document.connect(mountain, "Out", erosion, "In");
+        assert_eq!(document.undo_label(), Some("Connection: Mountain-Out ⇢ Erosion-In"));
+        assert_eq!(document.undo_history()[0].icon, "port-connect");
+
+        document.set_value(mountain, "Height", json!(0.7));
+        document.set_value(mountain, "Scale", json!(0.8));
+        document.set_value(erosion, "Duration", json!(0.3));
+        let history = document.undo_history();
+        assert!(!history[0].separator_before);
+        assert!(history[1].separator_before);
+        assert!(!history[2].separator_before);
+        assert!(history[3].separator_before);
+        assert_eq!(history[3].label, "Connection: Mountain-Out ⇢ Erosion-In");
+
+        for index in 0..30 {
+            document.checkpoint(format!("Graph edit {index}."));
+        }
+        let history = document.undo_history();
+        assert!(history.len() > 20);
+        assert_eq!(history.len(), document.undo_labels().len());
+        assert_eq!(history[0].label, "Graph edit 29");
+        assert_eq!(history[0].icon, "tournament");
     }
 
     #[test]

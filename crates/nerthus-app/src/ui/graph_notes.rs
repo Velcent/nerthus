@@ -6,7 +6,6 @@
 
 use std::collections::HashSet;
 
-use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
 use serde_json::Value;
 
@@ -17,6 +16,7 @@ use crate::ui::commands::Command;
 use crate::ui::graph_canvas::{drag_origin, GraphState, GraphView};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
+use crate::ui::markdown;
 use crate::ui::widgets::{menu_caption, menu_item, menu_separator, menu_style, Tooltips};
 
 /// `NoteElement`'s least height, and the least width of a text note
@@ -98,29 +98,6 @@ pub fn note_rects(editor: &Editor, tab: usize) -> Vec<(i32, Rect)> {
     layouts(editor, tab).into_iter().map(|note| (note.id, note.rect)).collect()
 }
 
-/// The note's Markdown as wrapped text: `#` headings in semibold, list
-/// items with bullets, emphasis markers dropped.
-pub(crate) fn markdown_job(markdown: &str, zoom: f32, width: f32) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = width;
-    let body = TextFormat::simple(theme::interface(12.0 * zoom), theme::LABEL_DEFAULT);
-    let heading = TextFormat::simple(theme::semibold(14.0 * zoom), theme::LABEL_EMPHASIS);
-    for line in markdown.lines() {
-        let trimmed = line.trim_start();
-        let (text, format) = if let Some(rest) = trimmed.strip_prefix('#') {
-            (rest.trim_start_matches('#').trim().to_string(), heading.clone())
-        } else if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
-            (format!("• {rest}"), body.clone())
-        } else {
-            (trimmed.to_string(), body.clone())
-        };
-        let plain = text.replace("**", "").replace("__", "").replace('`', "");
-        job.append(&plain, 0.0, format);
-        job.append("\n", 0.0, body.clone());
-    }
-    job
-}
-
 fn screen_rect(view: &GraphView, origin: Pos2, rect: Rect) -> Rect {
     Rect::from_min_max(view.to_screen(origin, rect.min), view.to_screen(origin, rect.max))
 }
@@ -138,9 +115,26 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         if !screen.intersects(state.rect) {
             continue;
         }
-        draw(ui, painter, note, screen, zoom, state.selected_note == Some(note.id));
+        let selected = state.selected_note == Some(note.id);
+        let links = draw(ui, painter, note, screen, zoom, selected);
         let response = ui.interact(screen, ui.id().with(("note", note.id)), Sense::click_and_drag());
-        let response = if note.icon_only && !note.markdown.is_empty() { response.tooltip_at_pointer(note.markdown.clone()) } else { response };
+        let response = if note.icon_only && !note.markdown.is_empty() {
+            response.tooltip_ui_at_pointer(|ui| {
+                ui.set_max_width(400.0);
+                let mut scroll = egui::ScrollArea::vertical();
+                scroll = scroll.id_salt(("note-tooltip", note.id));
+                scroll = scroll.max_height(400.0);
+                scroll.show(ui, |ui| markdown::show_note(ui, &note.markdown));
+            })
+        } else {
+            response
+        };
+        // `AllowSelection`: once a note has focus, its Markdown receives
+        // input. Link hit boxes use screen coordinates so they stay under
+        // their text at every graph zoom; the rest of the note still drags.
+        if let Some(destination) = interact_note_links(ui, note.id, &links, selected) {
+            crate::export_build::open_url(&destination);
+        }
         let thumb = if note.icon_only {
             None
         } else {
@@ -213,6 +207,25 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
     state.note_drag = None;
 }
 
+fn interact_note_links(ui: &Ui, note: i32, links: &[markdown::LinkRegion], selected: bool) -> Option<String> {
+    if !selected {
+        return None;
+    }
+    let mut clicked = None;
+    for (index, link) in links.iter().enumerate() {
+        let id = ui.id().with(("note-link", note, index));
+        let response = ui.interact(link.rect, id, Sense::click());
+        let response = response.tooltip(link.destination.as_str());
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            clicked = Some(link.destination.clone());
+        }
+    }
+    clicked
+}
+
 /// `ctxNote`: Edit Note, the colours, Delete Note.
 fn note_menu(ui: &mut Ui, id: i32, commands: &mut Vec<Command>) {
     menu_style(ui);
@@ -230,7 +243,7 @@ fn note_menu(ui: &mut Ui, id: i32, commands: &mut Vec<Command>) {
     menu_separator(ui);
 }
 
-fn draw(ui: &Ui, painter: &egui::Painter, note: &NoteLayout, screen: Rect, zoom: f32, selected: bool) {
+fn draw(ui: &mut Ui, painter: &egui::Painter, note: &NoteLayout, screen: Rect, zoom: f32, selected: bool) -> Vec<markdown::LinkRegion> {
     painter.rect_filled(screen, 0.0, note.color.gamma_multiply(0.1));
     painter.rect_stroke(screen, 0.0, Stroke::new(1.0, note.color), StrokeKind::Inside);
     if selected {
@@ -239,18 +252,85 @@ fn draw(ui: &Ui, painter: &egui::Painter, note: &NoteLayout, screen: Rect, zoom:
     if note.icon_only {
         let icon_rect = Rect::from_center_size(screen.center(), Vec2::splat(24.0 * zoom));
         icons::paint(ui, icon_rect, "note", note.color);
-        return;
+        return Vec::new();
     }
     let inner = screen.shrink(8.0 * zoom);
-    if inner.width() > 4.0 && zoom > 0.15 {
-        let job = markdown_job(&note.markdown, zoom, inner.width());
-        let galley = painter.layout_job(job);
-        let clipped = painter.with_clip_rect(inner.intersect(painter.clip_rect()));
-        clipped.galley(inner.min, galley, theme::LABEL_DEFAULT);
-    }
+    let links = if inner.width() > 4.0 && zoom > 0.15 {
+        let id = ui.id().with(("note-markdown", note.id));
+        markdown::paint_note(ui, &note.markdown, inner, zoom, id)
+    } else {
+        Vec::new()
+    };
     // `NoteThumb`: a 12px triangle in the corner.
     let corner = screen.max;
     let size = 12.0 * zoom;
     let triangle = vec![Pos2::new(corner.x, corner.y - size), corner, Pos2::new(corner.x - size, corner.y)];
     painter.add(Shape::convex_polygon(triangle, note.color, Stroke::NONE));
+    links
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoteFrame {
+        links: Vec<markdown::LinkRegion>,
+        destination: Option<String>,
+        body: Response,
+    }
+
+    fn note_frame(context: &egui::Context, rect: Rect, zoom: f32, selected: bool, events: Vec<egui::Event>) -> NoteFrame {
+        let text = "**Bold** [Open docs](https://example.com)\n\n| Link |\n| --- |\n| [Table docs](https://example.com/table) |";
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(1600.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut result = None;
+        let output = context.run_ui(input, |ui| {
+            let links = markdown::paint_note(ui, text, rect, zoom, ui.id().with("test-note-content"));
+            let body = ui.interact(rect, ui.id().with("test-note-body"), Sense::click_and_drag());
+            let destination = interact_note_links(ui, 1, &links, selected);
+            result = Some(NoteFrame { links, destination, body });
+        });
+        output.drop_without_applying_deltas();
+        result.unwrap()
+    }
+
+    fn pointer_button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    #[test]
+    fn selected_note_links_receive_clicks_at_each_zoom_and_leave_the_body_draggable() {
+        for zoom in [0.5, 1.0, 2.0] {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(300.0, 300.0) * zoom);
+            let frame = note_frame(&context, rect, zoom, false, Vec::new());
+            assert_eq!(frame.links.len(), 2);
+            let paragraph_link = frame.links[0].rect.center();
+            // The first click focuses the note, as `AllowSelection` does.
+            note_frame(&context, rect, zoom, false, vec![egui::Event::PointerMoved(paragraph_link)]);
+            note_frame(&context, rect, zoom, false, vec![pointer_button(paragraph_link, true)]);
+            let frame = note_frame(&context, rect, zoom, false, vec![pointer_button(paragraph_link, false)]);
+            assert!(frame.body.clicked());
+            assert!(frame.destination.is_none());
+
+            let selected = note_frame(&context, rect, zoom, true, Vec::new());
+            for link in selected.links {
+                assert!(rect.contains_rect(link.rect));
+                let point = link.rect.center();
+                note_frame(&context, rect, zoom, true, vec![egui::Event::PointerMoved(point)]);
+                note_frame(&context, rect, zoom, true, vec![pointer_button(point, true)]);
+                let clicked = note_frame(&context, rect, zoom, true, vec![pointer_button(point, false)]);
+                assert_eq!(clicked.destination, Some(link.destination));
+                assert!(!clicked.body.clicked());
+            }
+
+            let start = rect.left_bottom() + Vec2::new(20.0, -20.0);
+            note_frame(&context, rect, zoom, true, vec![egui::Event::PointerMoved(start)]);
+            note_frame(&context, rect, zoom, true, vec![pointer_button(start, true)]);
+            let moved = note_frame(&context, rect, zoom, true, vec![egui::Event::PointerMoved(start + Vec2::new(25.0, 0.0))]);
+            assert!(moved.body.drag_started());
+            assert!(moved.destination.is_none());
+        }
+    }
 }

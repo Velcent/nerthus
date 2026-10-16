@@ -83,7 +83,8 @@ impl NodeBuilder for ErosionPro {
             no_erosion,
         };
         let terrain = (context.terrain_width(), context.terrain_height());
-        let maps = parallel_erosion::erode(&input, precipitation_map, &settings, terrain);
+        let report = |fraction| context.report_progress(fraction);
+        let maps = parallel_erosion::erode_with_progress(&input, precipitation_map, &settings, terrain, &report);
         context.commit(maps.height)?;
         context.commit_port("Flow", maps.flow, RenderIntent::Default);
         context.commit_port("Deposits", maps.deposition, RenderIntent::Default);
@@ -135,7 +136,8 @@ fn erosion_pro_inhibitors(context: &BuildContext, heights: &Map) -> Map {
 /// `Erosions.PE` with the defaults for everything `settings` leaves out.
 fn erode(map: &Map, settings: ErosionSettings, context: &BuildContext) -> ErosionMaps {
     let terrain = (context.terrain_width(), context.terrain_height());
-    parallel_erosion::erode(map, None, &settings, terrain)
+    let report = |fraction| context.report_progress(fraction);
+    parallel_erosion::erode_with_progress(map, None, &settings, terrain, &report)
 }
 
 /// EasyErosion: preset chains of `Erosions.PE`.
@@ -525,7 +527,14 @@ impl NodeBuilder for Sediments {
             _ => {
                 context.render_secondary_as(RenderIntent::Mask);
                 let terrain = (context.terrain_width(), context.terrain_height());
-                erosions::sediments(&input, context.i32("Passes"), scale, context.node_id(), terrain)
+                let report = |pass: i32, passes: i32| {
+                    context.report_progress(pass as f32 / passes as f32);
+                    // Gaea repeats pass 1 for the second pass: its first
+                    // erosion runs before the loop starts at index 1.
+                    let displayed_pass = pass.max(1);
+                    context.report_progress_text(format!("Rendering pass {displayed_pass} of {passes}"));
+                };
+                erosions::sediments_with_progress(&input, context.i32("Passes"), scale, context.node_id(), terrain, report)
             }
         };
         context.commit(maps.result)?;
@@ -989,6 +998,8 @@ impl NodeBuilder for Snowfield {
         let taper = if context.bool("TaperSnowfall") { 0.2 * context.f32("TaperAmount") } else { 0.0 };
         let intensity = context.f32("Intensity") * 0.5;
         for cascade in 0..cascades {
+            context.report_progress(cascade as f32 / cascades as f32);
+            context.report_progress_text(format!("Simulating cascade {cascade:02} of {cascades:02}"));
             let line = snow_line + step * cascade as f32;
             let threshold = randomize(line, 0.25);
             let above = aspect::threshold(&input, threshold);

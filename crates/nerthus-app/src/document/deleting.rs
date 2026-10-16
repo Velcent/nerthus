@@ -108,7 +108,7 @@ impl Document {
         if !connected {
             return;
         }
-        self.checkpoint("Connection deleted.");
+        self.checkpoint_node(to, super::UndoKind::Connection, "Connection deleted.");
         self.unlink(to, to_port);
     }
 

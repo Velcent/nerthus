@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -29,6 +29,8 @@ pub struct BuildRequest {
     pub automation: Automation,
     pub project_path: Option<PathBuf>,
     pub target: i32,
+    /// Explicitly refreshed nodes, built even without an active preview.
+    pub refresh: Vec<i32>,
     pub resolution: Resolution,
     /// Nodes whose results are stale (they and everything downstream are
     /// rebuilt).
@@ -78,6 +80,22 @@ pub struct BuildRequest {
     pub cached_export: Option<crate::export_build::CachedExportJob>,
     /// The preferences that change results (`AllowValuesBeyondRange`).
     pub engine_preferences: EnginePreferences,
+}
+
+impl BuildRequest {
+    /// All requested chains in dependency order, sharing their upstream work.
+    pub(crate) fn build_order(&self, terrain: &Terrain) -> Vec<i32> {
+        let mut order = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for target in self.refresh.iter().copied().chain([self.target]) {
+            for node in Engine::build_order(terrain, target) {
+                if seen.insert(node) {
+                    order.push(node);
+                }
+            }
+        }
+        order
+    }
 }
 
 /// A node command the build thread runs: the node and the command
@@ -137,8 +155,11 @@ pub struct CachedPort {
 
 /// What the worker reports.
 pub enum BuildEvent {
-    NodeStarted(i32),
+    NodeStarted { generation: u64, node: i32 },
+    NodeProgress { generation: u64, node: i32, fraction: f32 },
+    NodeProgressText { generation: u64, node: i32, text: String },
     NodeFinished {
+        generation: u64,
         node: i32,
         milliseconds: f32,
         state: NodeState,
@@ -320,6 +341,7 @@ impl Stepping {
 fn newest(mut request: BuildRequest, requests: &Receiver<BuildRequest>) -> BuildRequest {
     while let Ok(mut newer) = requests.try_recv() {
         newer.stale.append(&mut request.stale);
+        newer.refresh.append(&mut request.refresh);
         newer.clear |= request.clear;
         if newer.macros.is_none() {
             newer.macros = request.macros.take();
@@ -413,6 +435,7 @@ struct Builder {
     disk: DiskCache,
     idle_terrain: Option<Arc<Terrain>>,
     idle_settings: DiskCacheSettings,
+    pending_refresh: Vec<i32>,
 }
 
 /// A request being built: the project as its bakes left it, the nodes it
@@ -436,6 +459,7 @@ impl Builder {
             disk: DiskCache::default(),
             idle_terrain: None,
             idle_settings: DiskCacheSettings::default(),
+            pending_refresh: Vec::new(),
         }
     }
 
@@ -450,6 +474,10 @@ impl Builder {
     /// A request's preparation, up to its first node: what it clears and
     /// makes stale, its bakes, and the disk cache's tasks.
     fn start(&mut self, mut request: BuildRequest, events: &Sender<BuildEvent>) -> Running {
+        if request.clear {
+            self.pending_refresh.clear();
+        }
+        request.refresh.append(&mut self.pending_refresh);
         let engine = &mut self.engine;
         let disk = &mut self.disk;
         // A closing project's previews go to disk before anything forgets
@@ -497,9 +525,9 @@ impl Builder {
         if let Some(store) = &request.bakes {
             load_node_bakes(engine, &terrain, store, resolution, region, &request.load_bakes);
         }
-        disk_cache::run_tasks(disk, engine, &terrain, resolution, &request.disk_cache, disk_tasks, events);
+        disk_cache::run_tasks(disk, engine, &terrain, resolution, &request.disk_cache, disk_tasks, events, request.generation);
         let _ = events.send(BuildEvent::Progress(WorkProgress::Prepared(request.generation)));
-        let order = Engine::build_order(&terrain, request.target);
+        let order = request.build_order(&terrain);
         let mut read = order.clone();
         if request.underlay != 0 {
             read.extend(Engine::build_order(&terrain, request.underlay));
@@ -524,9 +552,29 @@ impl Builder {
     /// Builds `node`, telling the editor as it starts and finishes.
     fn build_node(&mut self, running: &mut Running, node: i32, events: &Sender<BuildEvent>) {
         let engine = &mut self.engine;
-        let _ = events.send(BuildEvent::NodeStarted(node));
+        let generation = running.request.generation;
+        let _ = events.send(BuildEvent::NodeStarted { generation, node });
+        let progress_events = events.clone();
+        let reported_percent = AtomicU32::new(u32::MAX);
+        let report = move |_: i32, progress: nerthus_engine::BuildProgress| {
+            // A macro's internal nodes and reseeded variants belong to
+            // the graph node whose turn the worker is building.
+            let event = match progress {
+                nerthus_engine::BuildProgress::Fraction(fraction) => {
+                    let percent = (fraction * 100.0) as u32;
+                    if reported_percent.swap(percent, Ordering::Relaxed) == percent {
+                        return;
+                    }
+                    BuildEvent::NodeProgress { generation, node, fraction }
+                }
+                nerthus_engine::BuildProgress::Text(text) => BuildEvent::NodeProgressText { generation, node, text },
+            };
+            let _ = progress_events.send(event);
+        };
+        engine.progress = Some(Arc::new(report));
         let started = Instant::now();
         let result = engine.build(&running.terrain, node, self.resolution);
+        engine.progress = None;
         self.disk.rebuilt(node);
         running.built_now.insert(node);
         let milliseconds = started.elapsed().as_secs_f32() * 1000.0;
@@ -536,7 +584,7 @@ impl Builder {
         };
         let state = engine.state(node);
         let range = main_range(engine, node);
-        let finished = BuildEvent::NodeFinished { node, milliseconds, state, error, range };
+        let finished = BuildEvent::NodeFinished { generation, node, milliseconds, state, error, range };
         let _ = events.send(finished);
     }
 
@@ -544,6 +592,9 @@ impl Builder {
     /// how it went.
     fn finish(&mut self, running: Running, ending: Ending, events: &Sender<BuildEvent>) {
         let Running { mut request, terrain, read, built_now, .. } = running;
+        if matches!(ending, Ending::Superseded) {
+            self.pending_refresh.append(&mut request.refresh);
+        }
         let engine = &mut self.engine;
         let resolution = self.resolution;
         // Save cached build, whether or not the preview build got to the
@@ -910,6 +961,7 @@ mod tests {
             automation: asset.automation.clone(),
             project_path: None,
             target: blur,
+            refresh: Vec::new(),
             resolution: Resolution::square(32),
             stale: Vec::new(),
             clear: false,
@@ -939,7 +991,7 @@ mod tests {
         let mut ending = None;
         for event in events {
             match event {
-                BuildEvent::NodeStarted(node) => started.push(node),
+                BuildEvent::NodeStarted { node, .. } => started.push(node),
                 BuildEvent::Finished { generation, target, outputs, .. } => ending = Some(format!("finished {generation} {target} {}", outputs.len())),
                 BuildEvent::Superseded => ending = Some("superseded".to_string()),
                 BuildEvent::Cancelled { generation } => ending = Some(format!("cancelled {generation}")),
@@ -947,6 +999,89 @@ mod tests {
             }
         }
         (started, ending)
+    }
+
+    fn build_request(request: BuildRequest) -> Vec<BuildEvent> {
+        let (events, received) = unbounded();
+        let mut builder = Builder::new();
+        let mut running = builder.start(request, &events);
+        while let Some(node) = builder.next_node(&mut running) {
+            builder.build_node(&mut running, node, &events);
+        }
+        builder.finish(running, Ending::Finished, &events);
+        received.try_iter().collect()
+    }
+
+    #[test]
+    fn refresh_builds_disconnected_chains_without_a_preview_and_reports_node_progress() {
+        let (mountain, blur, mut request) = mountain_and_blur(7);
+        let mut terrain = (*request.terrain).clone();
+        let mut separate = 42;
+        while terrain.nodes.contains_key(&separate) {
+            separate += 1;
+        }
+        let spec = Catalogue::get().node("Mountain").unwrap();
+        terrain.nodes.insert(separate, nerthus_engine::NodeData::new(spec, separate, 1));
+        request.terrain = Arc::new(terrain);
+        request.target = 0;
+        request.refresh = vec![blur, separate];
+        let events = build_request(request);
+        for node in [mountain, blur, separate] {
+            let fractions: Vec<f32> = events.iter().filter_map(|event| match event {
+                BuildEvent::NodeProgress { generation: 7, node: reported, fraction } if *reported == node => Some(*fraction),
+                _ => None,
+            }).collect();
+            assert_eq!(fractions.first(), Some(&0.0));
+            assert_eq!(fractions.last(), Some(&1.0));
+        }
+        assert_eq!(summary(events), (vec![mountain, blur, separate], Some("finished 7 0 0".to_string())));
+    }
+
+    #[test]
+    fn simulation_stage_messages_reach_the_worker_listener() {
+        let cases = [
+            ("Snowfield", vec!["Simulating cascade 00 of 03", "Simulating cascade 01 of 03", "Simulating cascade 02 of 03"]),
+            ("Sediments", vec!["Rendering pass 1 of 3", "Rendering pass 1 of 3", "Rendering pass 2 of 3"]),
+        ];
+        for (type_name, expected) in cases {
+            let (_, target, mut request) = mountain_and_blur(8);
+            let mut terrain = (*request.terrain).clone();
+            let input = terrain.nodes[&target].port("In").unwrap().record.clone();
+            let spec = Catalogue::get().node(type_name).unwrap();
+            let mut node = nerthus_engine::NodeData::new(spec, target, 1);
+            node.port_mut("In").unwrap().record = input;
+            node.values.insert("Cascades".to_string(), Value::from(3));
+            node.values.insert("Duration".to_string(), Value::from(0.0));
+            node.values.insert("Passes".to_string(), Value::from(3));
+            node.values.insert("Scale".to_string(), Value::from(0.0));
+            terrain.nodes.insert(target, node);
+            request.terrain = Arc::new(terrain);
+            let events = build_request(request);
+            let messages: Vec<&str> = events.iter().filter_map(|event| match event {
+                BuildEvent::NodeProgressText { generation: 8, node, text } if *node == target => Some(text.as_str()),
+                _ => None,
+            }).collect();
+            assert_eq!(messages, expected, "{type_name}");
+            assert!(events.iter().any(|event| matches!(event, BuildEvent::NodeFinished { node, state: NodeState::Built, .. } if *node == target)));
+        }
+    }
+
+    #[test]
+    fn a_superseded_refresh_keeps_its_unfinished_targets() {
+        let (_, blur, mut request) = mountain_and_blur(1);
+        request.refresh = vec![blur];
+        request.target = 0;
+        let (events, _) = unbounded();
+        let mut builder = Builder::new();
+        let running = builder.start(request, &events);
+        let terrain = running.terrain.clone();
+        builder.finish(running, Ending::Superseded, &events);
+        let (_, _, mut next) = mountain_and_blur(2);
+        next.terrain = terrain;
+        next.target = 0;
+        let running = builder.start(next, &events);
+        assert_eq!(running.request.refresh, vec![blur]);
+        assert!(running.order.as_slice().contains(&blur));
     }
 
     #[test]

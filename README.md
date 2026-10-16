@@ -193,41 +193,6 @@ Its tools:
 
 These parts of Gaea 2.3.1.0 are not in Nerthus yet.
 
-### Graph
-
-- Shift-clicking a node while another is selected doesn't select the nodes
-  that connect the two. Nerthus adds or removes the clicked node, as
-  Ctrl-click does.
-- Shift with the arrow keys doesn't nudge the selected nodes (Gaea moves
-  them 10 units a press).
-- Refresh (F5 and the node menu) and Reset (Ctrl R) change only the active
-  node, not every selected one, and the graph toolbar's Refresh doesn't
-  refresh every node when none is selected.
-- Ports have no tooltips. Gaea shows a port's name there, with "(Required)"
-  on required inputs, which matters on compact and small nodes because they
-  hide their port labels. Node tooltips set out the name, build time and
-  status differently.
-- Notes render only the headings and bullet points of their Markdown. Bold,
-  italics, links, numbered lists, tables and code show as plain text in the
-  note and the Note Editor's preview, and an icon note's tooltip shows the
-  Markdown as it was typed.
-- The Undo menu names many steps differently: Gaea writes "Mountain: Height
-  0.5 → 0.7" and "Connection: Mountain-Out ⇢ Erosion-In" where Nerthus
-  writes "Change Height" and "Connect". It also has no icons for the kinds
-  of step and no separators between runs of edits to one thing, and it
-  lists the latest 20 steps instead of all of them.
-- After an undo, the status bar doesn't say what was undone ("Undid: …").
-  After a refresh, it doesn't say which node was refreshed.
-- Builds report less of their progress. Nodes don't report how far they
-  have got, so the graph footer has no progress line for the building node
-  and no row of dots for the build's nodes. Nerthus shows one bar of nodes
-  finished instead. The status bar doesn't show Gaea's progress messages,
-  such as "Simulating cascade 03 of 10" (Snowfield) and "Rendering pass 2
-  of 5" (Sediments). The footer's status icon only changes colour while a
-  build runs, where Gaea swaps in its own icons for building (animated), a
-  suspended engine and cancelling. The pointer doesn't show as busy while a
-  build runs.
-
 ### Properties
 
 - Colour properties, colour variables and the background in Options ›

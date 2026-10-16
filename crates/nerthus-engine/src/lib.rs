@@ -17,6 +17,7 @@ pub mod map;
 pub mod mutation;
 pub mod paths;
 pub mod project;
+pub mod progress;
 pub mod region;
 pub mod writer;
 
@@ -24,5 +25,6 @@ pub use catalogue::{Catalogue, ModifierSpec, NodeSpec, ParameterSpec, PortSpec, 
 pub use graph::{check_required_ports, ApplicationMode, BuildContext, BuildResult, Cache, Engine, EnginePreferences, ModifierBuilder, NodeBuilder, NodeError, NodeState, PortIntents, Registry, StateOverride};
 pub use map::{Map, MapInfo, RenderIntent, Resolution};
 pub use project::{Asset, ConnectionRecord, ModifierData, NodeData, PortData, Project, ProjectError, Terrain};
+pub use progress::{BuildProgress, BuildProgressFn};
 pub use region::Region;
 pub use writer::{to_fragment_json, to_macro_asset_json, to_terrain_json};

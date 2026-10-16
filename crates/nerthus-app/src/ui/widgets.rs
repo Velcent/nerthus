@@ -542,6 +542,8 @@ pub trait Tooltips {
     fn disabled_tooltip(self, text: impl Into<WidgetText>) -> Self;
     /// `add_contents` under the widget while it is hovered and enabled.
     fn tooltip_ui(self, add_contents: impl FnOnce(&mut Ui)) -> Self;
+    /// `add_contents` beside the pointer while the widget is hovered and enabled.
+    fn tooltip_ui_at_pointer(self, add_contents: impl FnOnce(&mut Ui)) -> Self;
 }
 
 impl Tooltips for Response {
@@ -562,6 +564,11 @@ impl Tooltips for Response {
 
     fn tooltip_ui(self, add_contents: impl FnOnce(&mut Ui)) -> Self {
         show_tooltip(egui::Tooltip::for_enabled(&self), add_contents);
+        self
+    }
+
+    fn tooltip_ui_at_pointer(self, add_contents: impl FnOnce(&mut Ui)) -> Self {
+        show_tooltip(egui::Tooltip::for_enabled(&self).at_pointer().gap(12.0), add_contents);
         self
     }
 }

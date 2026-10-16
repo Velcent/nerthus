@@ -39,6 +39,7 @@ const FREEZING_TITLE: &str = "Freezing Cached Data to Disk";
 pub struct NodeStatus {
     pub state: NodeState,
     pub building: bool,
+    pub progress: f32,
     pub milliseconds: f32,
     pub error: Option<String>,
     /// When it last finished building (`Node.LastUpdate`).
@@ -52,6 +53,7 @@ impl Default for NodeStatus {
         Self {
             state: NodeState::Unbuilt,
             building: false,
+            progress: 0.0,
             milliseconds: 0.0,
             error: None,
             built_at: None,
@@ -229,6 +231,9 @@ pub struct Editor {
     /// Esc, or suspending the engine: the running build stops at its next
     /// node.
     pub cancel_build: bool,
+    /// Cancellation has been sent to the worker, which is still stopping.
+    pub cancelling: bool,
+    pub building_node: Option<i32>,
     generation: u64,
     /// The last build request that was cancelled rather than finished.
     cancelled_generation: u64,
@@ -243,6 +248,7 @@ pub struct Editor {
     pub node_caches: HashMap<i32, NodeCache>,
     build_total: usize,
     build_done: usize,
+    pending_refresh: Vec<i32>,
     pub messages: Vec<String>,
     pub dialog: Option<DialogRequest>,
     /// Macros the open project uses, loaded for the next build.
@@ -347,6 +353,8 @@ impl Editor {
             building: false,
             needs_build: false,
             cancel_build: false,
+            cancelling: false,
+            building_node: None,
             generation: 0,
             cancelled_generation: 0,
             build_started: None,
@@ -356,6 +364,7 @@ impl Editor {
             node_caches: HashMap::new(),
             build_total: 0,
             build_done: 0,
+            pending_refresh: Vec::new(),
             messages: Vec::new(),
             dialog: None,
             pending_macros: None,
@@ -403,6 +412,10 @@ impl Editor {
     /// Replaces the document (File > New, Open).
     pub fn set_document(&mut self, document: Document) {
         self.freeze_on_close();
+        self.generation += 1;
+        self.cancel_build |= self.building;
+        self.building = false;
+        self.cancelling = false;
         // `CloseFile` clears the viewport whatever the options say, in the
         // closing project's light.
         self.clear_viewport();
@@ -414,6 +427,8 @@ impl Editor {
         self.preview_locked = false;
         self.preview_region = None;
         self.statuses.clear();
+        self.pending_refresh.clear();
+        self.building_node = None;
         self.last_errors.clear();
         self.node_caches.clear();
         self.outputs.clear();
@@ -868,7 +883,26 @@ impl Editor {
 
     /// Call after editing the document: rebuilds what the edit touched.
     pub fn changed(&mut self) {
-        self.needs_build = self.preview_node.is_some();
+        self.needs_build = self.preview_node.is_some() || !self.pending_refresh.is_empty();
+    }
+
+    /// Refresh each requested node, including chains outside the preview.
+    pub fn refresh_nodes(&mut self, nodes: &[i32]) {
+        if self.building {
+            self.report("Did not refresh. An existing build is in progress.");
+            return;
+        }
+        for id in nodes {
+            let Some(name) = self.document.node(*id).map(|node| node.name.clone()) else {
+                continue;
+            };
+            self.document.mark_stale(*id);
+            if !self.pending_refresh.contains(id) {
+                self.pending_refresh.push(*id);
+            }
+            self.report(format!("{name} refreshed."));
+        }
+        self.changed();
     }
 
     /// Where the project's baked maps are, once it is saved.
@@ -1287,7 +1321,7 @@ impl Editor {
         {
             self.preview_node = None;
         }
-        if self.preview_node.is_none() && !bake_work {
+        if self.preview_node.is_none() && !bake_work && self.pending_refresh.is_empty() {
             return;
         }
         let target = self.preview_node.unwrap_or(0);
@@ -1311,9 +1345,15 @@ impl Editor {
         }
         self.generation += 1;
         self.pending_preparation = false;
+        for status in self.statuses.values_mut() {
+            status.building = false;
+        }
         let (stale, clear) = self.document.take_stale();
         for node in &stale {
             self.forget_status(*node);
+            for downstream in downstream_nodes(self.document.terrain(), *node) {
+                self.forget_status(downstream);
+            }
         }
         if clear {
             let built: Vec<i32> = self.statuses.keys().copied().collect();
@@ -1328,6 +1368,7 @@ impl Editor {
             automation: asset.automation.clone(),
             project_path: self.document.path.clone(),
             target,
+            refresh: std::mem::take(&mut self.pending_refresh),
             resolution: Resolution::square(self.preview_resolution),
             stale,
             clear,
@@ -1348,10 +1389,12 @@ impl Editor {
             cached_export: self.pending_cached_export.take(),
             engine_preferences: self.user.preferences.engine_preferences(),
         };
-        let order = nerthus_engine::Engine::build_order(&asset.terrain, target);
+        let order = request.build_order(&asset.terrain);
         self.build_total = order.iter().filter(|id| self.status(**id).state != NodeState::Built).count();
         self.build_done = 0;
         self.build_progress = 0.0;
+        self.building_node = None;
+        self.cancelling = false;
         worker.request(request);
         self.building = true;
         self.build_started = Some(Instant::now());
@@ -1359,11 +1402,32 @@ impl Editor {
 
     fn handle_event(&mut self, event: BuildEvent) {
         match event {
-            BuildEvent::NodeStarted(node) => {
+            BuildEvent::NodeStarted { generation, node } => {
+                if generation != self.generation {
+                    return;
+                }
+                self.building_node = Some(node);
                 let status = self.statuses.entry(node).or_default();
                 status.building = true;
+                status.progress = 0.0;
             }
-            BuildEvent::NodeFinished { node, milliseconds, state, error, range } => {
+            BuildEvent::NodeProgress { generation, node, fraction } => {
+                if generation == self.generation && self.building_node == Some(node) && fraction.is_finite() {
+                    let fraction = fraction.clamp(0.0, 1.0);
+                    self.statuses.entry(node).or_default().progress = fraction;
+                    let total = self.build_total.max(1) as f32;
+                    self.build_progress = ((self.build_done as f32 + fraction) / total).min(1.0);
+                }
+            }
+            BuildEvent::NodeProgressText { generation, node, text } => {
+                if generation == self.generation && self.building_node == Some(node) {
+                    self.report(text);
+                }
+            }
+            BuildEvent::NodeFinished { generation, node, milliseconds, state, error, range } => {
+                if generation != self.generation {
+                    return;
+                }
                 // `Build_BuildFinished`: a node that built (`Succeeded`)
                 // shines unless the renderer is drawing quickly.
                 if state == NodeState::Built && error.is_none() && self.render_quality == RenderQuality::Normal {
@@ -1372,12 +1436,14 @@ impl Editor {
                 let status = NodeStatus {
                     state,
                     building: false,
+                    progress: if state == NodeState::Built { 1.0 } else { 0.0 },
                     milliseconds,
                     error,
                     built_at: Some(Instant::now()),
                     range,
                 };
                 self.statuses.insert(node, status);
+                self.building_node = None;
                 self.last_errors.remove(&node);
                 self.build_done += 1;
                 let total = self.build_total.max(1);
@@ -1395,6 +1461,11 @@ impl Editor {
                 }
                 self.cancelled_generation = generation;
                 self.building = false;
+                self.cancelling = false;
+                self.building_node = None;
+                for status in self.statuses.values_mut() {
+                    status.building = false;
+                }
                 self.last_errors.clear();
                 if let Some(started) = self.build_started.take() {
                     self.last_build_seconds = started.elapsed().as_secs_f32();
@@ -1428,6 +1499,8 @@ impl Editor {
                 // `Build_BuildFinished`: the preview stands up again.
                 self.flat_preview = false;
                 self.building = false;
+                self.cancelling = false;
+                self.building_node = None;
                 // What the build left unreported is unbuilt now.
                 self.last_errors.clear();
                 self.build_progress = 1.0;
@@ -1961,6 +2034,7 @@ fn process_builds(
     editor.poll_export_build();
     if std::mem::take(&mut editor.cancel_build) {
         worker.cancel();
+        editor.cancelling = editor.building;
     }
     if editor.build_due.is_some_and(|due| Instant::now() >= due) {
         editor.build_due = None;
@@ -2248,6 +2322,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn refresh_builds_every_requested_node_with_no_active_preview() {
+        let mut document = Document::new();
+        let first = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let second = document.add_node("Mountain", [300.0, 0.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.preview_resolution = 32;
+        editor.preview_node = None;
+        editor.refresh_nodes(&[first, second]);
+        let worker = BuildWorker::start();
+        editor.request_build(&worker);
+        assert!(editor.building);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while editor.building {
+            assert!(Instant::now() < deadline, "the refresh never finished");
+            for event in worker.poll() {
+                editor.handle_event(event);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(editor.status(first).state, NodeState::Built);
+        assert_eq!(editor.status(second).state, NodeState::Built);
+        assert!(editor.selection.is_empty());
+        assert_eq!(editor.preview_node, None);
+    }
+
+    #[test]
+    fn changing_projects_rejects_the_old_builds_progress() {
+        let mut document = Document::new();
+        let node = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.building = true;
+        let generation = editor.generation;
+        editor.set_document(Document::new());
+        let messages_before = editor.messages.len();
+        editor.handle_event(BuildEvent::NodeStarted { generation, node });
+        editor.handle_event(BuildEvent::NodeProgressText { generation, node, text: "Old simulation".to_string() });
+        assert!(!editor.building);
+        assert_eq!(editor.building_node, None);
+        assert_eq!(editor.messages.len(), messages_before);
+        assert!(editor.statuses.is_empty());
+    }
+
+    #[test]
+    fn superseded_node_events_do_not_replace_current_progress_or_messages() {
+        let mut document = Document::new();
+        let node = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.generation = 2;
+        editor.building = true;
+        editor.build_total = 2;
+        let started = BuildEvent::NodeStarted { generation: 2, node };
+        let progress = BuildEvent::NodeProgress { generation: 2, node, fraction: 0.25 };
+        editor.handle_event(started);
+        editor.handle_event(progress);
+        let messages_before = editor.messages.len();
+
+        let stale_started = BuildEvent::NodeStarted { generation: 1, node: node + 1 };
+        let stale_progress = BuildEvent::NodeProgress { generation: 1, node, fraction: 0.9 };
+        let stale_text = BuildEvent::NodeProgressText { generation: 1, node, text: "Old rendering pass".to_string() };
+        let stale_finished = BuildEvent::NodeFinished {
+            generation: 1,
+            node,
+            milliseconds: 100.0,
+            state: NodeState::Built,
+            error: None,
+            range: None,
+        };
+        for event in [stale_started, stale_progress, stale_text, stale_finished] {
+            editor.handle_event(event);
+        }
+
+        assert_eq!(editor.building_node, Some(node));
+        assert!(editor.status(node).building);
+        assert_eq!(editor.status(node).progress, 0.25);
+        assert_eq!(editor.build_progress, 0.125);
+        assert_eq!(editor.build_done, 0);
+        assert_eq!(editor.messages.len(), messages_before);
+        assert!(!editor.statuses.contains_key(&(node + 1)));
+    }
+
+    #[test]
     fn adaptive_debounce_follows_the_build_time() {
         assert_eq!(adaptive_debounce(40.0), Duration::ZERO);
         assert_eq!(adaptive_debounce(100.0), Duration::from_millis(100));
@@ -2264,11 +2419,11 @@ mod tests {
         let mut editor = Editor::new(document);
         editor.select(Some(erosion));
         let error = "The port In is required and is not connected.".to_string();
-        let reported = |error: Option<String>| {
+        let reported = |generation: u64, error: Option<String>| {
             let state = if error.is_some() { NodeState::Error } else { NodeState::Built };
-            BuildEvent::NodeFinished { node: erosion, milliseconds: 1.0, state, error, range: None }
+            BuildEvent::NodeFinished { generation, node: erosion, milliseconds: 1.0, state, error, range: None }
         };
-        editor.handle_event(reported(Some(error.clone())));
+        editor.handle_event(reported(editor.generation, Some(error.clone())));
         assert_eq!(editor.shown_error(erosion), Some(error.clone()));
 
         // An edit's rebuild drops the status but not the error shown, while
@@ -2278,15 +2433,15 @@ mod tests {
         editor.request_build(&worker);
         assert_eq!(editor.status(erosion).error, None);
         assert_eq!(editor.shown_error(erosion), Some(error.clone()));
-        editor.handle_event(BuildEvent::NodeStarted(erosion));
+        editor.handle_event(BuildEvent::NodeStarted { generation: editor.generation, node: erosion });
         editor.document.mark_stale(erosion);
         editor.request_build(&worker);
         assert_eq!(editor.shown_error(erosion), Some(error.clone()));
 
         // Reported again, it shows what the build found.
-        editor.handle_event(reported(None));
+        editor.handle_event(reported(editor.generation, None));
         assert_eq!(editor.shown_error(erosion), None);
-        editor.handle_event(reported(Some(error.clone())));
+        editor.handle_event(reported(editor.generation, Some(error.clone())));
 
         // A build that ends without reporting it leaves it unbuilt.
         editor.document.mark_all_stale();

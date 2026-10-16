@@ -560,7 +560,17 @@ pub fn node_icon(type_name: &str) -> String {
 
 fn port_label(port: &PortData) -> String {
     let display = port.extra.get("DisplayName").and_then(Value::as_str);
-    display.unwrap_or(&port.name).to_string()
+    display.map(str::to_string).unwrap_or_else(|| nerthus_engine::humanize::humanize_title(&port.name))
+}
+
+/// `PortElement` uses its display name even when the node's size hides
+/// the visible label. Collapsed sides stand in for "All Ports".
+fn port_tooltip(editor: &Editor, node: i32, port: &PortLayout) -> String {
+    if port.collapsed {
+        return "All Ports".to_string();
+    }
+    let required = editor.document.node(node).and_then(|node| node.port(&port.name)).is_some_and(PortData::is_required);
+    if required { format!("{} (Required)", port.label) } else { port.label.clone() }
 }
 
 /// The port rows a side takes: a compact or small node shows two at most
@@ -969,6 +979,8 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
             if response.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             }
+            let tooltip = port_tooltip(editor, layout.id, port);
+            let response = response.tooltip_at_pointer(tooltip);
             port_responses.push((index, port.clone(), response));
         }
     }
@@ -1876,21 +1888,15 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
         let tooltip = node_tooltip(editor, id);
         let response = response.clone().tooltip_at_pointer(tooltip);
         if response.clicked() {
-            if modifiers.command || modifiers.shift {
-                editor.toggle_selected(id);
-            } else {
-                state.clear_element_selection();
-                editor.select(Some(id));
-            }
+            select_clicked_node(editor, state, layouts, id, modifiers);
         }
         // `NodeElement.OnMouseDoubleClick`: `CycleNodeSizes`.
         if response.double_clicked() {
             commands.push(Command::CycleNodeSize(id));
         }
         if response.drag_started_by(PointerButton::Primary) && state.drag.is_none() {
-            if !editor.selection.contains(&id) {
-                state.clear_element_selection();
-                editor.select(Some(id));
+            if modifiers.command || modifiers.shift || !editor.selection.contains(&id) {
+                select_clicked_node(editor, state, layouts, id, modifiers);
             }
             let pointer = drag_origin(ui, &response).unwrap_or(origin);
             let pointer_start = view.to_canvas(origin, pointer);
@@ -1899,6 +1905,80 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
         node_menu(&response, editor, id, commands);
     }
     drag_elements(ui, editor, state, layouts, groups, origin);
+}
+
+fn select_clicked_node(editor: &mut Editor, state: &mut GraphState, layouts: &[NodeLayout], node: i32, modifiers: egui::Modifiers) {
+    if modifiers.command {
+        editor.toggle_selected(node);
+        return;
+    }
+    if !modifiers.shift {
+        state.clear_element_selection();
+        editor.select(Some(node));
+        return;
+    }
+
+    // `ShiftDragSelectElement`: retain the selection and fill the clicked
+    // node's parents or children when they contain a selected node. The
+    // first selected node bounds the traversal on either side.
+    let mut selection = editor.selection.clone();
+    if let Some(anchor) = selection.first().copied() {
+        let visible: HashSet<i32> = layouts.iter().map(|layout| layout.id).collect();
+        for upstream in [true, false] {
+            let related = selection_neighbours(editor.document.terrain(), node, anchor, upstream, &visible);
+            let connected = related.iter().any(|id| editor.selection.contains(id));
+            if !connected {
+                continue;
+            }
+            for id in related {
+                if !selection.contains(&id) {
+                    selection.push(id);
+                }
+            }
+        }
+    }
+    if !selection.contains(&node) {
+        selection.push(node);
+    }
+    editor.set_selection(selection);
+}
+
+fn selection_neighbours(terrain: &nerthus_engine::Terrain, start: i32, anchor: i32, upstream: bool, visible: &HashSet<i32>) -> Vec<i32> {
+    let mut adjacency: HashMap<i32, Vec<i32>> = HashMap::new();
+    for node in terrain.nodes.values() {
+        if !visible.contains(&node.id) {
+            continue;
+        }
+        for port in node.ports.iter().filter(|port| port.is_input()) {
+            let Some(record) = &port.record else {
+                continue;
+            };
+            if !visible.contains(&record.from) {
+                continue;
+            }
+            let (from, to) = if upstream { (node.id, record.from) } else { (record.from, node.id) };
+            adjacency.entry(from).or_default().push(to);
+        }
+    }
+
+    let mut related = Vec::new();
+    let mut pending = vec![start];
+    let mut seen = HashSet::from([start]);
+    while let Some(current) = pending.pop() {
+        let Some(neighbours) = adjacency.get(&current) else {
+            continue;
+        };
+        for neighbour in neighbours {
+            if !seen.insert(*neighbour) {
+                continue;
+            }
+            related.push(*neighbour);
+            if *neighbour != anchor {
+                pending.push(*neighbour);
+            }
+        }
+    }
+    related
 }
 
 /// The node's context menu on a right-click of the node or one of its
@@ -2561,6 +2641,45 @@ fn rename_overlay(ui: &mut Ui, state: &mut GraphState, layouts: &[NodeLayout], o
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_click_selects_connecting_nodes_in_both_directions() {
+        let mut document = Document::new();
+        let before = document.add_node("Mountain", [25600.0, 26000.0]).unwrap();
+        let first = document.add_node("Blur", [26000.0, 26000.0]).unwrap();
+        let middle = document.add_node("Blur", [26400.0, 26000.0]).unwrap();
+        let last = document.add_node("Blur", [26800.0, 26000.0]).unwrap();
+        let after = document.add_node("Blur", [27200.0, 26000.0]).unwrap();
+        let separate = document.add_node("Mountain", [26000.0, 26400.0]).unwrap();
+        document.connect(before, "Out", first, "In");
+        document.connect(first, "Out", middle, "In");
+        document.connect(middle, "Out", last, "In");
+        document.connect(last, "Out", after, "In");
+        let layouts: Vec<NodeLayout> = document.terrain().nodes.values().map(|node| layout_node(node, "Standard")).collect();
+        let mut editor = Editor::new(document);
+        let mut state = GraphState::default();
+
+        editor.select(Some(first));
+        select_clicked_node(&mut editor, &mut state, &layouts, last, egui::Modifiers::SHIFT);
+        assert_eq!(editor.selection.len(), 3);
+        assert!(editor.selection.contains(&first) && editor.selection.contains(&middle) && editor.selection.contains(&last));
+        assert!(!editor.selection.contains(&before) && !editor.selection.contains(&after));
+
+        editor.select(Some(last));
+        select_clicked_node(&mut editor, &mut state, &layouts, first, egui::Modifiers::SHIFT);
+        assert_eq!(editor.selection.len(), 3);
+        assert!(editor.selection.contains(&first) && editor.selection.contains(&middle) && editor.selection.contains(&last));
+
+        // Shift adds a disconnected node and never toggles it off.
+        select_clicked_node(&mut editor, &mut state, &layouts, separate, egui::Modifiers::SHIFT);
+        select_clicked_node(&mut editor, &mut state, &layouts, separate, egui::Modifiers::SHIFT);
+        assert_eq!(editor.selection.len(), 4);
+        assert!(editor.selection.contains(&separate));
+        // Ctrl keeps its toggle behavior, including when Shift is held.
+        let control_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        select_clicked_node(&mut editor, &mut state, &layouts, separate, control_shift);
+        assert!(!editor.selection.contains(&separate));
+    }
 
     #[test]
     fn the_shine_sweeps_left_to_right() {
@@ -3271,6 +3390,53 @@ mod tests {
             let tooltip = tooltip_at(&context, &mut editor, &mut state, point, &text);
             assert!(tooltip.distance_to_pos(point) <= 16.0, "{element}'s tooltip {tooltip:?} is far from the pointer {point:?}");
         }
+    }
+
+    #[test]
+    fn ports_show_their_display_names_and_required_inputs_at_every_node_size() {
+        let mut document = Document::new();
+        let id = document.add_node("ErosionPro", [26000.0, 26000.0]).unwrap();
+        let node = document.project.terrain_mut().nodes.get_mut(&id).unwrap();
+        let input = node.ports.iter_mut().find(|port| port.is_input() && port.name != "Mask").unwrap();
+        input.port_type = "PrimaryIn, Required".to_string();
+        input.extra.insert("DisplayName".to_string(), Value::from("Terrain Input"));
+        let input_name = input.name.clone();
+        let editor = Editor::new(document);
+        let node = editor.document.node(id).unwrap();
+        for size in ["Standard", "Compact", "Small"] {
+            let layout = layout_node(node, size);
+            let input = layout.port(&input_name, true).unwrap();
+            let output = layout.port("Out", false).unwrap();
+            assert_eq!(port_tooltip(&editor, id, input), "Terrain Input (Required)");
+            assert_eq!(port_tooltip(&editor, id, output), "Out");
+            if let Some(collapsed) = layout.ports().find(|port| port.collapsed) {
+                assert_eq!(port_tooltip(&editor, id, collapsed), "All Ports");
+            }
+        }
+    }
+
+    #[test]
+    fn node_tooltips_follow_the_name_time_status_and_error_runs() {
+        let mut document = Document::new();
+        let id = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let name = document.node(id).unwrap().name.clone();
+        let mut editor = Editor::new(document);
+        let status = crate::editor::NodeStatus {
+            state: NodeState::Error,
+            milliseconds: 1250.0,
+            error: Some("Missing input".to_string()),
+            ..Default::default()
+        };
+        editor.statuses.insert(id, status);
+        let tooltip = node_tooltip(&editor, id);
+        assert_eq!(tooltip.text, format!("{name}\nBuild time:  1 second\nStatus: Error Missing input"));
+        assert_eq!(tooltip.sections[0].format.font_id, theme::semibold(12.0));
+        let state_start = egui::text::ByteIndex(tooltip.text.find("Error").unwrap());
+        let state_section = tooltip.sections.iter().find(|section| section.byte_range.contains(&state_start)).unwrap();
+        assert_eq!(state_section.format.font_id, theme::semibold(12.0));
+        assert_eq!(tooltip.sections.last().unwrap().format.color, theme::ACCENT_ORANGE);
+        editor.statuses.get_mut(&id).unwrap().building = true;
+        assert!(node_tooltip(&editor, id).text.contains("Status: Is Building"));
     }
 
     /// The names painted, each where its galley starts, how wide it is,
