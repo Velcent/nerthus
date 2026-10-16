@@ -85,6 +85,8 @@ pub enum FileCommand {
     ExportTorlet,
     /// File › Exit, the window's close button.
     Exit,
+    /// A diagnostics restart, after the same save question as Exit.
+    Restart(Vec<String>),
     /// The save question's answers (`SavePromptResult`), and Yes to "Nodes
     /// are building".
     SaveFirst,
@@ -133,6 +135,7 @@ pub enum FileAction {
     Repair,
     Examples,
     Exit,
+    Restart(Vec<String>),
 }
 
 /// A `FileAction` and the questions already answered.

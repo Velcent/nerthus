@@ -4,7 +4,7 @@
 //! a collapsed group's portals, the Lazy Menu (F1) and the node search;
 //! and the colour and icon grids the group, note and tab menus share.
 
-use egui::{Align, Color32, Id, Layout, LayerId, Order, Popup, PopupAnchor, PopupCloseBehavior, PopupKind, Pos2, Rect, Sense, Ui, Vec2};
+use egui::{Align, Color32, Id, Key, KeyboardShortcut, Layout, LayerId, Modifiers, Order, Popup, PopupAnchor, PopupCloseBehavior, PopupKind, Pos2, Rect, Sense, Ui, Vec2};
 use nerthus_engine::humanize::humanize_title;
 use nerthus_engine::Catalogue;
 
@@ -414,8 +414,19 @@ fn lazy_menu(ui: &mut Ui, editor: &Editor, state: &GraphState, commands: &mut Ve
             }
             shown = true;
             let color = if entry_level == 1 { entry.color.gamma_multiply(0.4) } else { entry.color };
-            if menu_item(ui, Some(entry.icon), Some(color), entry.text, "").clicked() {
+            let key = match entry.tag {
+                "render-raw" => Some(Key::Num1),
+                "render-clay" => Some(Key::Num2),
+                "render-realistic" => Some(Key::Num3),
+                _ => None,
+            };
+            let keyed = key.is_some_and(|key| {
+                let shortcut = KeyboardShortcut::new(Modifiers::NONE, key);
+                ui.input_mut(|input| super::consume_key(input, &shortcut, true))
+            });
+            if menu_item(ui, Some(entry.icon), Some(color), entry.text, "").clicked() || keyed {
                 commands.push(Command::Graph(GraphCommand::LazyAction(entry.tag)));
+                ui.close();
             }
         }
         let last = band_index == bands.len() - 1;
@@ -542,4 +553,82 @@ pub fn family_menu(name: &egui::Response, editor: &Editor, node: &nerthus_engine
             commands.push(Command::Graph(GraphCommand::ReplaceSearch));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editor::RenderMode;
+    use crate::ui::UiState;
+
+    /// The same order as the main UI: menus take keys, shell shortcuts
+    /// follow, popups are drawn, then their commands run.
+    fn frame(context: &egui::Context, editor: &mut Editor, ui_state: &mut UiState, key: Option<Key>, modifiers: Modifiers) -> Vec<Command> {
+        let mut events = Vec::new();
+        if let Some(key) = key {
+            events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+        }
+        let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0)));
+        let input = egui::RawInput { screen_rect, events, ..Default::default() };
+        let mut commands = Vec::new();
+        context.run_ui(input, |ui| {
+            crate::ui::menu_keys::begin(ui.ctx());
+            crate::ui::shortcuts(ui.ctx(), true, &mut commands);
+            show(ui, editor, &mut ui_state.graph, &mut commands);
+        }).drop_without_applying_deltas();
+        for command in &commands {
+            if let Command::Graph(graph_command) = command {
+                crate::ui::graph_commands::run(graph_command.clone(), editor, ui_state);
+            }
+        }
+        commands
+    }
+
+    fn open_lazy_menu(context: &egui::Context, editor: &mut Editor, ui_state: &mut UiState) {
+        frame(context, editor, ui_state, Some(Key::F1), Modifiers::NONE);
+        frame(context, editor, ui_state, None, Modifiers::NONE);
+        frame(context, editor, ui_state, None, Modifiers::NONE);
+        assert!(matches!(ui_state.graph.popup, Some(GraphPopup::Lazy { .. })));
+    }
+
+    #[test]
+    fn f1_then_a_number_switches_renderer_and_closes_the_lazy_menu() {
+        let cases = [
+            (Key::Num1, "render-raw", RenderMode::Data),
+            (Key::Num2, "render-clay", RenderMode::Clay),
+            (Key::Num3, "render-realistic", RenderMode::Realistic),
+        ];
+        let context = egui::Context::default();
+        let mut editor = Editor::new(crate::document::Document::new());
+        let mut ui_state = UiState::default();
+        for (key, tag, mode) in cases {
+            open_lazy_menu(&context, &mut editor, &mut ui_state);
+            let commands = frame(&context, &mut editor, &mut ui_state, Some(key), Modifiers::NONE);
+            assert_eq!(commands, [Command::Graph(GraphCommand::LazyAction(tag))]);
+            assert_eq!(editor.render_mode, mode);
+            assert!(ui_state.graph.popup.is_none());
+            // Outside the menu the digit never changes the renderer.
+            assert!(frame(&context, &mut editor, &mut ui_state, Some(Key::Num1), Modifiers::NONE).is_empty());
+            assert_eq!(editor.render_mode, mode);
+        }
+    }
+
+    #[test]
+    fn lazy_renderer_keys_require_visible_entries_and_no_extra_modifiers() {
+        let context = egui::Context::default();
+        let mut editor = Editor::new(crate::document::Document::new());
+        let mut ui_state = UiState::default();
+        open_lazy_menu(&context, &mut editor, &mut ui_state);
+        for modifiers in [Modifiers::ALT, Modifiers::SHIFT, Modifiers::COMMAND] {
+            let commands = frame(&context, &mut editor, &mut ui_state, Some(Key::Num1), modifiers);
+            assert!(!commands.contains(&Command::Graph(GraphCommand::LazyAction("render-raw"))));
+            assert_eq!(editor.render_mode, RenderMode::Realistic);
+            assert!(ui_state.graph.popup.is_some());
+        }
+        editor.user.options.set_value("LazySettings", serde_json::Value::from(0));
+        let commands = frame(&context, &mut editor, &mut ui_state, Some(Key::Num1), Modifiers::NONE);
+        assert!(commands.is_empty());
+        assert_eq!(editor.render_mode, RenderMode::Realistic);
+        assert!(ui_state.graph.popup.is_some());
+    }
 }

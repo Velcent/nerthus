@@ -2,6 +2,8 @@
 
 The Lazy Menu can be brought up anywhere in the primary Nerthus UI by pressing `F1`. The Lazy Menu gives you instant access to various areas of the UI without having to remember specific shortcuts.
 
+With the menu open, press `1` to visualize data, `2` for the clay renderer, or `3` for the realistic renderer. Choosing a renderer closes the menu. These keys are available when the renderer entries are visible.
+
 > [!NOTE]
 > In true lazy fashion, when you use the Lazy Menu to navigate to a section, your cursor will also be moved there!
 >

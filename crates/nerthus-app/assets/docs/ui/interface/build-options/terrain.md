@@ -6,6 +6,10 @@ The **Terrain** tab contains the **Terrain Definition** panel, where you set the
 
 * **Width**: Sets the terrain width in meters.
 * **Height**: Sets the maximum terrain height in meters.
+* **Real scale**: Shows meters per pixel at the current build resolution (width divided by build resolution).
+* **Height-to-width ratio**: Shows height divided by width, also expressed as a percentage.
+
+The measurements update when the dimensions or build resolution change. Preview resolution does not affect them.
 
 Below them, a tip lists the heights of a few well-known mountains, to help you choose a realistic size.
 

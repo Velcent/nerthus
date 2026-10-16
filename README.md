@@ -250,54 +250,20 @@ These parts of Gaea 2.3.1.0 are not in Nerthus yet.
   TileInput doesn't sum up the tiles it found (how many, how they're laid
   out, their size, folder and extension).
 
-### Viewport
-
-- Escape doesn't end picking or measuring in the 2D viewport. Nerthus uses
-  Enter.
-- Dragging the rotate handle of a 2D viewport gizmo doesn't wrap the
-  pointer from the top of the screen to the bottom and back.
-- The sky (Show Skybox) approximates the higher scattering orders of Gaea's
-  precomputed atmosphere, so its colours differ slightly.
-
-### Menus and windows
-
-- Menus have no access keys. Gaea's open with Alt and the underlined letter
-  (Alt F for File), and in the Lazy Menu F1 followed by 1, 2 or 3 switches
-  the renderer. In Nerthus, F10 opens the menus and the arrow keys move
-  through them.
-- Build Settings › Terrain doesn't show the terrain's real scale (metres
-  per pixel at the build resolution) or its height-to-width ratio.
-- About fifteen of Gaea's message boxes are drawn as plain boxes, without
-  the Windows task dialog's layout that the other prompts copy. Examples are
-  the ones for deleting a graph tab or every variable, cleaning up
-  artifacts, optimizing memory, the Nahimic warning and the update check.
-- Run Diagnostics has no Run in Safe Mode task. It has no High Accuracy (20
-  passes) or Very High Accuracy (50 passes) benchmark, and no warning when
-  a newer version is known. Its packages leave out the hardware report, the
-  list of the program's files and the running processes. Once a package is
-  made, there is no package viewer and no copy to the desktop.
-
 ### Files
 
-- Some images the File node reads differently from Gaea:
-  - SVG drawings are drawn by resvg rather than librsvg and cairo, so their
-    edges are antialiased a little differently.
-  - Camera raw files other than DNG (CR2, CR3, CRW, NEF, ARW, ORF, RAF,
-    RW2, PEF, SRW and so on) don't open yet. The port of LibRaw's
-    format-specific path that reads them is underway in
-    `crates/nerthus-io/src/coders/dng/tiff.rs` (unwired) and
-    `crates/nerthus-io/src/coders/dng/state.rs`, with the camera maker
-    notes, per-camera decoders and the post-open fix-ups still to write;
-    the DNG-only path, which opens DNG files exactly, is what's wired in.
-    Neither do a few rarer DNGs, such as Fuji SuperCCD ones, and a DNG
-    without a colour matrix of its own stays in the camera's colours,
-    where Gaea takes the camera's matrix from LibRaw's table.
-  - JPEG XL files don't open (Gaea links libjxl).
-  - PES embroidery files don't open (Gaea imports them as SVG drawings).
-  - TrueType and OpenType font files don't open (Gaea links FreeType and
-    prints a spec sheet of the glyphs through it).
-  - H.264-encoded HEIF and AVIF images don't open (Gaea links OpenH264;
-    H.265/HEVC and AV1 ones do open).
+- Camera raw files other than DNG (CR2, CR3, CRW, NEF, ARW, ORF, RAF,
+  RW2, PEF, SRW and so on) don't open yet. The port of LibRaw's
+  format-specific path that reads them is underway in
+  `crates/nerthus-io/src/coders/dng/camera-raw-meta.rs` and
+  `crates/nerthus-io/src/coders/dng/camera-raw.rs`, with the maker
+  notes carried maker by maker (Canon, Nikon, Sony, Fujifilm, Olympus,
+  Panasonic, Pentax and Samsung are each checked against the reference
+  engine's own numbers) and the pixel loaders still to wire in; the
+  DNG-only path, which opens DNG files exactly, is what's wired in. Nor do a few rarer DNGs, such as Fuji
+  SuperCCD ones, and a DNG without a colour matrix of its own stays in
+  the camera's colours, where Gaea takes the camera's matrix from
+  LibRaw's table.
 
 ### Builds
 

@@ -1278,7 +1278,7 @@ fn normalized_make(make: &str) -> &str {
 }
 
 /// The model without the maker's name in front of it.
-fn normalized_model(make: &str, model: &str) -> String {
+pub(super) fn normalized_model(make: &str, model: &str) -> String {
     let model = model.trim_end();
     let length = make.len();
     if model.get(..length).is_some_and(|prefix| prefix.eq_ignore_ascii_case(make)) && model.as_bytes().get(length) == Some(&b' ') {

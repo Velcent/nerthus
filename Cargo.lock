@@ -4817,6 +4817,7 @@ dependencies = [
  "bevy_egui",
  "chrono",
  "crossbeam-channel",
+ "directories",
  "egui",
  "egui_extras",
  "embed-resource",
@@ -5045,6 +5046,8 @@ name = "nerthus-render"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "flate2",
+ "half",
  "nerthus-engine",
 ]
 

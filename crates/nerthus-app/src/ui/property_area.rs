@@ -21,8 +21,9 @@ use crate::ui::editors::{self, palette_color, Edit, EditorContext};
 use crate::ui::graph_canvas::{node_color, node_icon};
 use crate::ui::modifier_list::modifier_list;
 use crate::ui::node_states::{self, StateAction};
+use crate::ui::prompt::{task_button, task_link, TaskDialog};
 use crate::ui::tool_commands::ToolCommand;
-use crate::ui::widgets::{check_item, dialog, icon_menu, icon_menu_sized, link_button, menu_caption, menu_item, menu_item_enabled, menu_separator, submenu, toolbar_background, Tooltips};
+use crate::ui::widgets::{check_item, icon_menu, icon_menu_sized, link_button, menu_caption, menu_item, menu_item_enabled, menu_separator, submenu, toolbar_background, Tooltips};
 use nerthus_engine::automation::VarType;
 
 /// `ModifierStack`'s margin (0.2, 0, 0, 0) and its `WrapPanel`'s (4).
@@ -1117,28 +1118,30 @@ fn dialogs_id() -> egui::Id {
 fn parameter_dialogs(ui: &mut Ui, editor: &mut Editor) {
     let mut dialogs: ParameterDialogs = ui.data(|data| data.get_temp(dialogs_id())).unwrap_or_default();
     if let Some((node, property)) = dialogs.unbind.clone() {
-        let modal = dialog(ui.ctx(), egui::Id::new("unbind-variable"));
-        let response = modal.show(ui.ctx(), |ui| {
-            ui.set_width(360.0);
-            ui.label(RichText::new(format!("Unbind {property} and delete variable?")).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
-            ui.add_space(6.0);
-            ui.label(format!("You are about to unbind {property}. You can choose to keep the underlying variable it was bound to, or delete it."));
-            ui.label(RichText::new("If you delete the variable, it will unbind any other properties it was bound to.").color(theme::ICON_DEFAULT));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Unbind only").clicked() {
+        let heading = format!("Unbind {property} and delete variable?");
+        let modal = TaskDialog::new(ui.ctx(), egui::Id::new("unbind-variable"), 380.0);
+        let response = modal.show(ui.ctx(), |ui, task| {
+            task.body(ui, &heading, false, |ui| {
+                ui.add(egui::Label::new(format!("You are about to unbind {property}. You can choose to keep the underlying variable it was bound to, or delete it.")).wrap());
+                if task_link(ui, "Unbind only", "Keep the underlying variable.").clicked() {
                     editor.document.unbind(node, &property, false);
                     editor.changed();
                     dialogs.unbind = None;
                 }
-                if ui.button("Unbind and delete variable").clicked() {
+                if task_link(ui, "Unbind and delete variable", "Remove the underlying variable from the project.").clicked() {
                     editor.document.unbind(node, &property, true);
                     editor.changed();
                     dialogs.unbind = None;
                 }
-                if ui.button("Cancel").clicked() {
+            });
+            task.buttons(ui, |ui| {
+                if task_button(ui, "Cancel").clicked() {
                     dialogs.unbind = None;
                 }
+            });
+            task.footer(ui, |ui| {
+                let warning = "If you delete the variable, it will unbind any other properties it was bound to.";
+                ui.add(egui::Label::new(RichText::new(warning).color(theme::ACCENT_YELLOW)).wrap());
             });
         });
         if response.should_close() {

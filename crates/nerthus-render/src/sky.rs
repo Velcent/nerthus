@@ -7,12 +7,11 @@
 //! in the colour of the sky at the horizon. Off, the camera clears to the
 //! viewport background.
 //!
-//! Nerthus works the same atmosphere out on the CPU: a transmittance
-//! table, Hillaire's multiple-scattering table (for Bruneton's higher
-//! scattering orders), then the sky by elevation and angle to the sun
-//! from the camera's height, spread over a dome round the camera, with
-//! the sun's disc in front of it. A thread does the work when the sun or
-//! the camera's height changes.
+//! Nerthus samples the same four-order Bruneton atmosphere, precomputed
+//! into half-precision tables with Gaea's dimensions and atmosphere
+//! parameters. A worker samples these by elevation and angle to the sun
+//! from the camera's height and spreads the result over a dome, with the
+//! sun's disc in front of it.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::OnceLock;
@@ -30,20 +29,19 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use crate::terrain::ViewportSettings;
 use crate::ViewportCamera;
 
-/// The planet and the top of its atmosphere (`kBottomRadius`,
-/// `topRadius`), in metres.
+#[path = "sky-atmosphere.rs"]
+mod precomputed;
+
+use precomputed::PrecomputedAtmosphere;
+
+/// The planet's radius (`kBottomRadius`), in metres.
 const BOTTOM_RADIUS: f32 = 6_360_000.0;
-const TOP_RADIUS: f32 = 6_420_000.0;
-const RAYLEIGH_SCALE_HEIGHT: f32 = 8000.0;
-const MIE_SCALE_HEIGHT: f32 = 1200.0;
 const MIE_PHASE_G: f32 = 0.8;
 /// `kSunAngularRadius`, radians.
 const SUN_ANGULAR_RADIUS: f32 = 0.004675;
 /// The scene's `Demo.Exposure` (without luminance).
 const EXPOSURE: f32 = 8.0;
-/// The ground the multiple scattering bounces off (`GroundAlbedo`), and
-/// the ground shown below the horizon (Bruneton's demo's dark sea).
-const MODEL_GROUND_ALBEDO: f32 = 0.1;
+/// The ground shown below the horizon (Bruneton's demo's dark sea).
 const SHOWN_GROUND_ALBEDO: [f32; 3] = [0.0, 0.0, 0.04];
 /// The wavelengths rendered without luminance (`kLambdaR`, `G`, `B`), nm.
 const WAVELENGTHS: [f32; 3] = [680.0, 550.0, 440.0];
@@ -59,19 +57,8 @@ const SOLAR_IRRADIANCE: [f32; 48] = [
     1.11776, 1.14259, 1.01249, 1.14716, 1.72765, 1.73054, 1.6887, 1.61253, 1.91198, 2.03474, 2.02042, 2.02212, 1.93377, 1.95809, 1.91686, 1.8298, 1.8685, 1.8931, 1.85149, 1.8504, 1.8341, 1.8345, 1.8147, 1.78158,
     1.7533, 1.6965, 1.68194, 1.64654, 1.6048, 1.52143, 1.55622, 1.5113, 1.474, 1.4482, 1.41018, 1.36775, 1.34188, 1.31429, 1.28303, 1.26758, 1.2367, 1.2082, 1.18737, 1.14683, 1.12362, 1.1058, 1.07124, 1.04992,
 ];
-/// Ozone's absorption cross section at the three wavelengths (m²), and
-/// its peak number density (300 Dobson units over 15 km).
-const OZONE_CROSS_SECTION: [f32; 3] = [1.209e-25, 3.5e-25, 1.582e-26];
-const OZONE_PEAK_DENSITY: f32 = 300.0 * 2.687e20 / 15000.0;
-
-/// The tables' sizes.
-const TRANSMITTANCE_HEIGHTS: usize = 64;
-const TRANSMITTANCE_ANGLES: usize = 256;
-const MULTIPLE_SIZE: usize = 32;
-const MULTIPLE_DIRECTIONS: usize = 64;
 const SKY_ELEVATIONS: usize = 192;
 const SKY_AZIMUTHS: usize = 48;
-const RAY_STEPS: usize = 40;
 /// The dome's texture (azimuth by elevation) and its mesh.
 const DOME_WIDTH: usize = 1024;
 const DOME_HEIGHT: usize = 512;
@@ -84,9 +71,6 @@ type Rgb = [f32; 3];
 /// The Earth atmosphere (`Demo.Awake`) at the three wavelengths.
 struct Atmosphere {
     rayleigh: Rgb,
-    mie_scattering: f32,
-    mie_extinction: f32,
-    ozone: Rgb,
     solar: Rgb,
     white_point: Rgb,
 }
@@ -94,67 +78,13 @@ struct Atmosphere {
 impl Atmosphere {
     fn earth() -> Self {
         let rayleigh = WAVELENGTHS.map(|lambda| 6.2031e-7 * (lambda / 1000.0).powi(-4));
-        let mie_extinction = 0.005328 / MIE_SCALE_HEIGHT;
-        let ozone = OZONE_CROSS_SECTION.map(|section| section * OZONE_PEAK_DENSITY);
         let solar = WAVELENGTHS.map(|lambda| SOLAR_IRRADIANCE[((lambda - 360.0) / 10.0) as usize]);
-        Self { rayleigh, mie_scattering: 0.9 * mie_extinction, mie_extinction, ozone, solar, white_point: white_point() }
+        // Demo.DoWhiteBalance: Model.ConvertSpectrumToLinearSrgb using
+        // Bruneton's tabulated CIE 1931 matching functions, normalized by
+        // the mean. An analytic fit introduces a visible colour shift.
+        let white_point = [1.082_414_4, 0.967_555_9, 0.950_029_73];
+        Self { rayleigh, solar, white_point }
     }
-
-    /// Extinction and the two scatterings at a height (metres).
-    fn medium(&self, height: f32) -> (Rgb, Rgb, f32) {
-        let rayleigh_density = (-height / RAYLEIGH_SCALE_HEIGHT).exp();
-        let mie_density = (-height / MIE_SCALE_HEIGHT).exp();
-        let ozone_density = if height < 25_000.0 { height / 15_000.0 - 2.0 / 3.0 } else { -height / 15_000.0 + 8.0 / 3.0 };
-        let ozone_density = ozone_density.clamp(0.0, 1.0);
-        let rayleigh = self.rayleigh.map(|beta| beta * rayleigh_density);
-        let mie = self.mie_scattering * mie_density;
-        let mut extinction = [0.0; 3];
-        for channel in 0..3 {
-            extinction[channel] = rayleigh[channel] + self.mie_extinction * mie_density + self.ozone[channel] * ozone_density;
-        }
-        (extinction, rayleigh, mie)
-    }
-}
-
-/// `ConvertSpectrumToLinearSrgb` of the solar spectrum over its mean: the
-/// sun's colour, which the sky is divided by (`DoWhiteBalance`). The CIE
-/// 1931 matching functions are Wyman, Sloan and Shirley's fit.
-fn white_point() -> Rgb {
-    let lobe = |lambda: f32, centre: f32, below: f32, above: f32| {
-        let spread = if lambda < centre { below } else { above };
-        (-0.5 * ((lambda - centre) / spread).powi(2)).exp()
-    };
-    let mut xyz = [0.0f32; 3];
-    for step in 0..470 {
-        let lambda = 360.0 + step as f32;
-        let index = ((lambda - 360.0) / 10.0) as usize;
-        let fraction = (lambda - 360.0) / 10.0 - index as f32;
-        let next = (index + 1).min(SOLAR_IRRADIANCE.len() - 1);
-        let value = SOLAR_IRRADIANCE[index] * (1.0 - fraction) + SOLAR_IRRADIANCE[next] * fraction;
-        let x = 1.056 * lobe(lambda, 599.8, 37.9, 31.0) + 0.362 * lobe(lambda, 442.0, 16.0, 26.7) - 0.065 * lobe(lambda, 501.1, 20.4, 26.2);
-        let y = 0.821 * lobe(lambda, 568.8, 46.9, 40.5) + 0.286 * lobe(lambda, 530.9, 16.3, 31.1);
-        let z = 1.217 * lobe(lambda, 437.0, 11.8, 36.0) + 0.681 * lobe(lambda, 459.0, 26.0, 13.8);
-        xyz[0] += value * x;
-        xyz[1] += value * y;
-        xyz[2] += value * z;
-    }
-    let red = 3.2406 * xyz[0] - 1.5372 * xyz[1] - 0.4986 * xyz[2];
-    let green = -0.9689 * xyz[0] + 1.8758 * xyz[1] + 0.0415 * xyz[2];
-    let blue = 0.0557 * xyz[0] - 0.204 * xyz[1] + 1.057 * xyz[2];
-    let mean = (red + green + blue) / 3.0;
-    [red / mean, green / mean, blue / mean]
-}
-
-/// Where a ray from radius `radius` at cosine `mu` (to the zenith) leaves
-/// the atmosphere, and where it meets the ground if it does.
-fn distance_to_top(radius: f32, mu: f32) -> f32 {
-    let discriminant = radius * radius * (mu * mu - 1.0) + TOP_RADIUS * TOP_RADIUS;
-    (-radius * mu + discriminant.max(0.0).sqrt()).max(0.0)
-}
-
-fn distance_to_ground(radius: f32, mu: f32) -> Option<f32> {
-    let discriminant = radius * radius * (mu * mu - 1.0) + BOTTOM_RADIUS * BOTTOM_RADIUS;
-    (mu < 0.0 && discriminant >= 0.0).then(|| (-radius * mu - discriminant.sqrt()).max(0.0))
 }
 
 fn add(left: Rgb, right: Rgb) -> Rgb {
@@ -180,14 +110,12 @@ fn mie_phase(nu: f32) -> f32 {
     k * (1.0 + nu * nu) / (1.0 + g * g - 2.0 * g * nu).max(1e-6).powf(1.5)
 }
 
-/// The tables that do not depend on the sun or the camera.
+/// The tables that do not depend on the sun or the camera. Their expensive
+/// precomputation is shipped with the renderer; loading and sampling them
+/// happens on the sky worker, once per process.
 struct Tables {
     atmosphere: Atmosphere,
-    transmittance: Vec<Rgb>,
-    multiple: Vec<Rgb>,
-    /// The sky's light on the ground by the sun's cosine, for the ground
-    /// shown below the horizon.
-    ground_irradiance: Vec<Rgb>,
+    precomputed: PrecomputedAtmosphere,
 }
 
 fn tables() -> &'static Tables {
@@ -197,207 +125,13 @@ fn tables() -> &'static Tables {
 
 impl Tables {
     fn new() -> Self {
-        let mut tables = Tables {
-            atmosphere: Atmosphere::earth(),
-            transmittance: Vec::new(),
-            multiple: vec![[0.0; 3]; MULTIPLE_SIZE * MULTIPLE_SIZE],
-            ground_irradiance: vec![[0.0; 3]; MULTIPLE_SIZE],
-        };
-        tables.transmittance = tables.build_transmittance();
-        tables.multiple = tables.build_multiple();
-        tables.ground_irradiance = tables.build_ground_irradiance();
-        tables
+        Self { atmosphere: Atmosphere::earth(), precomputed: PrecomputedAtmosphere::load() }
     }
 
-    /// Transmittance to the top of the atmosphere, laid out as Bruneton
-    /// lays it out (height by distance to the top).
-    fn build_transmittance(&self) -> Vec<Rgb> {
-        let mut table = Vec::with_capacity(TRANSMITTANCE_HEIGHTS * TRANSMITTANCE_ANGLES);
-        for row in 0..TRANSMITTANCE_HEIGHTS {
-            for column in 0..TRANSMITTANCE_ANGLES {
-                let x_mu = column as f32 / (TRANSMITTANCE_ANGLES - 1) as f32;
-                let x_r = row as f32 / (TRANSMITTANCE_HEIGHTS - 1) as f32;
-                let (radius, mu) = transmittance_parameters(x_mu, x_r);
-                table.push(self.integrate_transmittance(radius, mu));
-            }
-        }
-        table
-    }
-
-    fn integrate_transmittance(&self, radius: f32, mu: f32) -> Rgb {
-        let length = distance_to_top(radius, mu);
-        let step = length / RAY_STEPS as f32;
-        let mut depth = [0.0f32; 3];
-        for sample in 0..RAY_STEPS {
-            let distance = (sample as f32 + 0.5) * step;
-            let height = (distance * distance + 2.0 * radius * mu * distance + radius * radius).sqrt() - BOTTOM_RADIUS;
-            let (extinction, _, _) = self.atmosphere.medium(height);
-            depth = add(depth, scale(extinction, step));
-        }
-        depth.map(|value| (-value).exp())
-    }
-
-    /// Transmittance from `radius` to the top, looking at cosine `mu`.
-    fn transmittance(&self, radius: f32, mu: f32) -> Rgb {
-        let (x_mu, x_r) = transmittance_coordinates(radius, mu);
-        let column = x_mu * (TRANSMITTANCE_ANGLES - 1) as f32;
-        let row = x_r * (TRANSMITTANCE_HEIGHTS - 1) as f32;
-        bilinear(&self.transmittance, TRANSMITTANCE_ANGLES, TRANSMITTANCE_HEIGHTS, column, row)
-    }
-
-    /// Transmittance to the sun, faded as it sets behind the horizon
-    /// (`GetTransmittanceToSun`).
-    fn transmittance_to_sun(&self, radius: f32, mu_sun: f32) -> Rgb {
-        let sin_horizon = BOTTOM_RADIUS / radius;
-        let cos_horizon = -(1.0 - sin_horizon * sin_horizon).max(0.0).sqrt();
-        let edge = sin_horizon * SUN_ANGULAR_RADIUS;
-        let t = ((mu_sun - cos_horizon + edge) / (2.0 * edge)).clamp(0.0, 1.0);
-        let visible = t * t * (3.0 - 2.0 * t);
-        scale(self.transmittance(radius, mu_sun), visible)
-    }
-
-    /// Hillaire's multiple scattering table: by height and the sun's
-    /// cosine, the light scattered twice or more, isotropic, per unit of
-    /// scattering.
-    fn build_multiple(&self) -> Vec<Rgb> {
-        let directions = sphere_directions(MULTIPLE_DIRECTIONS);
-        let mut table = Vec::with_capacity(MULTIPLE_SIZE * MULTIPLE_SIZE);
-        let isotropic = 1.0 / (4.0 * std::f32::consts::PI);
-        for row in 0..MULTIPLE_SIZE {
-            let height = (row as f32 + 0.5) / MULTIPLE_SIZE as f32 * (TOP_RADIUS - BOTTOM_RADIUS);
-            let radius = BOTTOM_RADIUS + height;
-            for column in 0..MULTIPLE_SIZE {
-                let mu_sun = -1.0 + 2.0 * (column as f32 + 0.5) / MULTIPLE_SIZE as f32;
-                let sun = Vec3::new((1.0 - mu_sun * mu_sun).max(0.0).sqrt(), mu_sun, 0.0);
-                let mut second = [0.0f32; 3];
-                let mut transfer = [0.0f32; 3];
-                for direction in &directions {
-                    let (light, fraction) = self.second_order(radius, *direction, sun, isotropic);
-                    second = add(second, light);
-                    transfer = add(transfer, fraction);
-                }
-                let count = directions.len() as f32;
-                let mut entry = [0.0; 3];
-                for channel in 0..3 {
-                    let mean_second = second[channel] / count;
-                    let mean_transfer = (transfer[channel] / count).min(0.99);
-                    entry[channel] = mean_second / (1.0 - mean_transfer);
-                }
-                table.push(entry);
-            }
-        }
-        table
-    }
-
-    /// Along one direction from height `radius`: the light scattered once
-    /// towards the point (isotropically), the ground's too, and how much
-    /// of any light scattering gives back.
-    fn second_order(&self, radius: f32, direction: Vec3, sun: Vec3, isotropic: f32) -> (Rgb, Rgb) {
-        let mu = direction.y;
-        let ground = distance_to_ground(radius, mu);
-        let length = ground.unwrap_or_else(|| distance_to_top(radius, mu));
-        let steps = RAY_STEPS / 2;
-        let step = length / steps as f32;
-        let origin = Vec3::new(0.0, radius, 0.0);
-        let mut light = [0.0f32; 3];
-        let mut transfer = [0.0f32; 3];
-        let mut transmittance = [1.0f32; 3];
-        for sample in 0..steps {
-            let point = origin + direction * ((sample as f32 + 0.5) * step);
-            let point_radius = point.length();
-            let (extinction, rayleigh, mie) = self.atmosphere.medium(point_radius - BOTTOM_RADIUS);
-            let to_sun = self.transmittance_to_sun(point_radius, point.dot(sun) / point_radius);
-            for channel in 0..3 {
-                let scattering = rayleigh[channel] + mie;
-                let segment = (-extinction[channel] * step).exp();
-                let integral = transmittance[channel] * (1.0 - segment) / extinction[channel].max(1e-12);
-                light[channel] += integral * scattering * self.atmosphere.solar[channel] * to_sun[channel] * isotropic;
-                transfer[channel] += integral * scattering;
-                transmittance[channel] *= segment;
-            }
-        }
-        if ground.is_some() {
-            let point = origin + direction * length;
-            let normal = point.normalize();
-            let cos_sun = normal.dot(sun);
-            let to_sun = self.transmittance_to_sun(BOTTOM_RADIUS, cos_sun);
-            for channel in 0..3 {
-                let irradiance = self.atmosphere.solar[channel] * to_sun[channel] * cos_sun.max(0.0);
-                light[channel] += transmittance[channel] * irradiance * MODEL_GROUND_ALBEDO / std::f32::consts::PI;
-            }
-        }
-        (light, transfer)
-    }
-
-    fn multiple_scattering(&self, radius: f32, mu_sun: f32) -> Rgb {
-        let row = ((radius - BOTTOM_RADIUS) / (TOP_RADIUS - BOTTOM_RADIUS) * MULTIPLE_SIZE as f32 - 0.5).clamp(0.0, (MULTIPLE_SIZE - 1) as f32);
-        let column = ((mu_sun + 1.0) / 2.0 * MULTIPLE_SIZE as f32 - 0.5).clamp(0.0, (MULTIPLE_SIZE - 1) as f32);
-        bilinear(&self.multiple, MULTIPLE_SIZE, MULTIPLE_SIZE, column, row)
-    }
-
-    /// The sky's light falling on the ground, by the sun's cosine.
-    fn build_ground_irradiance(&self) -> Vec<Rgb> {
-        let directions: Vec<Vec3> = sphere_directions(64).into_iter().filter(|direction| direction.y > 0.0).collect();
-        let mut table = Vec::with_capacity(MULTIPLE_SIZE);
-        for column in 0..MULTIPLE_SIZE {
-            let mu_sun = -1.0 + 2.0 * (column as f32 + 0.5) / MULTIPLE_SIZE as f32;
-            let sun = Vec3::new((1.0 - mu_sun * mu_sun).max(0.0).sqrt(), mu_sun, 0.0);
-            let mut irradiance = [0.0f32; 3];
-            for direction in &directions {
-                let (radiance, _) = self.sky_radiance(BOTTOM_RADIUS + 1.0, *direction, sun, false);
-                irradiance = add(irradiance, scale(radiance, direction.y));
-            }
-            // The hemisphere's solid angle over the directions taken.
-            table.push(scale(irradiance, 2.0 * std::f32::consts::PI / directions.len() as f32));
-        }
-        table
-    }
-
-    fn ground_irradiance(&self, mu_sun: f32) -> Rgb {
-        let column = ((mu_sun + 1.0) / 2.0 * MULTIPLE_SIZE as f32 - 0.5).clamp(0.0, (MULTIPLE_SIZE - 1) as f32);
-        bilinear(&self.ground_irradiance, MULTIPLE_SIZE, 1, column, 0.0)
-    }
-
-    /// The light reaching the camera at `radius` along `view` with the sun
-    /// towards `sun` (`GetSkyRadiance`, or the ground's when the view
-    /// meets it), and the transmittance along the view.
+    /// The reference's GetSkyRadiance, including its separate Rayleigh and
+    /// Cornette-Shanks Mie phase functions and optional ground shading.
     fn sky_radiance(&self, radius: f32, view: Vec3, sun: Vec3, show_ground: bool) -> (Rgb, Rgb) {
-        let mu = view.y;
-        let ground = distance_to_ground(radius, mu);
-        let length = ground.unwrap_or_else(|| distance_to_top(radius, mu));
-        let step = length / RAY_STEPS as f32;
-        let origin = Vec3::new(0.0, radius, 0.0);
-        let nu = view.dot(sun);
-        let rayleigh_phase = rayleigh_phase(nu);
-        let mie_phase = mie_phase(nu);
-        let mut radiance = [0.0f32; 3];
-        let mut transmittance = [1.0f32; 3];
-        for sample in 0..RAY_STEPS {
-            let point = origin + view * ((sample as f32 + 0.5) * step);
-            let point_radius = point.length();
-            let mu_sun = point.dot(sun) / point_radius;
-            let (extinction, rayleigh, mie) = self.atmosphere.medium(point_radius - BOTTOM_RADIUS);
-            let to_sun = self.transmittance_to_sun(point_radius, mu_sun);
-            let multiple = self.multiple_scattering(point_radius, mu_sun);
-            for channel in 0..3 {
-                let single = self.atmosphere.solar[channel] * to_sun[channel] * (rayleigh[channel] * rayleigh_phase + mie * mie_phase);
-                let source = single + (rayleigh[channel] + mie) * multiple[channel];
-                let segment = (-extinction[channel] * step).exp();
-                radiance[channel] += transmittance[channel] * source * (1.0 - segment) / extinction[channel].max(1e-12);
-                transmittance[channel] *= segment;
-            }
-        }
-        if show_ground && ground.is_some() {
-            let point = origin + view * length;
-            let cos_sun = point.normalize().dot(sun);
-            let to_sun = self.transmittance_to_sun(BOTTOM_RADIUS, cos_sun);
-            let sky = self.ground_irradiance(cos_sun);
-            for channel in 0..3 {
-                let irradiance = self.atmosphere.solar[channel] * to_sun[channel] * cos_sun.max(0.0) + sky[channel];
-                radiance[channel] += transmittance[channel] * irradiance * SHOWN_GROUND_ALBEDO[channel] / std::f32::consts::PI;
-            }
-        }
-        (radiance, transmittance)
+        self.precomputed.sky_radiance(&self.atmosphere, radius, view, sun, show_ground)
     }
 
     /// The shader's last step: `pow(1 - exp(-radiance / white_point *
@@ -410,43 +144,6 @@ impl Tables {
         }
         colour
     }
-}
-
-/// Bruneton's transmittance table coordinates from radius and cosine.
-fn transmittance_coordinates(radius: f32, mu: f32) -> (f32, f32) {
-    let horizon = (TOP_RADIUS * TOP_RADIUS - BOTTOM_RADIUS * BOTTOM_RADIUS).sqrt();
-    let rho = (radius * radius - BOTTOM_RADIUS * BOTTOM_RADIUS).max(0.0).sqrt();
-    let distance = distance_to_top(radius, mu);
-    let nearest = TOP_RADIUS - radius;
-    let farthest = rho + horizon;
-    let x_mu = ((distance - nearest) / (farthest - nearest).max(1.0)).clamp(0.0, 1.0);
-    let x_r = (rho / horizon).clamp(0.0, 1.0);
-    (x_mu, x_r)
-}
-
-/// The radius and cosine a transmittance table cell stands for.
-fn transmittance_parameters(x_mu: f32, x_r: f32) -> (f32, f32) {
-    let horizon = (TOP_RADIUS * TOP_RADIUS - BOTTOM_RADIUS * BOTTOM_RADIUS).sqrt();
-    let rho = horizon * x_r;
-    let radius = (rho * rho + BOTTOM_RADIUS * BOTTOM_RADIUS).sqrt();
-    let nearest = TOP_RADIUS - radius;
-    let farthest = rho + horizon;
-    let distance = nearest + x_mu * (farthest - nearest);
-    let mu = if distance <= 0.0 { 1.0 } else { ((horizon * horizon - rho * rho - distance * distance) / (2.0 * radius * distance)).clamp(-1.0, 1.0) };
-    (radius, mu)
-}
-
-/// Evenly spread directions over the sphere (a Fibonacci spiral).
-fn sphere_directions(count: usize) -> Vec<Vec3> {
-    let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
-    (0..count)
-        .map(|index| {
-            let y = 1.0 - 2.0 * (index as f32 + 0.5) / count as f32;
-            let ring = (1.0 - y * y).max(0.0).sqrt();
-            let angle = golden * index as f32;
-            Vec3::new(ring * angle.cos(), y, ring * angle.sin())
-        })
-        .collect()
 }
 
 fn bilinear(table: &[Rgb], width: usize, height: usize, column: f32, row: f32) -> Rgb {
@@ -524,8 +221,8 @@ impl SkyTable {
     }
 }
 
-/// The elevation a table row stands for: rows bunch round the horizon
-/// (Hillaire's sky-view mapping), which sits `dip` below level.
+/// The dome's elevation samples bunch round the horizon, `dip` below level.
+/// This mapping resamples the precomputed atmosphere for the dome texture.
 fn table_elevation(row: usize, dip: f32) -> f32 {
     let t = row as f32 / (SKY_ELEVATIONS - 1) as f32 * 2.0 - 1.0;
     let half_pi = std::f32::consts::FRAC_PI_2;
@@ -830,14 +527,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transmittance_coordinates_invert() {
-        for (radius, mu) in [(BOTTOM_RADIUS + 1000.0, 0.3), (BOTTOM_RADIUS + 20_000.0, -0.05), (BOTTOM_RADIUS + 100.0, 0.95)] {
-            let (x_mu, x_r) = transmittance_coordinates(radius, mu);
-            let (back_radius, back_mu) = transmittance_parameters(x_mu, x_r);
-            assert!((back_radius - radius).abs() < 1.0, "{radius} came back as {back_radius}");
-            assert!((back_mu - mu).abs() < 1e-3, "{mu} came back as {back_mu}");
+    fn sky_elevation_coordinates_invert() {
+        for row in [0, 57, 95, 96, 150, SKY_ELEVATIONS - 1] {
+            let elevation = table_elevation(row, 0.05);
+            assert!((table_row(elevation, 0.05) - row as f32).abs() < 1e-3);
         }
-        assert!((table_row(table_elevation(57, 0.05), 0.05) - 57.0).abs() < 1e-3);
     }
 
     /// `NERTHUS_SKY_PPM=<folder>` writes the dome's texture for a few suns

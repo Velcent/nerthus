@@ -16,15 +16,14 @@ use serde_json::Value;
 use crate::editor::Editor;
 use crate::theme;
 use crate::ui::commands::Command;
+use crate::ui::gizmo_pointer;
 
 /// `Color`'s default: purple (188, 0, 255).
 const GIZMO_COLOUR: Color32 = Color32::from_rgb(188, 0, 255);
-/// `ScaleStep`, `HeightStepPerPixel`, `RotateStepPerPixel` and
-/// `RotateSnapDegrees`.
+/// `ScaleStep` and `HeightStepPerPixel` (rotation's shared steps and
+/// screen wrapping are in `gizmo_pointer`).
 const SCALE_STEP: f32 = 0.01;
 const HEIGHT_STEP: f32 = 0.005;
-const ROTATE_STEP: f32 = 0.5;
-const ROTATE_SNAP: f32 = 15.0;
 /// The scale ring (`ScaleHandle`): 83 across, 4 thick.
 const RING_OUTER: f32 = 41.0;
 const RING_INNER: f32 = 37.0;
@@ -174,8 +173,8 @@ struct GizmoDrag {
     offset: Vec2,
     /// `_scaleDir`: the ring's left half scales the other way.
     scale_direction: f32,
-    /// `_rawRotateDegrees`.
-    raw_rotate: f32,
+    /// Rotation reads native screen pixels, independently of UI zoom.
+    rotation: gizmo_pointer::RotationDrag,
 }
 
 /// The gizmo of the node it was turned on for.
@@ -291,6 +290,7 @@ pub fn gizmo_layer(ui: &mut Ui, image: Rect, clip: Rect, zoom: f32, node: &NodeD
 
     // `Handle_MouseLeftButtonDown`.
     let pointer = ui.input(|input| input.pointer.interact_pos());
+    let native_pointer = gizmo_pointer::pointer_frame(ui.ctx());
     let pressed = |response: &Option<egui::Response>| response.as_ref().is_some_and(|response| response.drag_started_by(egui::PointerButton::Primary));
     let mut started = false;
     if state.drag.is_none()
@@ -310,13 +310,29 @@ pub fn gizmo_layer(ui: &mut Ui, image: Rect, clip: Rect, zoom: f32, node: &NodeD
         if let Some(handle) = handle {
             let offset = (pointer - centre) / image.width();
             let scale_direction = if pointer.x < centre.x { -1.0 } else { 1.0 };
-            state.drag = Some(GizmoDrag { handle, start_pointer: pointer, start_pose: state.pose, offset, scale_direction, raw_rotate: state.pose.rotate });
+            let rotate_start_pointer = native_pointer.map(|frame| frame.position).unwrap_or(pointer * ui.ctx().pixels_per_point());
+            let rotation = gizmo_pointer::RotationDrag::new(rotate_start_pointer, state.pose.rotate);
+            let drag = GizmoDrag {
+                handle,
+                start_pointer: pointer,
+                start_pose: state.pose,
+                offset,
+                scale_direction,
+                rotation,
+            };
+            state.drag = Some(drag);
             started = true;
         }
     }
     let drag = state.drag.clone()?;
     let still_down = ui.input(|input| input.pointer.primary_down());
     let modifiers = ui.input(|input| input.modifiers);
+    let pointer = pointer.or_else(|| {
+        if drag.handle != Handle::Rotate {
+            return None;
+        }
+        native_pointer.map(|frame| frame.position / ui.ctx().pixels_per_point())
+    });
     if let Some(pointer) = pointer {
         let screen = pointer - drag.start_pointer;
         match drag.handle {
@@ -351,14 +367,15 @@ pub fn gizmo_layer(ui: &mut Ui, image: Rect, clip: Rect, zoom: f32, node: &NodeD
                 state.pose.z = z.clamp(0.0, 2.0);
             }
             Handle::Rotate => {
-                // Up turns, half a degree a point (a quarter with Shift),
+                // Up turns, half a degree a screen pixel (a quarter with Shift),
                 // in 15° steps with Ctrl.
-                let step = if modifiers.shift { ROTATE_STEP * 0.25 } else { ROTATE_STEP };
-                let raw = wrap_degrees(drag.start_pose.rotate - screen.y * step);
-                let shown = if modifiers.ctrl || modifiers.command { (raw / ROTATE_SNAP).round() * ROTATE_SNAP } else { raw };
-                state.pose.rotate = wrap_degrees(shown);
                 if let Some(active) = state.drag.as_mut() {
-                    active.raw_rotate = raw;
+                    let physical = pointer * ui.ctx().pixels_per_point();
+                    let position = native_pointer.map(|frame| frame.position).unwrap_or(physical);
+                    let wrapped = native_pointer.is_some_and(|frame| frame.wrapped);
+                    if let Some(rotate) = active.rotation.rotate_to(position, wrapped, modifiers) {
+                        state.pose.rotate = rotate;
+                    }
                 }
             }
         }
@@ -366,6 +383,9 @@ pub fn gizmo_layer(ui: &mut Ui, image: Rect, clip: Rect, zoom: f32, node: &NodeD
     let finished = !still_down;
     if finished {
         state.drag = None;
+    }
+    if state.drag.as_ref().is_some_and(|drag| drag.handle == Handle::Rotate) {
+        gizmo_pointer::request_rotation(ui.ctx());
     }
     let values = hit_values(node, &state.pose, kind, snow_input);
     let edit = GizmoEdit { node: state.node, values, started, finished };

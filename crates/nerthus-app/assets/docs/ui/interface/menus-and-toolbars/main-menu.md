@@ -1,5 +1,7 @@
 # Main Menu
 
+Hold `Alt` and press a menu's underlined letter to open it: `F` for File, `E` for Edit, `G` for Graph, `N` for Node, `R` for Preview, `P` for Project, `T` for Tools, or `H` for Help. `F10` activates the menu bar; then use a menu's letter or the arrow keys and `Enter`. `Escape` closes a menu and returns to the bar.
+
 ## File Menu
 
 * **New**: Start a new project.

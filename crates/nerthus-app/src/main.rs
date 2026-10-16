@@ -120,6 +120,7 @@ fn main() {
     app.insert_resource(egui_settings);
     app.add_plugins(EguiPlugin::default());
     app.add_plugins(drop_position::DropPositionPlugin);
+    app.add_plugins(ui::gizmo_pointer::GizmoPointerPlugin);
     app.add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin);
     app.add_plugins(TerrainRenderPlugin);
     if let Some(path) = options.screenshot.clone() {

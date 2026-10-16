@@ -19,7 +19,7 @@ mod devices;
 mod gpu;
 mod nvidia_profile;
 
-pub use benchmark::{best_device, read_scores, scan, write_scores, Scores, BENCHMARK_FILE};
+pub use benchmark::{best_device, read_scores, scan, scan_with_passes, write_scores, Scores, BENCHMARK_FILE};
 pub use devices::{
     active_device, active_devices, available_devices, devices_by_types, fallback_device_info, first_active_device, is_cpu_only, load_all_backends, load_backends, set_cpu_only, try_activate,
     try_deactivate, Device, DeviceInfo, DeviceType, NativeResult, FALLBACK_DEVICE,

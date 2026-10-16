@@ -13,7 +13,7 @@ use egui::{Align, Color32, Id, Layout, RichText, Stroke, Vec2};
 
 use crate::editor::Editor;
 use crate::theme;
-use crate::ui::widgets::{self, DialogFit, Tooltips};
+use crate::ui::widgets::{DialogFit, Tooltips};
 
 /// The window's content: `Width="640"` less its margins.
 const CONTENT_WIDTH: f32 = 608.0;
@@ -371,31 +371,27 @@ fn cleanup_dialog(ctx: &egui::Context, editor: &mut Editor, explorer: &mut Artif
     let index = cleanup.index;
     let path = explorer.artifacts[index].path.clone();
     let mut chosen: Option<Option<u64>> = None;
-    let modal = widgets::dialog(ctx, Id::new("artifact-cleanup"));
-    let response = modal.show(ctx, |ui| {
-        ui.set_width(420.0);
-        ui.label(RichText::new("Delete Files").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
-        ui.add_space(4.0);
-        ui.label(RichText::new("Cleanup Options").font(theme::semibold(14.0)).color(theme::ACCENT_MUTED_BLUE));
-        ui.add_space(6.0);
-        let text = format!("Which files would you like to clean up?\n\nLocation: {}", path.display());
-        ui.add(egui::Label::new(RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT)).wrap());
-        ui.add_space(12.0);
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            if ui.button("Cancel").clicked() {
+    let modal = crate::ui::prompt::TaskDialog::new(ctx, Id::new("artifact-cleanup"), 420.0);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, "Cleanup Options", false, |ui| {
+            let text = format!("Which files would you like to clean up?\n\nLocation: {}", path.display());
+            ui.add(egui::Label::new(text).wrap());
+        });
+        task.buttons(ui, |ui| {
+            if crate::ui::prompt::task_button(ui, "Cancel").clicked() {
                 chosen = Some(None);
             }
-            if ui.button("Old Files Only (45 days)").clicked() {
+            if crate::ui::prompt::task_button(ui, "Old Files Only (45 days)").clicked() {
                 chosen = Some(Some(45));
             }
-            if ui.button("Delete All").clicked() {
+            if crate::ui::prompt::task_button(ui, "Delete All").clicked() {
                 chosen = Some(Some(0));
             }
         });
-        ui.add_space(8.0);
-        ui.separator();
-        let footer = if cfg!(windows) { "Files are deleted." } else { "Safe Action: Files are not deleted, but sent to the Trash." };
-        ui.label(RichText::new(footer).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
+        task.footer(ui, |ui| {
+            let footer = if cfg!(windows) { "Files are deleted." } else { "Safe Action: Files are not deleted, but sent to the Trash." };
+            ui.add(egui::Label::new(RichText::new(footer).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT)).wrap());
+        });
     });
     if response.should_close() && chosen.is_none() {
         chosen = Some(None);

@@ -13,6 +13,7 @@ use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Sense, Ui, Ve
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
+use crate::ui::widgets::DialogFit;
 use crate::ui::UiState;
 
 /// The window's width inside its border.
@@ -40,6 +41,111 @@ const BUTTON_PADDING: f32 = 16.0;
 const BUTTON_GAP: f32 = 8.0;
 /// Round the footer's text.
 const FOOTER_MARGIN: Margin = Margin { left: 10, right: 10, top: 8, bottom: 8 };
+
+/// A task dialog with custom content or actions. Its instruction, body,
+/// button strip and optional footer share the message boxes' layout.
+pub struct TaskDialog {
+    id: egui::Id,
+    width: f32,
+    frame: egui::Frame,
+    fit: DialogFit,
+    lower_radius: u8,
+}
+
+impl TaskDialog {
+    pub fn new(ctx: &egui::Context, id: egui::Id, width: f32) -> Self {
+        let mut frame = egui::Frame::popup(&ctx.global_style());
+        frame.inner_margin = Margin::ZERO;
+        let border = frame.stroke.width as u8;
+        let lower_radius = frame.corner_radius.sw.saturating_sub(border);
+        let fit = DialogFit::new(ctx, id, &frame);
+        Self { id, width, frame, fit, lower_radius }
+    }
+
+    pub fn show<R>(&self, ctx: &egui::Context, content: impl FnOnce(&mut Ui, &Self) -> R) -> egui::ModalResponse<R> {
+        let modal = egui::Modal::new(self.id).frame(self.frame);
+        let response = modal.show(ctx, |ui| {
+            ui.set_width(self.fit.width(self.width));
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            content(ui, self)
+        });
+        self.fit.end(ctx, response.response.rect);
+        response
+    }
+
+    /// The instruction and content scroll together when space is short.
+    pub fn body<R>(&self, ui: &mut Ui, heading: &str, warning: bool, content: impl FnOnce(&mut Ui) -> R) -> R {
+        self.fit.body(ui, |ui| instruction_panel(ui, heading, warning, content))
+    }
+
+    /// The separated button strip. Add the rightmost action first.
+    pub fn buttons<R>(&self, ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
+        self.button_panel(ui, None::<fn(&mut Ui)>, content)
+    }
+
+    /// A verification control stays above the actions when the body scrolls.
+    pub fn buttons_with_verification<R>(&self, ui: &mut Ui, verification: impl FnOnce(&mut Ui), content: impl FnOnce(&mut Ui) -> R) -> R {
+        self.button_panel(ui, Some(verification), content)
+    }
+
+    fn button_panel<R>(&self, ui: &mut Ui, verification: Option<impl FnOnce(&mut Ui)>, content: impl FnOnce(&mut Ui) -> R) -> R {
+        divider(ui);
+        let corners = CornerRadius { nw: 0, ne: 0, sw: self.lower_radius, se: self.lower_radius };
+        let panel = egui::Frame::new().fill(theme::WINDOW_BACKGROUND).corner_radius(corners);
+        let shown = panel.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let strip = egui::Frame::new().inner_margin(STRIP_MARGIN);
+            strip.show(ui, |ui| {
+                if let Some(verification) = verification {
+                    verification(ui);
+                    ui.add_space(BUTTON_GAP);
+                }
+                ui.spacing_mut().item_spacing.x = BUTTON_GAP;
+                ui.spacing_mut().button_padding.x = BUTTON_PADDING;
+                ui.with_layout(Layout::right_to_left(Align::Min), content).inner
+            }).inner
+        });
+        shown.inner
+    }
+
+    pub fn footer<R>(&self, ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
+        divider(ui);
+        let corners = CornerRadius { nw: 0, ne: 0, sw: self.lower_radius, se: self.lower_radius };
+        let panel = egui::Frame::new().fill(theme::WINDOW_BACKGROUND).corner_radius(corners).inner_margin(FOOTER_MARGIN);
+        panel.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            content(ui)
+        }).inner
+    }
+}
+
+/// A button shared by custom task dialogs and ordinary message boxes.
+pub fn task_button(ui: &mut Ui, text: &str) -> egui::Response {
+    let label = styled(text, TEXT_SIZE, TEXT_LINE, theme::LABEL_EMPHASIS);
+    let button = egui::Button::new(label).min_size(BUTTON_MIN_SIZE);
+    ui.add(button)
+}
+
+/// A command link whose instruction and explanation wrap together.
+pub fn task_link(ui: &mut Ui, title: &str, note: &str) -> egui::Response {
+    let width = ui.available_width();
+    let text_width = (width - 40.0).max(0.0);
+    let title_galley = ui.painter().layout(title.to_string(), theme::semibold(13.0), theme::LABEL_EMPHASIS, text_width);
+    let note_galley = ui.painter().layout(note.to_string(), theme::interface(11.0), theme::LABEL_DEFAULT, text_width);
+    let title_height = title_galley.size().y;
+    let height = (title_height + note_galley.size().y + 14.0).max(44.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, 3.0, theme::BUTTON_HOVER);
+        ui.painter().rect_stroke(rect, 3.0, egui::Stroke::new(1.0, theme::BUTTON_BORDER), egui::StrokeKind::Inside);
+    }
+    let arrow = egui::Rect::from_min_size(rect.min + Vec2::new(8.0, 6.0), Vec2::splat(16.0));
+    icons::paint(ui, arrow, "arrow-right-square", theme::ACCENT_GREEN);
+    let text_position = rect.min + Vec2::new(32.0, 5.0);
+    ui.painter().galley(text_position, title_galley, theme::LABEL_EMPHASIS);
+    ui.painter().galley(text_position + Vec2::new(0.0, title_height + 3.0), note_galley, theme::LABEL_DEFAULT);
+    response
+}
 
 /// A question waiting for Yes or No, or a message waiting for OK.
 #[derive(Clone, Debug, PartialEq)]
@@ -163,30 +269,43 @@ fn modal_id() -> egui::Id {
 /// The panel ends 10 under the icon or 15 under the text, whichever is
 /// lower.
 fn upper_panel(ui: &mut Ui, prompt: &Prompt) {
+    instruction_panel(ui, &prompt.caption, prompt.warning, |ui| {
+        if !prompt.text.is_empty() {
+            let text = styled(&prompt.text, TEXT_SIZE, TEXT_LINE, theme::LABEL_DEFAULT);
+            ui.add(egui::Label::new(text).wrap());
+        }
+    });
+}
+
+fn instruction_panel<R>(ui: &mut Ui, heading: &str, warning: bool, content: impl FnOnce(&mut Ui) -> R) -> R {
     let panel = egui::Frame::new().inner_margin(PANEL_MARGIN);
-    panel.show(ui, |ui| {
-        ui.horizontal_top(|ui| {
-            if prompt.warning {
+    let shown = panel.show(ui, |ui| {
+        let row = ui.horizontal_top(|ui| {
+            if warning {
                 let icon_size = Vec2::splat(ICON_SIZE);
                 let (icon_rect, _) = ui.allocate_exact_size(icon_size, Sense::hover());
                 icons::paint(ui, icon_rect, "alert-triangle", theme::ACCENT_YELLOW);
                 ui.add_space(ICON_GAP);
             }
-            ui.vertical(|ui| {
-                if !prompt.caption.is_empty() {
-                    let heading = styled(&prompt.caption, HEADING_SIZE, HEADING_LINE, theme::ACCENT_MUTED_BLUE);
+            let column = ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.style_mut().override_font_id = Some(theme::interface(TEXT_SIZE));
+                ui.visuals_mut().override_text_color = Some(theme::LABEL_DEFAULT);
+                if !heading.is_empty() {
+                    let heading = styled(heading, HEADING_SIZE, HEADING_LINE, theme::ACCENT_MUTED_BLUE);
                     ui.add(egui::Label::new(heading).wrap());
                     ui.add_space(HEADING_GAP);
                 }
                 ui.add_space(TEXT_MARGIN);
-                if !prompt.text.is_empty() {
-                    let text = styled(&prompt.text, TEXT_SIZE, TEXT_LINE, theme::LABEL_DEFAULT);
-                    ui.add(egui::Label::new(text).wrap());
-                }
+                let result = content(ui);
                 ui.add_space(TEXT_MARGIN);
+                result
             });
+            column.inner
         });
+        row.inner
     });
+    shown.inner
 }
 
 /// Under a line, the strip with the buttons, then the footer under a line
@@ -237,8 +356,7 @@ fn buttons(ui: &mut Ui, prompt: &Prompt) -> Option<Answer> {
 
 /// A button at least 70 by 21; whether it was clicked.
 fn button(ui: &mut Ui, text: &str) -> bool {
-    let button = egui::Button::new(text).min_size(BUTTON_MIN_SIZE);
-    ui.add(button).clicked()
+    task_button(ui, text).clicked()
 }
 
 /// A line across the window, between its panels.
@@ -367,5 +485,53 @@ mod tests {
 
         assert_eq!(second_frame, vec![Command::File(FileCommand::DiscardChanges)]);
         assert!(ui_state.prompt.is_none());
+    }
+
+    #[test]
+    fn custom_task_dialogs_keep_their_actions_and_footer_below_a_scrolling_body() {
+        use crate::ui::widgets::fit_checks;
+        let context = fit_checks::context();
+        let id = egui::Id::new("custom-task-dialog");
+        let text = "Long explanatory content that must scroll rather than pushing the actions out of the window. ".repeat(50);
+        for screen in fit_checks::SMALL_SCREENS {
+            let mut body_clip = Rect::NOTHING;
+            let mut close = Rect::NOTHING;
+            let mut action = Rect::NOTHING;
+            let mut footer = Rect::NOTHING;
+            let mut draw = |ctx: &egui::Context| {
+                let dialog = TaskDialog::new(ctx, id, 460.0);
+                dialog.show(ctx, |ui, task| {
+                    task.body(ui, "Task dialog instruction", true, |ui| {
+                        body_clip = ui.clip_rect();
+                        ui.add(egui::Label::new(&text).wrap());
+                        task_link(ui, "A command with a long instruction", "Its explanation also wraps to remain inside the dialog.");
+                    });
+                    task.buttons(ui, |ui| {
+                        close = task_button(ui, "Close").rect;
+                        action = task_button(ui, "Perform action").rect;
+                    });
+                    task.footer(ui, |ui| {
+                        footer = ui.label("Task dialog footer").rect;
+                    });
+                });
+            };
+            let words = fit_checks::settle(&context, screen, &mut draw);
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), ..Default::default() };
+            let output = context.run_ui(input, |ui| draw(ui.ctx()));
+            let instruction = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+                Shape::Text(shape) if shape.galley.text() == "Task dialog instruction" => Some(shape),
+                _ => None,
+            }).expect("the main instruction is painted");
+            for section in &instruction.galley.job.sections {
+                assert_eq!(section.format.font_id.size, HEADING_SIZE);
+                assert_eq!(section.format.color, theme::ACCENT_MUTED_BLUE);
+            }
+            output.drop_without_applying_deltas();
+            let expected = ["Task dialog instruction", "Close", "Perform action", "Task dialog footer"];
+            fit_checks::assert_fits(&context, screen, id, &words, &expected);
+            assert!(body_clip.bottom() <= close.top(), "the actions cover the scrolling body");
+            assert!(action.right() < close.left(), "the actions are not aligned from the right");
+            assert!(footer.top() > close.bottom(), "the footer is not below the action strip");
+        }
     }
 }

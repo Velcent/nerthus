@@ -13,7 +13,7 @@
 //! menu mode and Alt with an item's access key opens it (`menu_keys`).
 
 use egui::containers::menu::MenuButton;
-use egui::{Align, Color32, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
+use egui::{Align, Color32, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 
 use crate::editor::Editor;
 use crate::icons;
@@ -245,6 +245,22 @@ const MENU_NAMES: [&str; 8] = ["File", "Edit", "Graph", "Node", "Preview", "Proj
 /// Their access keys ("_File", ..., "P_review", ...).
 const MENU_ACCESS_KEYS: [egui::Key; 8] = [egui::Key::F, egui::Key::E, egui::Key::G, egui::Key::N, egui::Key::R, egui::Key::P, egui::Key::T, egui::Key::H];
 
+/// The access letter stays visible, including Preview's R, so the menu
+/// can be found with Alt or while the bar is in menu mode.
+fn menu_text(name: &str, access_key: egui::Key) -> egui::text::LayoutJob {
+    let plain = egui::TextFormat::simple(theme::interface(11.0), theme::MENU_FOREGROUND);
+    let mut marked = plain.clone();
+    marked.underline = Stroke::new(1.0, theme::MENU_FOREGROUND);
+    let uppercase = name.to_ascii_uppercase();
+    let access_start = uppercase.find(access_key.name()).expect("a menu access key appears in its label");
+    let access_end = access_start + access_key.name().len();
+    let mut text = egui::text::LayoutJob::default();
+    text.append(&name[..access_start], 0.0, plain.clone());
+    text.append(&name[access_start..access_end], 0.0, marked);
+    text.append(&name[access_end..], 0.0, plain);
+    text
+}
+
 /// A top-level item's slot: at least 64 wide less its overlaps, its text
 /// 8 + 5 in from each side.
 fn menu_slot(ui: &Ui, name: &str) -> Vec2 {
@@ -277,7 +293,7 @@ fn menu_items(ui: &mut Ui, editor: &Editor, ui_state: &UiState, commands: &mut V
         let highlighted = menu_keys::bar_focus(ui.ctx());
         let mut popups = Vec::new();
         for (index, (name, access_key)) in MENU_NAMES.into_iter().zip(MENU_ACCESS_KEYS).enumerate() {
-            let text = RichText::new(name).font(theme::interface(11.0)).color(theme::MENU_FOREGROUND);
+            let text = menu_text(name, access_key);
             let slot = menu_slot(ui, name);
             let lit = highlighted == Some(index);
             let mut button = egui::Button::new(text);
@@ -865,5 +881,88 @@ mod tests {
         keyed_with(&context, width, &editor, &[H], egui::Modifiers::ALT);
         let help = Command::Tools(ToolCommand::ShowDocs(crate::docs::HOME.to_string()));
         assert_eq!(keyed(&context, width, &editor, &[Enter]), [help]);
+    }
+
+    #[test]
+    fn access_keys_switch_an_open_menu_and_choose_from_menu_mode() {
+        use egui::Key::{Enter, F, F10, G, H};
+        let editor = editor_named(NAMES[0]);
+        let width = 1600.0;
+        let context = themed_context(width);
+        keyed_with(&context, width, &editor, &[F], egui::Modifiers::ALT);
+        assert!(context.egui_wants_keyboard_input());
+        keyed_with(&context, width, &editor, &[H], egui::Modifiers::ALT);
+        let help = Command::Tools(ToolCommand::ShowDocs(crate::docs::HOME.to_string()));
+        assert_eq!(keyed(&context, width, &editor, &[Enter]), [help]);
+        assert_eq!(keyed(&context, width, &editor, &[F10, G, Enter]), [Command::NewGraphTab]);
+    }
+
+    #[test]
+    fn alt_access_keys_leave_a_focused_text_field_for_the_menu() {
+        let editor = editor_named(NAMES[0]);
+        let width = 1600.0;
+        let context = themed_context(width);
+        let mut text = "node name".to_string();
+        context.run_ui(input(width, Vec::new()), |ui| {
+            ui.text_edit_singleline(&mut text).request_focus();
+        }).drop_without_applying_deltas();
+        assert!(context.text_edit_focused());
+        keyed_with(&context, width, &editor, &[egui::Key::F], egui::Modifiers::ALT);
+        assert_eq!(keyed(&context, width, &editor, &[egui::Key::Enter]), [Command::NewProject]);
+    }
+
+    #[test]
+    fn ctrl_alt_access_letters_do_not_open_or_leave_menu_mode() {
+        let editor = editor_named(NAMES[0]);
+        let width = 1600.0;
+        let context = themed_context(width);
+        let alt_gr = egui::Modifiers::CTRL | egui::Modifiers::ALT;
+        keyed_with(&context, width, &editor, &[egui::Key::F], alt_gr);
+        assert!(!egui::Popup::is_any_open(&context));
+        assert_eq!(menu_keys::bar_focus(&context), None);
+        keyed(&context, width, &editor, &[egui::Key::F10]);
+        keyed_with(&context, width, &editor, &[egui::Key::G], alt_gr);
+        assert!(!egui::Popup::is_any_open(&context));
+        assert_eq!(menu_keys::bar_focus(&context), Some(0));
+    }
+
+    #[test]
+    fn preview_uses_alt_r_and_project_uses_alt_p() {
+        let editor = editor_named(NAMES[0]);
+        let width = 1600.0;
+        let context = themed_context(width);
+        keyed_with(&context, width, &editor, &[egui::Key::R], egui::Modifiers::ALT);
+        assert_eq!(keyed(&context, width, &editor, &[egui::Key::Enter]), [Command::SetPreviewResolution(512)]);
+        keyed_with(&context, width, &editor, &[egui::Key::P], egui::Modifiers::ALT);
+        let project_command = if cfg!(target_arch = "wasm32") { Command::BuildSettings } else { Command::BuildAndExport };
+        assert_eq!(keyed(&context, width, &editor, &[egui::Key::Enter]), [project_command]);
+    }
+
+    #[test]
+    fn each_menu_draws_its_access_letter_underlined() {
+        let editor = editor_named(NAMES[0]);
+        let ui_state = UiState::default();
+        let width = 1600.0;
+        let context = themed_context(width);
+        let mut commands = Vec::new();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, HEIGHT));
+        let output = context.run_ui(input(width, Vec::new()), |ui| {
+            show(ui, rect, &editor, &ui_state, &mut commands);
+        });
+        for (name, access_key) in MENU_NAMES.into_iter().zip(MENU_ACCESS_KEYS) {
+            let text = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == name => Some(&shape.galley.job),
+                _ => None,
+            }).expect("the menu label is drawn");
+            let mut underlined = String::new();
+            for section in &text.sections {
+                if section.format.underline.width > 0.0 {
+                    let range = section.byte_range.start.0..section.byte_range.end.0;
+                    underlined.push_str(&text.text[range]);
+                }
+            }
+            assert_eq!(underlined.to_ascii_uppercase(), access_key.name(), "{name}");
+        }
+        output.drop_without_applying_deltas();
     }
 }

@@ -27,6 +27,7 @@ pub(crate) mod file_windows;
 pub mod floating_viewport;
 mod formulas;
 mod gizmos;
+pub(crate) mod gizmo_pointer;
 mod gradient_editor;
 mod graph_area;
 pub mod graph_canvas;

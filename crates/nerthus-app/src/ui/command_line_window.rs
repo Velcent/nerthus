@@ -6,12 +6,12 @@
 
 use std::path::PathBuf;
 
-use egui::{Align, Id, Layout, RichText, Stroke, Vec2};
+use egui::{Id, RichText, Vec2};
 
 use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
-use crate::ui::widgets;
+use crate::ui::prompt::{task_button, TaskDialog};
 
 /// `TaskDialog.Width` (400 dialog units) in points, roughly, where there
 /// is room.
@@ -74,55 +74,36 @@ pub fn show(ctx: &egui::Context, window: &mut Option<CommandLineWindow>) {
     let mut copy = false;
     let mut close = false;
     let id = Id::new("build-command-line");
-    let frame = widgets::dialog_frame(ctx).fill(theme::WINDOW_BACKGROUND);
-    let fit = widgets::DialogFit::new(ctx, id, &frame);
-    let modal = egui::Modal::new(id).frame(frame);
-    let response = modal.show(ctx, |ui| {
-        let width = fit.width(WIDTH);
-        ui.set_width(width);
-        fit.body(ui, |ui| {
-            let instruction = RichText::new("Build Command Line").font(theme::semibold(15.0)).color(theme::ACCENT_BLUE);
-            ui.label(instruction);
-            ui.add_space(10.0);
+    let modal = TaskDialog::new(ctx, id, WIDTH);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, "Build Command Line", false, |ui| {
             let content = RichText::new(dialog.shown.as_str()).font(theme::interface(12.0)).color(theme::LABEL_EMPHASIS);
             ui.add(egui::Label::new(content).wrap());
         });
-        ui.add_space(16.0);
-        ui.allocate_ui_with_layout(Vec2::new(width, 26.0), Layout::right_to_left(Align::Center), |ui| {
+        task.buttons(ui, |ui| {
             if task_button(ui, "Close").clicked() {
                 close = true;
             }
-            ui.add_space(8.0);
             if task_button(ui, "Copy to Clipboard").clicked() {
                 copy = true;
             }
         });
-        ui.add_space(10.0);
-        ui.separator();
         // `Footer` with `TaskDialogIcon.Information`.
-        ui.horizontal(|ui| {
-            let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(icons::DEFAULT_SIZE), egui::Sense::hover());
-            icons::paint(ui, icon_rect, "info-square-rounded", theme::ACCENT_BLUE);
-            let footer = RichText::new("You can use this command line directly from any command prompt.").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT);
-            ui.add(egui::Label::new(footer).wrap());
+        task.footer(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(icons::DEFAULT_SIZE), egui::Sense::hover());
+                icons::paint(ui, icon_rect, "info-square-rounded", theme::ACCENT_BLUE);
+                let footer = RichText::new("You can use this command line directly from any command prompt.").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT);
+                ui.add(egui::Label::new(footer).wrap());
+            });
         });
     });
-    fit.end(ctx, response.response.rect);
     if copy {
         ctx.copy_text(dialog.copied.clone());
     }
     if copy || close || response.should_close() {
         *window = None;
     }
-}
-
-fn task_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let label = RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_EMPHASIS);
-    let mut widget = egui::Button::new(label);
-    widget = widget.fill(theme::BUTTON_BACKGROUND);
-    widget = widget.stroke(Stroke::new(1.0, theme::BUTTON_BORDER));
-    widget = widget.min_size(Vec2::new(80.0, 26.0));
-    ui.add(widget)
 }
 
 #[cfg(test)]

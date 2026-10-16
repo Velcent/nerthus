@@ -313,9 +313,10 @@ pub fn show_windows(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiS
         ui_state.artifact_explorer = None;
     }
     if let Some(diagnostics) = ui_state.diagnostics.as_mut() {
-        let (open, request) = diagnostics_window::show(ctx, editor, diagnostics);
+        let known_update = ui_state.updates.update_available();
+        let (open, request) = diagnostics_window::show(ctx, editor, diagnostics, known_update);
         match request {
-            Some(DiagnosticsRequest::Restart) => pending.push(Command::Exit),
+            Some(DiagnosticsRequest::Restart(arguments)) => pending.push(Command::File(crate::files::FileCommand::Restart(arguments))),
             Some(DiagnosticsRequest::SettingsReset) => {
                 settings_reset = true;
                 ui_state.onboard = Some(Onboard::open(editor.compute.cpu_only));

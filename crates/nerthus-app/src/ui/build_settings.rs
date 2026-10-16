@@ -18,10 +18,11 @@ use crate::editor::Editor;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::input_box::{InputAnswer, InputBox};
+use crate::ui::prompt::{task_button, TaskDialog};
 use crate::ui::regions::{self, RegionsState};
 use crate::ui::tool_commands::ToolCommand;
 use crate::ui::tool_window;
-use crate::ui::widgets::{dialog, icon_menu, link_button, menu_item, menu_separator, scroll_bar_gutter, selectable_label, tab_list_item, Tooltips, TAB_ITEM_SIZE};
+use crate::ui::widgets::{icon_menu, link_button, menu_item, menu_separator, scroll_bar_gutter, selectable_label, tab_list_item, Tooltips, TAB_ITEM_SIZE};
 
 /// `BuildSettingsWindow`'s tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,18 +388,16 @@ fn profile_dialogs(ctx: &egui::Context, editor: &mut Editor, settings: &mut Buil
         ProfileQuestion::Delete(name) => (format!("Delete {name}"), "Are you sure you want to delete this profile?"),
     };
     let mut answer = None;
-    let modal = dialog(ctx, Id::new("profile-question"));
-    let response = modal.show(ctx, |ui| {
-        ui.set_width(420.0);
-        ui.label(RichText::new(caption_text).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
-        ui.add_space(8.0);
-        ui.label(RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
-        ui.add_space(12.0);
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            if ui.button("No").clicked() {
+    let modal = TaskDialog::new(ctx, Id::new("profile-question"), 420.0);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, &caption_text, true, |ui| {
+            ui.label(text);
+        });
+        task.buttons(ui, |ui| {
+            if task_button(ui, "No").clicked() {
                 answer = Some(false);
             }
-            if ui.button("Yes").clicked() {
+            if task_button(ui, "Yes").clicked() {
                 answer = Some(true);
             }
         });
@@ -1021,6 +1020,15 @@ fn terrain_tab(ui: &mut Ui, editor: &mut Editor) {
         editor.document.set_terrain_size(width.round(), height.round());
         editor.changed();
     }
+    let terrain = editor.document.terrain();
+    let resolution = editor.document.build_definition().resolution;
+    let meters_per_pixel = f64::from(terrain.width) / resolution as f64;
+    let height_to_width = f64::from(terrain.height) / f64::from(terrain.width);
+    let real_scale = format!("Real scale: {meters_per_pixel:.4} m/pixel at {resolution} × {resolution}");
+    let ratio = format!("Height-to-width ratio: {height_to_width:.6} ({:.4}%)", height_to_width * 100.0);
+    ui.add_space(12.0);
+    caption(ui, &real_scale, theme::LABEL_EMPHASIS);
+    caption(ui, &ratio, theme::LABEL_EMPHASIS);
     ui.add_space(12.0);
     caption(ui, "TIP:", theme::LABEL_EMPHASIS);
     caption(ui, "Think about your terrain size realistically. Most common mountains and hills tend to be quite smaller than what new users may anticipate. Precise size and height of your terrain will result in more realistic erosion and other simulations.", theme::LABEL_DEFAULT);
@@ -1154,5 +1162,27 @@ mod tests {
             }
             assert!(summary.lines().any(|line| line == PROFILE_SEPARATOR));
         }
+    }
+
+    #[test]
+    fn terrain_measurements_follow_dimensions_and_build_resolution() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        let mut state = Some(BuildSettingsState::new(SettingsTab::Terrain));
+        editor.document.set_terrain_size(5000.0, 2600.0);
+        editor.document.set_build_setting("Resolution", json!(2048));
+        editor.preview_resolution = 512;
+
+        let (shapes, _) = settle(&context, LARGE, &mut editor, &mut state);
+        let painted: Vec<&str> = texts(&shapes).map(|text| text.galley.text()).collect();
+        assert!(painted.contains(&"Real scale: 2.4414 m/pixel at 2048 × 2048"));
+        assert!(painted.contains(&"Height-to-width ratio: 0.520000 (52.0000%)"));
+
+        editor.document.set_terrain_size(8192.0, 1024.0);
+        editor.document.set_build_setting("Resolution", json!(4096));
+        let (shapes, _) = settle(&context, LARGE, &mut editor, &mut state);
+        let painted: Vec<&str> = texts(&shapes).map(|text| text.galley.text()).collect();
+        assert!(painted.contains(&"Real scale: 2.0000 m/pixel at 4096 × 4096"));
+        assert!(painted.contains(&"Height-to-width ratio: 0.125000 (12.5000%)"));
     }
 }

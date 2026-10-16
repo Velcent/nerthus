@@ -12,7 +12,8 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
-use crate::ui::widgets::{dialog, dialog_button, icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator, vertical_toolbar, Tooltips};
+use crate::ui::prompt::{task_button, TaskDialog};
+use crate::ui::widgets::{icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator, vertical_toolbar, Tooltips};
 use crate::ui::{data_view, graph_canvas, menus, toolbox, UiState};
 use crate::user::ToolboxStyle;
 
@@ -340,19 +341,17 @@ fn confirm_tab_delete(ui: &mut Ui, tabs: &[GraphTabInfo], ui_state: &mut UiState
         return;
     };
     let name = tabs.iter().find(|tab| tab.index == index).map(|tab| tab.name.clone()).unwrap_or_default();
-    let modal = dialog(ui.ctx(), egui::Id::new("confirm-delete-tab"));
-    let response = modal.show(ui.ctx(), |ui| {
-        ui.set_width(320.0);
-        ui.label(egui::RichText::new(format!("Delete Group \"{name}\" ?")).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
-        ui.add_space(6.0);
-        ui.label(format!("Are you sure you want to delete this Graph \"{name}\" "));
-        ui.add_space(12.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if dialog_button(ui, "No", false).clicked() {
+    let heading = format!("Delete Group \"{name}\" ?");
+    let modal = TaskDialog::new(ui.ctx(), egui::Id::new("confirm-delete-tab"), 350.0);
+    let response = modal.show(ui.ctx(), |ui, task| {
+        task.body(ui, &heading, false, |ui| {
+            ui.add(egui::Label::new(format!("Are you sure you want to delete this Graph \"{name}\" ")).wrap());
+        });
+        task.buttons(ui, |ui| {
+            if task_button(ui, "No").clicked() {
                 ui_state.graph.confirm_delete_tab = None;
             }
-            if dialog_button(ui, "Yes", false).clicked() {
+            if task_button(ui, "Yes").clicked() {
                 commands.push(Command::DeleteGraphTab(index));
                 ui_state.graph.confirm_delete_tab = None;
             }

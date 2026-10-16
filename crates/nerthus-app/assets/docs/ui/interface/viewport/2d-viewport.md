@@ -8,6 +8,8 @@ Press **F6** (or the toolbar's **Toggle Docked 2D Viewport**) to show the 2D vie
 
 Its menu picks heights and colors and opens the [measurement tools](measurement-tools.md), shows another of the node's outputs, and saves the image to a file.
 
+Press **Escape** to stop picking or measuring.
+
 ## Floating
 
 Press **Ctrl + F6** (or Node › Locked 2D Viewport) to open a 2D view of the selected node in a window of its own, named after the node. It keeps showing that node, whatever else is selected, as builds update it.

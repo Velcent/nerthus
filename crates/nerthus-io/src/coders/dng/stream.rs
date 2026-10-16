@@ -9,14 +9,17 @@ pub(super) const LITTLE_ENDIAN: u16 = 0x4949;
 pub(super) const BIG_ENDIAN: u16 = 0x4d4d;
 
 // LIBRAW_EXIFTAG_TYPE_*
+pub(super) const TYPE_ASCII: u32 = 2;
 pub(super) const TYPE_SHORT: u32 = 3;
 pub(super) const TYPE_LONG: u32 = 4;
 pub(super) const TYPE_RATIONAL: u32 = 5;
+pub(super) const TYPE_UNDEFINED: u32 = 7;
 pub(super) const TYPE_SSHORT: u32 = 8;
 pub(super) const TYPE_SLONG: u32 = 9;
 pub(super) const TYPE_SRATIONAL: u32 = 10;
 pub(super) const TYPE_FLOAT: u32 = 11;
 pub(super) const TYPE_DOUBLE: u32 = 12;
+pub(super) const TYPE_IFD: u32 = 13;
 pub(super) const TYPE_IFD8: u32 = 18;
 
 /// `tagtype_dataunit_bytes`.

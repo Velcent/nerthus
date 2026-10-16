@@ -22,7 +22,7 @@ use crate::theme;
 use crate::ui::file_dialogs::FileDialogs;
 use crate::ui::options_pages::{self, OptionsCopy, PageRequest};
 use crate::ui::tool_window;
-use crate::ui::widgets::{self, Tooltips};
+use crate::ui::widgets::Tooltips;
 use crate::user;
 
 /// `OptionsWindow`'s pages (Network Builds stays collapsed).
@@ -560,20 +560,18 @@ fn show_notice(ctx: &egui::Context, notice: &mut Option<Notice>) {
         return;
     };
     let mut dismissed = false;
-    let modal = widgets::dialog(ctx, Id::new("options-notice"));
-    modal.show(ctx, |ui| {
-        ui.set_width(360.0);
-        ui.label(RichText::new(shown.title).font(theme::semibold(14.0)).color(theme::ACCENT_MUTED_BLUE));
-        ui.add_space(8.0);
-        ui.label(&shown.text);
-        ui.add_space(12.0);
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            if button(ui, "OK", false, true).clicked() {
+    let modal = crate::ui::prompt::TaskDialog::new(ctx, Id::new("options-notice"), 360.0);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, shown.title, false, |ui| {
+            ui.add(egui::Label::new(&shown.text).wrap());
+        });
+        task.buttons(ui, |ui| {
+            if crate::ui::prompt::task_button(ui, "OK").clicked() {
                 dismissed = true;
             }
         });
     });
-    if dismissed {
+    if dismissed || response.should_close() {
         *notice = None;
     }
 }
@@ -584,18 +582,16 @@ fn reset_question(ctx: &egui::Context, options: &mut OptionsState) {
         return;
     }
     let mut answer = None;
-    let modal = widgets::dialog(ctx, Id::new("options-reset"));
-    let response = modal.show(ctx, |ui| {
-        ui.set_width(380.0);
-        ui.label(RichText::new("Reset Preferences").font(theme::semibold(14.0)).color(theme::ACCENT_MUTED_BLUE));
-        ui.add_space(8.0);
-        ui.label("Are you sure you want to reset preferences in this tab to their default values?");
-        ui.add_space(12.0);
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            if button(ui, "No", false, true).clicked() {
+    let modal = crate::ui::prompt::TaskDialog::new(ctx, Id::new("options-reset"), 380.0);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, "Reset Preferences", false, |ui| {
+            ui.add(egui::Label::new("Are you sure you want to reset preferences in this tab to their default values?").wrap());
+        });
+        task.buttons(ui, |ui| {
+            if crate::ui::prompt::task_button(ui, "No").clicked() {
                 answer = Some(false);
             }
-            if button(ui, "Yes", true, true).clicked() {
+            if crate::ui::prompt::task_button(ui, "Yes").clicked() {
                 answer = Some(true);
             }
         });

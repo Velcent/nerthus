@@ -12,6 +12,7 @@ use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::memory_dialogs;
+use crate::ui::prompt::{task_button, task_link, TaskDialog};
 use crate::ui::tool_window;
 use crate::ui::widgets;
 use crate::ui::UiState;
@@ -31,26 +32,6 @@ pub struct BuildConfirm {
     pub open_folder: bool,
 }
 
-/// A command link (`TaskDialogButtonStyle.CommandLinks`): an arrow, the
-/// title and a note under it.
-fn command_link(ui: &mut Ui, title: &str, note: &str) -> bool {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 46.0), egui::Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(rect, 3.0, theme::MENU_BACKGROUND_HOVER);
-    }
-    let arrow_color = if response.hovered() { theme::ACCENT_BLUE } else { theme::ACCENT_MUTED_BLUE };
-    let arrow = egui::Rect::from_min_size(rect.min + Vec2::new(8.0, 8.0), Vec2::splat(16.0));
-    icons::paint(ui, arrow, "chevron-right", arrow_color);
-    let title_position = rect.min + Vec2::new(32.0, 6.0);
-    let title_galley = ui.painter().layout_no_wrap(title.to_string(), theme::semibold(13.0), theme::LABEL_EMPHASIS);
-    ui.painter().galley(title_position, title_galley, theme::LABEL_EMPHASIS);
-    let note_position = rect.min + Vec2::new(32.0, 26.0);
-    let note_galley = ui.painter().layout_no_wrap(note.to_string(), theme::interface(11.0), theme::LABEL_DEFAULT);
-    ui.painter().galley(note_position, note_galley, theme::LABEL_DEFAULT);
-    response.clicked()
-}
-
 /// "Build and Export?": what will be built, a link to the build settings,
 /// Start Build, Close Nerthus and Build, or Cancel. A choice that waited
 /// for Save As goes on from here once the project is saved.
@@ -68,56 +49,51 @@ pub fn confirm(ctx: &egui::Context, editor: &Editor, ui_state: &mut UiState, com
     let mut start = false;
     let mut close = false;
     let mut cancel = false;
-    let modal = widgets::dialog(ctx, egui::Id::new("build-and-export"));
-    let response = modal.show(ctx, |ui| {
-        ui.set_width(460.0);
-        let window_title = RichText::new("Build and Export?");
-        ui.label(window_title.font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
-        ui.add_space(6.0);
-        // A Region build builds the region at its size.
-        let region = definition.portion.as_ref().filter(|_| definition.build_type == BuildType::Region);
-        let what = if region.is_some() { "Region" } else { "Terrain" };
-        let size = region.map(|region| region.size.max(0) as usize).unwrap_or(definition.resolution);
-        let instruction = RichText::new(format!("Build {what} at {size} x {size}?"));
-        ui.label(instruction.font(theme::semibold(16.0)).color(theme::ACCENT_MUTED_BLUE));
-        ui.add_space(8.0);
-        ui.label(format!("Would you like to build this {what}? The build will export any files marked for save or output nodes."));
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.label("Adjust your ");
-            if ui.link("build settings").clicked() {
-                commands.push(Command::BuildSettings);
-            }
-            ui.label(", export file formats, and other details before proceeding. You can also access them in the Project menu.");
-        });
-        ui.add_space(6.0);
-        ui.label(format!("Total nodes to build: {unlocked:02}"));
-        ui.add_space(10.0);
-        if command_link(ui, "Start Build", "Build the saved project and export its marked nodes") {
-            start = true;
-        }
-        if command_link(ui, "Close Nerthus and Build", "Save RAM and GPU memory by closing the Nerthus interface") {
-            close = true;
-        }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut confirm.open_folder, "Open folder after build finishes");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
+    // A Region build builds the region at its size.
+    let region = definition.portion.as_ref().filter(|_| definition.build_type == BuildType::Region);
+    let what = if region.is_some() { "Region" } else { "Terrain" };
+    let size = region.map(|region| region.size.max(0) as usize).unwrap_or(definition.resolution);
+    let instruction = format!("Build {what} at {size} x {size}?");
+    let modal = TaskDialog::new(ctx, egui::Id::new("build-and-export"), 460.0);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, &instruction, false, |ui| {
+            ui.label(format!("Would you like to build this {what}? The build will export any files marked for save or output nodes."));
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.label("Adjust your ");
+                if ui.link("build settings").clicked() {
+                    commands.push(Command::BuildSettings);
                 }
+                ui.label(", export file formats, and other details before proceeding. You can also access them in the Project menu.");
             });
+            ui.add_space(6.0);
+            ui.label(format!("Total nodes to build: {unlocked:02}"));
+            ui.add_space(10.0);
+            if task_link(ui, "Start Build", "Build the saved project and export its marked nodes").clicked() {
+                start = true;
+            }
+            if task_link(ui, "Close Nerthus and Build", "Save RAM and GPU memory by closing the Nerthus interface").clicked() {
+                close = true;
+            }
+        });
+        let verification = |ui: &mut Ui| {
+            ui.checkbox(&mut confirm.open_folder, "Open folder after build finishes");
+        };
+        task.buttons_with_verification(ui, verification, |ui| {
+            if task_button(ui, "Cancel").clicked() {
+                cancel = true;
+            }
         });
         // The footer, with `TaskDialogIcon.Warning`.
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            let size = Vec2::splat(14.0);
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-            icons::paint(ui, rect, "alert-triangle", theme::ACCENT_YELLOW);
-            let footer = RichText::new("Close the Nerthus interface during a build to conserve resources and speed up your builds.");
-            ui.label(footer.font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
+        task.footer(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let size = Vec2::splat(14.0);
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                icons::paint(ui, rect, "alert-triangle", theme::ACCENT_YELLOW);
+                let footer = RichText::new("Close the Nerthus interface during a build to conserve resources and speed up your builds.");
+                ui.label(footer.font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
+            });
         });
     });
     if start || close {
@@ -355,6 +331,25 @@ mod tests {
         assert_eq!(editor.resume_build, None);
         assert_eq!(ui_state.prompt.as_ref().map(|prompt| prompt.caption.as_str()), Some("Save cached build?"));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn build_confirmation_keeps_its_verification_and_cancel_in_small_windows() {
+        use crate::ui::widgets::fit_checks;
+        let context = fit_checks::context();
+        let editor = Editor::new(Document::new());
+        let build_confirm = Some(BuildConfirm { open_folder: true });
+        let mut ui_state = UiState { build_confirm, ..Default::default() };
+        let mut pending = Vec::new();
+        for screen in fit_checks::SMALL_SCREENS {
+            let words = fit_checks::settle(&context, screen, |ctx| {
+                confirm(ctx, &editor, &mut ui_state, &mut pending);
+            });
+            let expected = ["Build Terrain at", "Open folder after build finishes", "Cancel", "Close the Nerthus interface during a build"];
+            fit_checks::assert_fits(&context, screen, egui::Id::new("build-and-export"), &words, &expected);
+            assert!(ui_state.build_confirm.as_ref().is_some_and(|state| state.open_folder));
+            assert!(pending.is_empty());
+        }
     }
 
     /// A frame of the progress window with these events. Returns what was

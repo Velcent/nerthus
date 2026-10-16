@@ -15,8 +15,7 @@ use nerthus_engine::{Engine, RenderIntent};
 use crate::editor::Editor;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::prompt::Prompt;
-use crate::ui::widgets;
+use crate::ui::prompt::{task_button, task_link, Prompt, TaskDialog};
 
 /// Baking's progress window while it shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -199,13 +198,9 @@ pub fn show_optimize_memory(ctx: &egui::Context, state: &mut Option<OptimizeMemo
     let mut chosen = None;
     let mut cancelled = false;
     let id = Id::new("optimize-memory");
-    let fit = widgets::DialogFit::new(ctx, id, &widgets::dialog_frame(ctx));
-    let modal = widgets::dialog(ctx, id);
-    let response = modal.show(ctx, |ui| {
-        ui.set_width(fit.width(460.0));
-        fit.body(ui, |ui| {
-            ui.label(RichText::new("Optimize Memory").font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
-            ui.add_space(6.0);
+    let modal = TaskDialog::new(ctx, id, 460.0);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, "Optimize Memory", false, |ui| {
             let size = crate::ui::data_view::stats::byte_size(figures.process as usize);
             let heading = format!("{size} currently allocated to Nerthus's terrain engine.");
             ui.label(RichText::new(heading).font(theme::semibold(14.0)).color(theme::ACCENT_YELLOW));
@@ -220,50 +215,31 @@ pub fn show_optimize_memory(ctx: &egui::Context, state: &mut Option<OptimizeMemo
                 (Recovery::AllCache, "Delete All Cache", "WARNING: Requires all nodes to be rebuilt."),
             ];
             for (recovery, title, note) in links {
-                if command_link(ui, title, note).clicked() {
+                if task_link(ui, title, note).clicked() {
                     chosen = Some(recovery);
                 }
             }
         });
-        ui.add_space(8.0);
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            if ui.button("Cancel").clicked() {
+        task.buttons(ui, |ui| {
+            if task_button(ui, "Cancel").clicked() {
                 cancelled = true;
             }
         });
-        ui.add_space(6.0);
-        ui.separator();
-        let other = figures.process.saturating_sub(figures.cache);
-        let statistics = format!(
-            "Memory Statistics\n\nTotal Cache: {}\nOther Uses: {}\nTotal Memory: {}",
-            gigabytes(figures.cache),
-            gigabytes(other),
-            gigabytes(figures.process)
-        );
-        ui.label(RichText::new(statistics).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
+        task.footer(ui, |ui| {
+            let other = figures.process.saturating_sub(figures.cache);
+            let statistics = format!(
+                "Memory Statistics\n\nTotal Cache: {}\nOther Uses: {}\nTotal Memory: {}",
+                gigabytes(figures.cache),
+                gigabytes(other),
+                gigabytes(figures.process)
+            );
+            ui.add(egui::Label::new(RichText::new(statistics).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT)).wrap());
+        });
     });
-    fit.end(ctx, response.response.rect);
     if chosen.is_some() || cancelled || response.should_close() {
         *state = None;
     }
     chosen
-}
-
-/// A task dialog's command link: an arrow, the title and its note.
-fn command_link(ui: &mut egui::Ui, title: &str, note: &str) -> egui::Response {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 44.0), egui::Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(rect, 3.0, theme::BUTTON_HOVER);
-        ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, theme::BUTTON_BORDER), egui::StrokeKind::Inside);
-    }
-    let arrow_rect = egui::Rect::from_min_size(egui::Pos2::new(rect.left() + 8.0, rect.top() + 6.0), Vec2::splat(16.0));
-    crate::icons::paint(ui, arrow_rect, "arrow-right-square", theme::ACCENT_GREEN);
-    let title_galley = ui.painter().layout_no_wrap(title.to_string(), theme::semibold(13.0), theme::LABEL_EMPHASIS);
-    ui.painter().galley(egui::Pos2::new(arrow_rect.right() + 8.0, rect.top() + 5.0), title_galley, theme::LABEL_EMPHASIS);
-    let note_galley = ui.painter().layout_no_wrap(note.to_string(), theme::interface(11.0), theme::LABEL_DEFAULT);
-    ui.painter().galley(egui::Pos2::new(arrow_rect.right() + 8.0, rect.top() + 24.0), note_galley, theme::LABEL_DEFAULT);
-    response
 }
 
 /// The word on what a recovery or a cleared cache freed, once its moment

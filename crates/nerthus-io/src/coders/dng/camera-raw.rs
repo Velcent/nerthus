@@ -186,23 +186,66 @@ fn prepare_camera_raw(decoded: RawImage) -> Result<(Raw, RawData)> {
 mod diagnostics {
     use super::*;
 
+    /// Facts about each camera raw for comparing with the LibRaw probe's
+    /// `0-opened.txt`: NERTHUS_RAW_DIAGNOSTICS=<dump dir> cargo test
+    /// -p nerthus-io inspect_raw_metadata -- --ignored
     #[test]
     #[ignore]
     fn inspect_raw_metadata() {
         let directory = std::env::var("NERTHUS_RAW_DIAGNOSTICS").unwrap();
-        for index in 1..=20 {
+        let suffixes = ["cr2", "cr3", "crw", "nef", "arw", "orf", "raf", "rw2", "pef", "srw"];
+        let wanted: Vec<usize> = std::env::var("NERTHUS_RAW_CASES")
+            .ok()
+            .map(|list| list.split(',').map(|case| case.trim().parse().unwrap()).collect())
+            .unwrap_or((1..=20).collect());
+        for index in wanted {
             let folder = std::path::Path::new(&directory).join(format!("{index:02}"));
-            for entry in std::fs::read_dir(folder).unwrap() {
+            let entries = std::fs::read_dir(folder).unwrap().collect::<Vec<_>>();
+            for entry in entries {
                 let path = entry.unwrap().path();
                 let extension = path.extension().unwrap().to_str().unwrap().to_ascii_lowercase();
-                if !["cr2", "cr3", "crw", "nef", "arw", "orf", "raf", "rw2", "pef", "srw"].contains(&extension.as_str()) { continue; }
+                if !suffixes.contains(&extension.as_str()) { continue; }
                 let bytes = std::fs::read(&path).unwrap();
+                if let Some(meta) = super::super::camera_raw_meta::parse_camera_meta(&bytes) {
+                    println!(
+                        "CASE {index:02} width {} height {} raw_width {} raw_height {} top {} left {} colors {} filters {} black {} maximum {} bps {} samples {} load_flags {} zero_is_bad {}",
+                        meta.width, meta.height, meta.raw_width, meta.raw_height, meta.top_margin,
+                        meta.left_margin, meta.colors, meta.filters, meta.black, meta.maximum,
+                        meta.tiff_bps, meta.tiff_samples, meta.load_flags, u32::from(meta.zero_is_bad)
+                    );
+                    let cblack: Vec<String> = meta.cblack.iter().map(|&level| level.to_string()).collect();
+                    println!("CASE {index:02} cblack {}", cblack.join(" "));
+                    let pre_mul: Vec<String> = meta.pre_mul.iter().map(|&value| format!("{value:?}")).collect();
+                    let cam_mul: Vec<String> = meta.cam_mul.iter().map(|&value| format!("{value:?}")).collect();
+                    println!("CASE {index:02} pre_mul {} cam_mul {}", pre_mul.join(" "), cam_mul.join(" "));
+                    for row in &meta.rgb_cam {
+                        let values: Vec<String> = row.iter().map(|&value| format!("{value:?}")).collect();
+                        println!("CASE {index:02} rgb_cam {}", values.join(" "));
+                    }
+                    continue;
+                }
                 let source = RawSource::new_from_slice(&bytes);
                 let params = RawDecodeParams::default();
                 let decoded = rawler::decode(&source, &params).unwrap();
-                eprintln!("CASE {index:02} {} {} {}x{} active {:?} crop {:?} fuji {:?} WB {:?} black {:?} white {:?} cfa {:?}", decoded.clean_make, decoded.clean_model, decoded.width, decoded.height, decoded.active_area, decoded.crop_area, decoded.fuji_rotation_width, decoded.wb_coeffs, decoded.blacklevel, decoded.whitelevel, decoded.photometric);
+                println!(
+                    "CASE {index:02} make {:?} model {:?} clean {:?} {:?}",
+                    decoded.make, decoded.model, decoded.clean_make, decoded.clean_model
+                );
                 let (state, _) = prepare_camera_raw(decoded).unwrap();
-                eprintln!("STATE {index:02} {}x{} margins {}:{} filters {:x} pre {:?} rgb {:?}",state.width,state.height,state.left_margin,state.top_margin,state.filters,state.pre_mul,state.rgb_cam);
+                println!(
+                    "CASE {index:02} width {} height {} raw_width {} raw_height {} top {} left {}",
+                    state.width, state.height, state.raw_width, state.raw_height, state.top_margin, state.left_margin
+                );
+                println!("CASE {index:02} colors {} filters {} black {} maximum {} bps {} samples {}", state.colors, state.filters, state.black, state.maximum, state.tiff_bps, state.tiff_samples);
+                let cblack: Vec<String> = state.cblack.iter().map(|&level| level.to_string()).collect();
+                println!("CASE {index:02} cblack {}", cblack.join(" "));
+                let pre_mul: Vec<String> = state.pre_mul.iter().map(|&value| format!("{value:?}")).collect();
+                let cam_mul: Vec<String> = state.cam_mul.iter().map(|&value| format!("{value:?}")).collect();
+                println!("CASE {index:02} pre_mul {} cam_mul {}", pre_mul.join(" "), cam_mul.join(" "));
+                for row in &state.rgb_cam {
+                    let values: Vec<String> = row.iter().map(|&value| format!("{value:?}")).collect();
+                    println!("CASE {index:02} rgb_cam {}", values.join(" "));
+                }
             }
         }
     }

@@ -23,8 +23,9 @@ use crate::editor::{Editor, RenderSource};
 use crate::ui::gizmos::{gizmo_layer, GizmoKind, GizmoState};
 use crate::theme;
 use crate::ui::commands::Command;
+use crate::ui::prompt::{task_button, TaskDialog};
 use crate::ui::tool_window;
-use crate::ui::widgets::{check_item, dialog, dialog_button, icon_menu, menu_caption, menu_item, menu_separator};
+use crate::ui::widgets::{check_item, icon_menu, menu_caption, menu_item, menu_separator};
 use crate::viewport_render::{MaskEnhancement, RenderJob, RenderQuality, ViewportRenderer};
 
 /// `ZoomSpeed`.
@@ -413,8 +414,9 @@ fn show_docked(ui: &mut Ui, rect: Rect, editor: &Editor, state: &mut Viewport2DS
             }
         }
     }
-    // Enter ends picking and measuring (`Viewport2D_KeyUp`).
-    if ui.input(|input| input.key_released(egui::Key::Enter)) {
+    // `Viewport2D_KeyUp` checks WPF Key 13 (Escape, rather than ASCII
+    // carriage return). Releasing it ends either measurement mode.
+    if ui.input(|input| input.key_released(egui::Key::Escape)) {
         view.picking = false;
         view.measuring = false;
     }
@@ -979,21 +981,18 @@ fn picked_dialog(ctx: &egui::Context, state: &mut Viewport2DState, commands: &mu
         ctx.data_mut(|data| data.insert_temp(Id::new("picked-reported"), true));
     }
     let mut close = false;
-    let modal = dialog(ctx, Id::new("pixel-sampled"));
-    let response = modal.show(ctx, |ui| {
-        ui.set_width(380.0);
-        ui.label(egui::RichText::new("Pixel sampled").font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS));
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new(content.as_str()).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
-        ui.add_space(12.0);
+    let modal = TaskDialog::new(ctx, Id::new("pixel-sampled"), 420.0);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, "Pixel sampled", false, |ui| {
+            ui.add(egui::Label::new(content.as_str()).wrap());
+        });
         // Right to left: Close, then the copy buttons before it.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if dialog_button(ui, "Close", false).clicked() {
+        task.buttons(ui, |ui| {
+            if task_button(ui, "Close").clicked() {
                 close = true;
             }
             for (index, label) in buttons.iter().enumerate().rev() {
-                if dialog_button(ui, label, false).clicked() {
+                if task_button(ui, label).clicked() {
                     let text = copied_text(&picked, colour, index);
                     ui.ctx().copy_text(text);
                     close = true;
@@ -1057,6 +1056,43 @@ fn grouped_optional(value: f64, decimals: usize, fixed_decimals: bool) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_released_ends_picking_and_measuring_while_enter_leaves_them_on() {
+        let context = egui::Context::default();
+        let mut document = crate::document::Document::new();
+        let node = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.select(Some(node));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(600.0));
+
+        for mode in ["pick", "measure"] {
+            let mut state = Viewport2DState::default();
+            state.open_at_launch(mode);
+            let mut frame = |key, pressed| {
+                let event = egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                let input = egui::RawInput { screen_rect: Some(screen), events: vec![event], ..Default::default() };
+                context.run_ui(input, |ui| {
+                    let mut commands = Vec::new();
+                    show_docked(ui, screen, &editor, &mut state, &mut commands);
+                    assert!(commands.is_empty());
+                }).drop_without_applying_deltas();
+                (state.is_picking(), state.is_measuring())
+            };
+            let active = (mode == "pick", mode == "measure");
+            assert_eq!(frame(egui::Key::Enter, true), active);
+            assert_eq!(frame(egui::Key::Enter, false), active);
+            assert_eq!(frame(egui::Key::Escape, true), active);
+            assert_eq!(frame(egui::Key::Escape, false), (false, false));
+            assert!(state.picked.is_none());
+        }
+    }
 
     #[test]
     fn number_formats_follow_dotnet() {

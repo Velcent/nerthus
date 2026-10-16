@@ -22,7 +22,6 @@ use crate::editor::Editor;
 use crate::theme;
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::help_windows::{self, SideTab, ACCENT_ORANGE};
-use crate::ui::widgets;
 use crate::user::ToolboxStyle;
 
 /// The file whose presence says the setup is done.
@@ -460,15 +459,13 @@ fn refusal(ctx: &egui::Context, onboard: &mut Onboard) {
     if !onboard.refused {
         return;
     }
-    let modal = widgets::dialog(ctx, egui::Id::new("onboard-invalid-location"));
-    let response = modal.show(ctx, |ui| {
-        ui.set_width(380.0);
-        ui.label(RichText::new("Invalid Location").font(theme::semibold(14.0)).color(theme::ACCENT_MUTED_BLUE));
-        ui.add_space(8.0);
-        ui.label("You cannot place Nerthus Projects or User Files under the Nerthus Installation Folder.");
-        ui.add_space(12.0);
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            if ui.button("OK").clicked() {
+    let modal = crate::ui::prompt::TaskDialog::new(ctx, egui::Id::new("onboard-invalid-location"), 380.0);
+    let response = modal.show(ctx, |ui, task| {
+        task.body(ui, "Invalid Location", false, |ui| {
+            ui.add(egui::Label::new("You cannot place Nerthus Projects or User Files under the Nerthus Installation Folder.").wrap());
+        });
+        task.buttons(ui, |ui| {
+            if crate::ui::prompt::task_button(ui, "OK").clicked() {
                 onboard.refused = false;
             }
         });

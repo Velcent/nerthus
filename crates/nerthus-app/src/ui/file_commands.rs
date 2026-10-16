@@ -75,6 +75,7 @@ pub fn run(command: FileCommand, editor: &mut Editor, ui_state: &mut UiState) {
             editor.files.dialog = Some(FileDialog::ExportTorlet { tab });
         }
         FileCommand::Exit => request(FileAction::Exit, editor, ui_state),
+        FileCommand::Restart(arguments) => request(FileAction::Restart(arguments), editor, ui_state),
         FileCommand::SaveFirst => save_first(editor, ui_state),
         // No to the save question, or a Save As it asked for went through.
         FileCommand::DiscardChanges => {
@@ -174,7 +175,7 @@ pub fn save_question() -> Prompt {
 /// `SavePrompt`'s condition (unsaved changes and something to undo), or
 /// for Exit `Shell_Closing`'s (unsaved changes).
 fn needs_save_question(action: &FileAction, editor: &Editor) -> bool {
-    if *action == FileAction::Exit {
+    if matches!(action, FileAction::Exit | FileAction::Restart(_)) {
         return editor.document.dirty;
     }
     editor.document.dirty && editor.document.can_undo()
@@ -223,6 +224,16 @@ fn perform(action: FileAction, editor: &mut Editor) {
         // `CloseFile` as Nerthus closes: its previews written first when
         // the project keeps them.
         FileAction::Exit => {
+            if !editor.exit_when_frozen() {
+                editor.files.exit_now = true;
+            }
+        }
+        FileAction::Restart(arguments) => {
+            if let Err(error) = crate::ui::diagnostics_window::prepare_restart(arguments) {
+                let message = files::Message::new("Cannot restart Nerthus", &error.to_string());
+                editor.files.messages.push(message);
+                return;
+            }
             if !editor.exit_when_frozen() {
                 editor.files.exit_now = true;
             }
@@ -322,6 +333,52 @@ pub fn take_requests(editor: &mut Editor, ui_state: &mut UiState, commands: &mut
 mod tests {
     use super::*;
     use crate::document::Document;
+
+    #[test]
+    fn canceled_or_displaced_restarts_do_not_arm_a_later_ordinary_exit() {
+        use crate::ui::diagnostics_window::take_restart;
+        let mut editor = Editor::new(Document::new());
+        let mut ui_state = UiState::default();
+        editor.document.dirty = true;
+        assert!(!editor.document.can_undo());
+        let arguments = vec!["--safe-mode".to_string()];
+        run(FileCommand::Restart(arguments.clone()), &mut editor, &mut ui_state);
+        assert!(ui_state.prompt.is_some(), "restarts ask to save even without an undo history");
+        let pending = editor.files.pending.as_ref().unwrap();
+        assert_eq!(pending.action, FileAction::Restart(arguments.clone()));
+        assert_eq!(take_restart(), None, "an unanswered restart must not be armed");
+
+        // Cancel dismisses the save prompt. An ordinary exit replaces
+        // that pending action and must only close, even after No.
+        ui_state.prompt = None;
+        run(FileCommand::Exit, &mut editor, &mut ui_state);
+        ui_state.prompt = None;
+        run(FileCommand::DiscardChanges, &mut editor, &mut ui_state);
+        assert!(editor.files.exit_now);
+        assert_eq!(take_restart(), None);
+
+        editor.files.exit_now = false;
+        run(FileCommand::Restart(arguments.clone()), &mut editor, &mut ui_state);
+        run(FileCommand::OpenExamples, &mut editor, &mut ui_state);
+        ui_state.prompt = None;
+        run(FileCommand::DiscardChanges, &mut editor, &mut ui_state);
+        assert!(editor.files.examples_open);
+        assert_eq!(take_restart(), None, "a displaced restart must not be armed");
+        run(FileCommand::Exit, &mut editor, &mut ui_state);
+        ui_state.prompt = None;
+        run(FileCommand::DiscardChanges, &mut editor, &mut ui_state);
+        assert!(editor.files.exit_now);
+        assert_eq!(take_restart(), None);
+
+        // Confirming the restart itself transfers its arguments to the
+        // exit handler, after the save flow has finished.
+        editor.files.exit_now = false;
+        run(FileCommand::Restart(arguments.clone()), &mut editor, &mut ui_state);
+        ui_state.prompt = None;
+        run(FileCommand::DiscardChanges, &mut editor, &mut ui_state);
+        assert!(editor.files.exit_now);
+        assert_eq!(take_restart(), Some(arguments));
+    }
 
     #[test]
     fn repair_closes_the_project_for_a_new_one_before_its_chooser() {

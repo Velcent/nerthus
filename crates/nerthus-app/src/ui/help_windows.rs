@@ -9,8 +9,9 @@ use egui::{Align, Align2, Color32, Id, Layout, RichText, Sense, Stroke, Ui, Vec2
 
 use crate::theme;
 use crate::ui::markdown;
+use crate::ui::prompt::{task_button, TaskDialog};
 use crate::ui::tool_window;
-use crate::ui::widgets::{self, dialog_button, dialog_button_row, DialogFit};
+use crate::ui::widgets::{self, DialogFit};
 use crate::updates::{UpdateAnswer, UpdateToken};
 
 const SHORTCUTS: &str = include_str!("../../data/shortcuts.md");
@@ -453,19 +454,14 @@ fn notes_text(token: &UpdateToken) -> String {
 fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Option<UpdateToken>) {
     let mut open = true;
     let mut download = None;
-    let caption = match &dialog.answer {
-        UpdateAnswer::Available(_) => "Update available!".to_string(),
-        _ => concat!("Nerthus ", env!("CARGO_PKG_VERSION")).to_string(),
+    let instruction = match &dialog.answer {
+        UpdateAnswer::Available(token) => format!("Nerthus Version {} is available", token.version),
+        UpdateAnswer::UpToDate => "You're up-to-date!".to_string(),
+        UpdateAnswer::Failed(_) => "Error loading update information.".to_string(),
     };
     let id = Id::new("update-check");
-    let fit = DialogFit::new(ctx, id, &widgets::dialog_frame(ctx));
-    let modal = widgets::dialog(ctx, id);
-    let response = modal.show(ctx, |ui| {
-        ui.set_width(fit.width(460.0));
-        let heading = |ui: &mut Ui, text: &str| {
-            ui.label(RichText::new(text).font(theme::semibold(15.0)).color(theme::ACCENT_MUTED_BLUE));
-            ui.add_space(8.0);
-        };
+    let modal = TaskDialog::new(ctx, id, 460.0);
+    let response = modal.show(ctx, |ui, task| {
         let body = |ui: &mut Ui, text: &str| {
             ui.add(egui::Label::new(RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT)).wrap());
         };
@@ -477,21 +473,17 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
             }
         };
         let releases = crate::updates::releases_page();
-        fit.body(ui, |ui| {
-            ui.label(RichText::new(caption).font(theme::interface(11.0)).color(theme::LABEL_DEFAULT));
-            ui.add_space(6.0);
+        let warning = matches!(dialog.answer, UpdateAnswer::Failed(_));
+        task.body(ui, &instruction, warning, |ui| {
             match &dialog.answer {
                 UpdateAnswer::UpToDate => {
-                    heading(ui, "You're up-to-date!");
                     body(ui, "Congratulations! You're running the latest version of Nerthus with the most recent feature updates!\n\nIf you would like to re-install Nerthus, visit");
                     link(ui, &releases, &releases);
                 }
                 UpdateAnswer::Failed(error) => {
-                    heading(ui, "Error loading update information.");
                     body(ui, error);
                 }
                 UpdateAnswer::Available(token) => {
-                    heading(ui, &format!("Nerthus Version {} is available", token.version));
                     // Without a download for this system, the page opens
                     // instead.
                     let question = if token.download.is_some() { "Would you like to download and install the update?" } else { "Would you like to download the update?" };
@@ -514,21 +506,20 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
                 }
             }
         });
-        ui.add_space(12.0);
         match &dialog.answer {
             UpdateAnswer::UpToDate | UpdateAnswer::Failed(_) => {
-                dialog_button_row(ui, |ui| {
-                    if dialog_button(ui, "OK", false).clicked() {
+                task.buttons(ui, |ui| {
+                    if task_button(ui, "OK").clicked() {
                         open = false;
                     }
                 });
             }
             UpdateAnswer::Available(token) => {
-                dialog_button_row(ui, |ui| {
-                    if dialog_button(ui, "Cancel", false).clicked() {
+                task.buttons(ui, |ui| {
+                    if task_button(ui, "Cancel").clicked() {
                         open = false;
                     }
-                    if dialog_button(ui, "Download Update", true).clicked() {
+                    if task_button(ui, "Download Update").clicked() {
                         if token.download.is_some() {
                             download = Some(token.clone());
                         } else {
@@ -537,17 +528,16 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
                         open = false;
                     }
                 });
-                ui.add_space(8.0);
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    link(ui, "Open download page", &releases);
-                    body(ui, " to read more or download manually.");
+                task.footer(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        link(ui, "Open download page", &releases);
+                        body(ui, " to read more or download manually.");
+                    });
                 });
             }
         }
     });
-    fit.end(ctx, response.response.rect);
     if response.should_close() {
         open = false;
     }
@@ -621,14 +611,14 @@ mod tests {
     }
 
     #[test]
-    fn the_update_dialog_keeps_its_caption_and_link_in_small_windows() {
+    fn the_update_dialog_keeps_its_instruction_and_link_in_small_windows() {
         let context = fit_checks::context();
         let mut dialog = UpdateDialog::sample();
         for screen in fit_checks::SMALL_SCREENS {
             let words = fit_checks::settle(&context, screen, |ctx| {
                 update_window(ctx, &mut dialog);
             });
-            let expected = ["Update available!", "Nerthus Version 9.9.9", "Download Update", "Cancel", "Open download page"];
+            let expected = ["Nerthus Version 9.9.9", "Download Update", "Cancel", "Open download page"];
             fit_checks::assert_fits(&context, screen, Id::new("update-check"), &words, &expected);
         }
     }

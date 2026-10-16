@@ -57,7 +57,7 @@ fn follow_dragged_files(_main_thread: NonSendMarker, mut drags: MessageReader<Fi
 /// The pointer's place in a window as the system has it, in logical
 /// pixels from the window's top left; none where the system can't say
 /// (Wayland gives programs no pointer position of their own asking).
-mod system_pointer {
+pub(crate) mod system_pointer {
     use bevy::math::Vec2;
     use bevy::window::RawHandleWrapper;
 

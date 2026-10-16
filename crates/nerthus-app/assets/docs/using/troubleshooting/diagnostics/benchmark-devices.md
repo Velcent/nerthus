@@ -6,6 +6,8 @@ The Hardware Benchmark runs a test to determine the general speed of your CPU, i
 
 The score signifies the performance factor of each device. A higher score indicates better performance. The scores are kept in the data folder's `Benchmark.json`.
 
+Diagnostics offers three accuracy settings: **Run Benchmark** uses 10 timed passes per device, **High Accuracy** uses 20, and **Very High Accuracy** uses 50. More passes take longer and reduce the effect of timing variation. Each score uses the average time per pass, so the different accuracy settings use the same scoring scale. Options › Compute uses the standard 10 passes.
+
 ### Compute Options
 
 The benchmark data is also available via the [Compute](../../../ui/interface/options/compute.md) tab.

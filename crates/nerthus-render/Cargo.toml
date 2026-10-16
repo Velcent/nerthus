@@ -8,3 +8,5 @@ license.workspace = true
 [dependencies]
 nerthus-engine.workspace = true
 bevy = { workspace = true, features = ["default"] }
+flate2.workspace = true
+half.workspace = true

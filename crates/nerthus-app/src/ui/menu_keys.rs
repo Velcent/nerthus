@@ -475,15 +475,19 @@ pub fn bar(ctx: &Context, menus: &[(Id, Key)]) {
     let open = menus.iter().position(|(id, _)| Popup::is_id_open(ctx, *id));
     let step = with(ctx, |keyboard| keyboard.step.take());
     let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
-    let typing = ctx.egui_wants_keyboard_input();
     let f10 = !modal && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F10));
     let alt_alone = with(ctx, |keyboard| std::mem::take(&mut keyboard.alt_let_go_alone));
     let toggled = f10 || (!modal && alt_alone);
     // Alt and a key with no Ctrl, a system key: an access key.
-    let access = if modal || typing {
+    let bar_mode = with(ctx, |keyboard| keyboard.bar_focus.is_some());
+    let access = if modal {
         None
     } else {
-        ctx.input_mut(|input| menus.iter().position(|(_, key)| input.consume_key(Modifiers::ALT, *key)))
+        ctx.input_mut(|input| {
+            menus.iter().position(|(_, key)| {
+                input.consume_key(Modifiers::ALT, *key) || (bar_mode && input.consume_key(Modifiers::NONE, *key))
+            })
+        })
     };
     let escape = ctx.input(|input| input.key_pressed(Key::Escape));
     let (focus, keys, was_open) = with(ctx, |keyboard| (keyboard.bar_focus, keyboard.bar_keys, keyboard.bar_open));

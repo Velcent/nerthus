@@ -17,7 +17,8 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::data_view::{section_title, subtle_button, toolbar, toolbar_divider, toolbar_row};
 use crate::ui::editors::dropdown_box;
-use crate::ui::widgets::{check_item, dialog, dialog_button, icon_button, icon_menu, icon_menu_sized, menu_caption, menu_item, menu_item_enabled, menu_separator, Tooltips};
+use crate::ui::prompt::{task_button, TaskDialog};
+use crate::ui::widgets::{check_item, icon_button, icon_menu, icon_menu_sized, menu_caption, menu_item, menu_item_enabled, menu_separator, Tooltips};
 
 /// `cboResolution`'s items: the size and its text.
 const RESOLUTIONS: [(usize, &str); 18] = [
@@ -111,20 +112,16 @@ fn confirm_format(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState) {
     let Some(format) = state.pending_format else {
         return;
     };
-    let modal = dialog(ui.ctx(), egui::Id::new("confirm-export-formats"));
-    let response = modal.show(ui.ctx(), |ui| {
-        ui.set_width(320.0);
-        let title = egui::RichText::new("Update file format").font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS);
-        ui.label(title);
-        ui.add_space(6.0);
-        ui.label("Do you want change file format for all nodes");
-        ui.add_space(12.0);
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if dialog_button(ui, "No", false).clicked() {
+    let modal = TaskDialog::new(ui.ctx(), egui::Id::new("confirm-export-formats"), 350.0);
+    let response = modal.show(ui.ctx(), |ui, task| {
+        task.body(ui, "Update file format", false, |ui| {
+            ui.add(egui::Label::new("Do you want change file format for all nodes").wrap());
+        });
+        task.buttons(ui, |ui| {
+            if task_button(ui, "No").clicked() {
                 state.pending_format = None;
             }
-            if dialog_button(ui, "Yes", false).clicked() {
+            if task_button(ui, "Yes").clicked() {
                 editor.document.set_all_export_formats(format);
                 state.pending_format = None;
             }

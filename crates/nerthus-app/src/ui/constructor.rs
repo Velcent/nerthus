@@ -21,6 +21,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::editors::{self, SliderSpec};
+use crate::ui::gizmo_pointer;
 use crate::ui::tool_window;
 use crate::ui::widgets::{check_item, icon_menu, menu_separator, scroll_bar_gutter, toolbar_button, Tooltips};
 
@@ -36,8 +37,6 @@ const BRUSHES: [u32; 9] = [0xffadad, 0xffd6a5, 0xfdffb6, 0xcaffbf, 0x9bf6ff, 0xa
 /// `GizmoConstruction`: the drag steps and snaps.
 const HEIGHT_STEP: f32 = 0.005;
 const SCALE_STEP: f32 = 0.01;
-const ROTATE_STEP: f32 = 0.5;
-const ROTATE_SNAP: f32 = 15.0;
 /// The gizmo's scale ring (`ScaleHandle`, 37 to 41 round its middle).
 const RING_OUTER: f32 = 41.5;
 const RING_INNER: f32 = 37.0;
@@ -66,6 +65,7 @@ struct GizmoDrag {
     offset: Vec2,
     /// `_scaleDir`.
     scale_direction: f32,
+    rotation: gizmo_pointer::RotationDrag,
 }
 
 /// The window while it is open.
@@ -378,6 +378,7 @@ fn chosen_gizmo(ui: &mut Ui, painter: &egui::Painter, image: Rect, window: &mut 
 
     // `Handle_MouseLeftButtonDown`.
     let pointer = ui.input(|input| input.pointer.interact_pos());
+    let native_pointer = gizmo_pointer::pointer_frame(ui.ctx());
     if window.drag.is_none()
         && let Some(pointer) = pointer
     {
@@ -386,12 +387,28 @@ fn chosen_gizmo(ui: &mut Ui, painter: &egui::Painter, image: Rect, window: &mut 
         if let Some(handle) = handle {
             let offset = (pointer - centre) / side;
             let scale_direction = if pointer.x < centre.x { -1.0 } else { 1.0 };
-            window.drag = Some(GizmoDrag { handle, start: pointer, start_transform: transform.clone(), offset, scale_direction });
+            let rotate_start_pointer = native_pointer.map(|frame| frame.position).unwrap_or(pointer * ui.ctx().pixels_per_point());
+            let rotation = gizmo_pointer::RotationDrag::new(rotate_start_pointer, transform.rotate);
+            let drag = GizmoDrag {
+                handle,
+                start: pointer,
+                start_transform: transform.clone(),
+                offset,
+                scale_direction,
+                rotation,
+            };
+            window.drag = Some(drag);
         }
     }
     let drag = window.drag.clone()?;
     let modifiers = ui.input(|input| input.modifiers);
     let mut changed = transform.clone();
+    let pointer = pointer.or_else(|| {
+        if drag.handle != Handle::Rotate {
+            return None;
+        }
+        native_pointer.map(|frame| frame.position / ui.ctx().pixels_per_point())
+    });
     if let Some(pointer) = pointer {
         let moved = pointer - drag.start;
         let start = &drag.start_transform;
@@ -428,14 +445,22 @@ fn chosen_gizmo(ui: &mut Ui, painter: &egui::Painter, image: Rect, window: &mut 
                 changed.scale = scale;
             }
             Handle::Rotate => {
-                let step = if modifiers.shift { ROTATE_STEP * 0.25 } else { ROTATE_STEP };
-                let raw = (start.rotate - moved.y * step).rem_euclid(360.0);
-                changed.rotate = if modifiers.ctrl || modifiers.command { (raw / ROTATE_SNAP).round() * ROTATE_SNAP } else { raw };
+                if let Some(active) = window.drag.as_mut() {
+                    let physical = pointer * ui.ctx().pixels_per_point();
+                    let position = native_pointer.map(|frame| frame.position).unwrap_or(physical);
+                    let wrapped = native_pointer.is_some_and(|frame| frame.wrapped);
+                    if let Some(rotate) = active.rotation.rotate_to(position, wrapped, modifiers) {
+                        changed.rotate = rotate;
+                    }
+                }
             }
         }
     }
     if !ui.input(|input| input.pointer.primary_down()) {
         window.drag = None;
+    }
+    if window.drag.as_ref().is_some_and(|drag| drag.handle == Handle::Rotate) {
+        gizmo_pointer::request_rotation(ui.ctx());
     }
     Some(changed)
 }

@@ -67,12 +67,20 @@ pub fn best_device(scores: &Scores) -> Option<&str> {
 
 /// Benchmarks every available device that can compute, telling `report`
 /// how each did. Devices that fail score zero.
-pub fn scan(mut report: impl FnMut(String)) -> Scores {
+pub fn scan(report: impl FnMut(String)) -> Scores {
+    scan_with_passes(BENCHMARK_ITERATIONS, report)
+}
+
+/// Benchmarks every device using this many timed passes per device.
+/// More passes average out timing variation. Zero is treated as one.
+pub fn scan_with_passes(passes: usize, mut report: impl FnMut(String)) -> Scores {
+    let passes = passes.max(1);
     let (devices, _) = devices::available_devices();
     let input = random_plane();
     let mut scores = Scores::new();
     for device in devices.iter().filter(|device| !device.requires_driver_update) {
-        let score = benchmark(device, &input).unwrap_or(0.0);
+        report(format!("Benchmarking {} ({}), {passes} passes...", device.device_name, device.backend_name));
+        let score = benchmark(device, &input, passes).unwrap_or(0.0);
         report(format!("{score:.0} - {} ({})", device.device_name, device.backend_name));
         scores.insert(device.id.clone(), score);
     }
@@ -80,8 +88,8 @@ pub fn scan(mut report: impl FnMut(String)) -> Scores {
 }
 
 /// One device's score: 5000 over the milliseconds a run takes.
-fn benchmark(device: &DeviceInfo, input: &[f32]) -> Option<f64> {
-    let milliseconds = if device.is_fallback_device { Some(cpu_run_time(input)) } else { gpu_run_time(device, input) };
+fn benchmark(device: &DeviceInfo, input: &[f32], passes: usize) -> Option<f64> {
+    let milliseconds = if device.is_fallback_device { Some(cpu_run_time(input, passes)) } else { gpu_run_time(device, input, passes) };
     match milliseconds {
         Some(time) if time > 0.0 => Some(5000.0 / time),
         _ => None,
@@ -119,9 +127,9 @@ fn cpu_blur(source: &[f32], target: &mut [f32]) {
 }
 
 /// Milliseconds per run on the CPU, the copies in and out included.
-fn cpu_run_time(input: &[f32]) -> f64 {
+fn cpu_run_time(input: &[f32], passes: usize) -> f64 {
     let start = Instant::now();
-    for _ in 0..BENCHMARK_ITERATIONS {
+    for _ in 0..passes {
         let mut source = input.to_vec();
         let mut target = vec![0.0f32; input.len()];
         for _ in 0..BLUR_ITERATIONS {
@@ -130,7 +138,7 @@ fn cpu_run_time(input: &[f32]) -> f64 {
         }
         std::hint::black_box(&source);
     }
-    start.elapsed().as_secs_f64() * 1000.0 / BENCHMARK_ITERATIONS as f64
+    start.elapsed().as_secs_f64() * 1000.0 / passes as f64
 }
 
 /// The GPU with this id: the active one, or one opened for the benchmark.
@@ -163,15 +171,15 @@ fn gpu_run(gpu: &GpuDevice, input: &[f32]) -> Result<(), GpuError> {
 
 /// Milliseconds per run on a GPU, uploads and downloads included (after
 /// one run that compiles the kernel).
-fn gpu_run_time(device: &DeviceInfo, input: &[f32]) -> Option<f64> {
+fn gpu_run_time(device: &DeviceInfo, input: &[f32], passes: usize) -> Option<f64> {
     let gpu = gpu_for(device)?;
     let timed = gpu.run(|gpu| {
         gpu_run(gpu, input)?;
         let start = Instant::now();
-        for _ in 0..BENCHMARK_ITERATIONS {
+        for _ in 0..passes {
             gpu_run(gpu, input)?;
         }
-        Ok(start.elapsed().as_secs_f64() * 1000.0 / BENCHMARK_ITERATIONS as f64)
+        Ok(start.elapsed().as_secs_f64() * 1000.0 / passes as f64)
     });
     match timed {
         Ok(time) => Some(time),
