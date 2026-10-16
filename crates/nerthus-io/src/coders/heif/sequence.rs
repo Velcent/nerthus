@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Result};
 
-use super::boxes::{fourcc, Av1C, Content, HeifBox, HvcC};
+use super::boxes::{fourcc, Av1C, AvcC, Content, HeifBox, HvcC};
 use super::image::{Channel, PixelImage};
 
 const MAX_SEQUENCE_FRAMES: u32 = 18_000_000;
@@ -20,8 +20,9 @@ const ALPHA_URNS: [&str; 3] = ["urn:mpeg:mpegB:cicp:systems:auxiliary:alpha", "u
 enum SampleFormat {
     Hevc(Option<HvcC>),
     Av1(Option<Av1C>),
+    Avc(Option<AvcC>),
     /// Formats the decoder plugins of the reading library do not cover
-    /// here (AVC) or at all (VVC, JPEG 2000, JPEG).
+    /// here (VVC, JPEG 2000, JPEG).
     Unsupported,
 }
 
@@ -30,6 +31,7 @@ enum DecoderState {
     Hevc(nerthus_hevc::Decoder),
     #[cfg(not(target_arch = "wasm32"))]
     Av1(super::av1::SequenceDecoder),
+    Avc(super::avc::SequenceDecoder),
 }
 
 struct SampleDecoder {
@@ -193,6 +195,13 @@ fn sample_format(entry: &HeifBox) -> SampleFormat {
             _ => None,
         });
         return SampleFormat::Av1(av1c);
+    }
+    if kind == fourcc(b"avc1") {
+        let configuration = entry.child(b"avcC").and_then(|child| match &child.content {
+            Content::AvcC(configuration) => Some(configuration.clone()),
+            _ => None,
+        });
+        return SampleFormat::Avc(configuration);
     }
     SampleFormat::Unsupported
 }
@@ -467,6 +476,8 @@ impl SampleDecoder {
                 SampleFormat::Av1(_) => DecoderState::Av1(super::av1::SequenceDecoder::new()?),
                 #[cfg(target_arch = "wasm32")]
                 SampleFormat::Av1(_) => bail!("AV1 images cannot be read in the web version"),
+                SampleFormat::Avc(Some(configuration)) => DecoderState::Avc(super::avc::SequenceDecoder::new(configuration.clone())),
+                SampleFormat::Avc(None) => bail!("Sample description without AVC decoder configuration"),
                 SampleFormat::Unsupported => bail!("No decoding plugin installed for this compression format"),
             };
             self.state = Some(state);
@@ -486,6 +497,9 @@ impl SampleDecoder {
                 Ok(data)
             }
             SampleFormat::Av1(Some(av1c)) => Ok(av1c.config_obus.clone()),
+            // The AVC decoder owns its parameter sets and inserts them
+            // before its first sample, regardless of that sample's index.
+            SampleFormat::Avc(Some(_)) => Ok(Vec::new()),
             _ => bail!("Sample description without decoder configuration"),
         }
     }
@@ -507,6 +521,7 @@ impl SampleDecoder {
             DecoderState::Hevc(decoder) => push_hevc_units(decoder, &data, user_data),
             #[cfg(not(target_arch = "wasm32"))]
             DecoderState::Av1(decoder) => decoder.push(&data, user_data),
+            DecoderState::Avc(decoder) => decoder.push(&data, user_data),
         }
     }
 
@@ -516,6 +531,7 @@ impl SampleDecoder {
             DecoderState::Hevc(decoder) => decoder.flush_data(),
             #[cfg(not(target_arch = "wasm32"))]
             DecoderState::Av1(_) => {}
+            DecoderState::Avc(_) => {}
         }
         Ok(())
     }
@@ -530,6 +546,7 @@ impl SampleDecoder {
             },
             #[cfg(not(target_arch = "wasm32"))]
             DecoderState::Av1(decoder) => Ok(decoder.next_image()),
+            DecoderState::Avc(decoder) => Ok(decoder.nextImage()),
         }
     }
 }

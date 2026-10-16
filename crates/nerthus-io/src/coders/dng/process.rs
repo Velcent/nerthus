@@ -63,9 +63,12 @@ pub(super) fn process(state: &mut Raw, raw: RawData) -> Result<Output> {
         image.xtrans_interpolate(3)?;
     } else if filters != 0 && (image.state.colors > 3 || filters <= 1000) {
         image.vng_interpolate();
+    } else if filters != 0 && image.state.fuji_width != 0 {
+        image.ppg_interpolate();
     } else if filters != 0 {
         image.ahd_interpolate();
     }
+    image.rotate_fuji();
     let histogram = image.convert_to_rgb();
     image.stretch();
     Ok(image.make_mem_image(&histogram))
@@ -175,6 +178,25 @@ impl Image<'_> {
         let copy_width = width.min(raw_width.saturating_sub(left));
         let mut data_maximum = 0u16;
         match raw {
+            RawData::Bayer(raw_image) if self.state.fuji_width != 0 && !self.state.fuji_raw_rotated => {
+                let fuji_width = self.state.fuji_width as usize;
+                let sensor_height = raw_height.saturating_sub(top * 2);
+                let sensor_width = (fuji_width * 2).min(raw_width.saturating_sub(left));
+                for row in 0..sensor_height {
+                    for column in 0..sensor_width {
+                        let target_row = fuji_width - 1 + row - (column >> 1);
+                        let target_column = row + ((column + 1) >> 1);
+                        if target_row >= height || target_column >= width {
+                            continue;
+                        }
+                        let colour = self.colour(target_row, target_column);
+                        let value = raw_image[(row + top) * raw_width + column + left];
+                        let corrected = value.saturating_sub(cblack[colour]);
+                        data_maximum = data_maximum.max(corrected);
+                        self.pixels[target_row * width + target_column][colour] = corrected;
+                    }
+                }
+            }
             RawData::Bayer(raw_image) => {
                 for row in 0..copy_height {
                     for column in 0..copy_width {
@@ -211,6 +233,47 @@ impl Image<'_> {
             self.state.cblack[..4].fill(0);
             self.state.black = 0;
         }
+    }
+
+    /// `fuji_rotate`: turn the interpolated diagonal SuperCCD grid into
+    /// its inscribed rectangle, before colour conversion and histogram.
+    fn rotate_fuji(&mut self) {
+        if self.state.fuji_width == 0 {
+            return;
+        }
+        let fuji_width = self.state.fuji_width as usize - 1;
+        let step = 0.5f64.sqrt();
+        let output_width = (fuji_width as f64 / step) as usize;
+        let output_height = ((self.height - fuji_width) as f64 / step) as usize;
+        let mut output = vec![[0u16; 4]; output_width * output_height];
+        for row in 0..output_height {
+            for column in 0..output_width {
+                let source_row = (fuji_width as f64 + (row as f64 - column as f64) * step) as f32;
+                let source_column = ((row + column) as f64 * step) as f32;
+                if source_row < 0.0 || source_column < 0.0 {
+                    continue;
+                }
+                let top = source_row as usize;
+                let left = source_column as usize;
+                if top > self.height - 2 || left > self.width - 2 {
+                    continue;
+                }
+                let row_fraction = source_row - top as f32;
+                let column_fraction = source_column - left as f32;
+                let index = top * self.width + left;
+                for channel in 0..self.state.colors {
+                    let upper = self.pixels[index][channel] as f32 * (1.0 - column_fraction)
+                        + self.pixels[index + 1][channel] as f32 * column_fraction;
+                    let lower = self.pixels[index + self.width][channel] as f32 * (1.0 - column_fraction)
+                        + self.pixels[index + self.width + 1][channel] as f32 * column_fraction;
+                    output[row * output_width + column][channel] = (upper * (1.0 - row_fraction) + lower * row_fraction) as u16;
+                }
+            }
+        }
+        self.pixels = output;
+        self.width = output_width;
+        self.height = output_height;
+        self.state.fuji_width = 0;
     }
 
     /// `subtract_black_internal`.

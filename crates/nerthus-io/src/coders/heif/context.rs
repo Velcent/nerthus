@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, bail, Result};
 
-use super::boxes::{fourcc, read_box, Av1C, Clap, ColorProfile, Content, HeifBox, HvcC, IlocItem, Infe, IpmaEntry, Range, Reference};
+use super::boxes::{fourcc, read_box, Av1C, AvcC, Clap, ColorProfile, Content, HeifBox, HvcC, IlocItem, Infe, IpmaEntry, Range, Reference};
 use super::image::{Channel, Chroma, Colorspace, PixelImage};
 use super::nclx::{known_colour_primaries, known_matrix_coefficients, known_transfer_characteristics, Nclx};
 use super::sequence::{assign_alpha_tracks, decode_next_image_sample, FileStream, Track};
@@ -22,7 +22,7 @@ const MAX_IMAGE_SIZE_PIXELS: u64 = 32768 * 32768;
 pub enum ItemKind {
     Hevc(HvcC),
     Av1(Av1C),
-    Avc,
+    Avc(AvcC),
     Jpeg,
     Jpeg2000,
     Vvc,
@@ -438,10 +438,10 @@ impl<'a> Context<'a> {
                 ItemKind::Av1(av1c.clone())
             }
             b"avc1" => {
-                if item.property(b"avcC").is_none() {
-                    bail!("No av1C box");
-                }
-                ItemKind::Avc
+                let Some(HeifBox { content: Content::AvcC(configuration), .. }) = item.property(b"avcC") else {
+                    bail!("No avcC box");
+                };
+                ItemKind::Avc(configuration.clone())
             }
             b"vvc1" => {
                 if item.property(b"vvcC").is_none() {
@@ -903,6 +903,7 @@ impl<'a> Context<'a> {
         match &item.kind {
             Some(ItemKind::Hevc(hvcc)) => hvcc.bit_depth_luma as i32,
             Some(ItemKind::Av1(av1c)) => av1_bit_depth(av1c),
+            Some(ItemKind::Avc(configuration)) => configuration.bit_depth_luma as i32,
             Some(ItemKind::Grid { .. }) | Some(ItemKind::Iden) | Some(ItemKind::Overlay { .. }) => match self.non_virtual_child(id) {
                 Ok(child) if child != id => self.luma_bits_per_pixel(child),
                 _ => -1,
@@ -978,7 +979,11 @@ impl<'a> Context<'a> {
             // does not have.
             #[cfg(target_arch = "wasm32")]
             ItemKind::Av1(_) => bail!("AV1 images cannot be read in the web version"),
-            ItemKind::Avc | ItemKind::Jpeg | ItemKind::Jpeg2000 | ItemKind::Vvc => bail!("No decoding plugin installed for this compression format"),
+            ItemKind::Avc(configuration) => {
+                let data = self.item_data(item.id)?;
+                super::avc::decode(configuration, &data)
+            }
+            ItemKind::Jpeg | ItemKind::Jpeg2000 | ItemKind::Vvc => bail!("No decoding plugin installed for this compression format"),
             ItemKind::Mask => bail!("mask images are not supported"),
             ItemKind::Iden => {
                 if self.iref.is_none() {

@@ -38,6 +38,10 @@ nerthus-io = { path = "crates/nerthus-io" }
 nerthus-hevc = { path = "crates/nerthus-hevc" }
 # AV1 for AVIF: a Rust port of dav1d, without its assembly (no nasm needed).
 rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+# Additional File-node codecs, all implemented in Rust.
+jxl-oxide = { version = "0.12.6", default-features = false, features = ["moxcms"] }
+rusty_h264-decoder = { version = "0.16.0", default-features = false, features = ["std", "global-alloc"] }
+rawler = { version = "0.8.0", default-features = false }
 nerthus-export = { path = "crates/nerthus-export" }
 nerthus-render = { path = "crates/nerthus-render" }
 
@@ -121,6 +125,9 @@ egui_dock = "0.21.1"
 resvg = { version = "0.45.1", default-features = false }
 # Glyph outlines for the text in metafiles the File node reads.
 ttf-parser = { version = "0.25.1", default-features = false, features = ["std"] }
+skrifa = "0.44.0"
+zeno = "0.3.3"
+rustybuzz = "0.20.1"
 winit = { version = "0.30.13", default-features = false }
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false }

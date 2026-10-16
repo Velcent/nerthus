@@ -13,10 +13,16 @@
 //!   with LibRaw's automatic brightness.
 //!
 //! IM copies each 16-bit sample with `ScaleShortToQuantum`; fewer than
-//! three colours make a GRAY image. Nerthus cannot read lossy
-//! (JPEG-compressed) DNG files, as Magick.Native builds LibRaw with
-//! `NO_JPEG`. Fuji SuperCCD layouts are not ported.
+//! three colours make a GRAY image. Fuji SuperCCD uses PPG demosaicing
+//! and a final 45° rotation. A DNG without a matrix uses the LibRaw camera
+//! table. Lossy JPEG DNG remains unsupported, matching Magick.Native's
+//! `NO_JPEG` build. Other camera raw formats use Rawler's Rust unpackers
+//! before this same processing path.
 
+#[path = "camera-colors.rs"]
+mod camera_colors;
+#[path = "camera-raw.rs"]
+mod camera_raw;
 mod demosaic;
 mod identify;
 mod ljpeg;
@@ -33,6 +39,20 @@ use crate::pixel_cache::{CacheColorspace, DEFAULT_GAMMA, PixelCache, PixelChanne
 pub fn read(path: &Path) -> Result<PixelCache> {
     let bytes = std::fs::read(path).with_context(|| format!("cannot open {}", path.display()))?;
     let output = decode(&bytes).with_context(|| format!("cannot read {}", path.display()))?;
+    let (channels, colorspace) = if output.colors < 3 {
+        (vec![PixelChannel::Gray], CacheColorspace::Gray)
+    } else {
+        (vec![PixelChannel::Red, PixelChannel::Green, PixelChannel::Blue], CacheColorspace::SRgb)
+    };
+    let data = output.samples.iter().map(|&sample| sample as f32).collect();
+    Ok(PixelCache::new(output.width, output.height, channels, data, colorspace, DEFAULT_GAMMA))
+}
+
+/// The other camera formats share the DNG processing path after their
+/// format-specific sensor data and metadata have been decoded.
+pub fn read_camera_raw(path: &Path) -> Result<PixelCache> {
+    let bytes = std::fs::read(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let output = camera_raw::decode_camera_raw(&bytes).with_context(|| format!("cannot read {}", path.display()))?;
     let (channels, colorspace) = if output.colors < 3 {
         (vec![PixelChannel::Gray], CacheColorspace::Gray)
     } else {
@@ -141,6 +161,26 @@ mod tests {
     }
 
     const EXPECTED_FINGERPRINT: u64 = 0x25bc1584828db967;
+
+    /// Small generated TIFF/DNG inputs, checked through Gaea's
+    /// Magick.Native 14.12.0 pixel oracle (LibRaw 0.22.0). Their samples
+    /// use the same formula as `synthetic_dng`; the second sensor sample
+    /// differs, ensuring LibRaw's first-image selection is preserved.
+    #[test]
+    fn camera_matrix_and_superccd_match_libraw() {
+        let cases: &[(&[u8], usize, usize, u64)] = &[
+            (include_bytes!("fixtures/canon-no-matrix.dng"), 40, 32, 0x455b701d4a9e4bb4),
+            (include_bytes!("fixtures/nikon-no-matrix.dng"), 40, 32, 0x8dbfaa7df0b509f1),
+            (include_bytes!("fixtures/fuji-layout.dng"), 26, 45, 0x7c2cd780823a6c4a),
+            (include_bytes!("fixtures/fuji-two-rotated.dng"), 26, 45, 0x7c2cd780823a6c4a),
+            (include_bytes!("fixtures/fuji-two-samples.dng"), 40, 32, EXPECTED_FINGERPRINT),
+        ];
+        for &(bytes, width, height, expected_hash) in cases {
+            let output = decode(bytes).unwrap();
+            assert_eq!((output.width, output.height, output.colors), (width, height, 3));
+            assert_eq!(fingerprint(&output.samples), expected_hash);
+        }
+    }
 
     /// Writes the synthetic DNG for the probe: `DNG_OUT=… cargo test
     /// -p nerthus-io write_synthetic_dng -- --ignored`.

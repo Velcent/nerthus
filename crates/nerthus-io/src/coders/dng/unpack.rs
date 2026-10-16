@@ -142,6 +142,9 @@ impl Unpacker<'_, '_> {
             if single_plane {
                 jwide *= head.clrs as u64;
             }
+            if self.state.filters != 0 && self.state.tiff_samples == 2 {
+                jwide /= 2;
+            }
             match head.algo {
                 0xc1 => {
                     head.vpred[0] = 16384;

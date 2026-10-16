@@ -8,6 +8,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod av1;
+mod avc;
 mod boxes;
 mod color;
 mod context;

@@ -25,6 +25,87 @@ const VNG_TERMS: [i8; 384] = [
 const VNG_NEIGHBOURS: [i8; 16] = [-1, -1, -1, 0, -1, 1, 0, 1, 1, 1, 1, 0, 1, -1, 0, -1];
 
 impl Image<'_> {
+    /// LibRaw's quality 2 demosaicing, used for rotated Fuji sensors.
+    pub(super) fn ppg_interpolate(&mut self) {
+        self.border_interpolate(3);
+        let width = self.width;
+        let height = self.height;
+        let directions = [1isize, width as isize, -1, -(width as isize)];
+
+        // Green at red and blue sites, choosing the smoother axis.
+        for row in 3..height.saturating_sub(3) {
+            let first_column = 3 + (self.colour(row, 3) & 1);
+            for column in (first_column..width.saturating_sub(3)).step_by(2) {
+                let index = row * width + column;
+                let colour = self.colour(row, column);
+                let mut guesses = [0i32; 2];
+                let mut differences = [0i32; 2];
+                for (axis, &direction) in directions[..2].iter().enumerate() {
+                    let sample = |step: isize, channel: usize| {
+                        self.pixels[index.wrapping_add_signed(step * direction)][channel] as i32
+                    };
+                    let center = sample(0, colour);
+                    guesses[axis] = (sample(-1, 1) + center + sample(1, 1)) * 2 - sample(-2, colour) - sample(2, colour);
+                    let near_difference = (sample(-2, colour) - center).abs()
+                        + (sample(2, colour) - center).abs()
+                        + (sample(-1, 1) - sample(1, 1)).abs();
+                    let far_difference = (sample(3, 1) - sample(1, 1)).abs() + (sample(-3, 1) - sample(-1, 1)).abs();
+                    differences[axis] = near_difference * 3 + far_difference * 2;
+                }
+                let axis = usize::from(differences[0] > differences[1]);
+                let direction = directions[axis];
+                let before = self.pixels[index.wrapping_add_signed(-direction)][1] as i32;
+                let after = self.pixels[index.wrapping_add_signed(direction)][1] as i32;
+                self.pixels[index][1] = (guesses[axis] >> 2).clamp(before.min(after), before.max(after)) as u16;
+            }
+        }
+
+        // Red and blue at green sites.
+        for row in 1..height.saturating_sub(1) {
+            let first_column = 1 + (self.colour(row, 2) & 1);
+            for column in (first_column..width.saturating_sub(1)).step_by(2) {
+                let index = row * width + column;
+                let mut colour = self.colour(row, column + 1);
+                for &direction in &directions[..2] {
+                    let before = self.pixels[index.wrapping_add_signed(-direction)];
+                    let after = self.pixels[index.wrapping_add_signed(direction)];
+                    let green = self.pixels[index][1] as i32;
+                    let guess = before[colour] as i32 + after[colour] as i32 + 2 * green - before[1] as i32 - after[1] as i32;
+                    self.pixels[index][colour] = clip(guess >> 1);
+                    colour = 2 - colour;
+                }
+            }
+        }
+
+        // The opposite primary at red and blue sites.
+        for row in 1..height.saturating_sub(1) {
+            let first_column = 1 + (self.colour(row, 1) & 1);
+            for column in (first_column..width.saturating_sub(1)).step_by(2) {
+                let index = row * width + column;
+                let colour = 2 - self.colour(row, column);
+                let green = self.pixels[index][1] as i32;
+                let mut guesses = [0i32; 2];
+                let mut differences = [0i32; 2];
+                for axis in 0..2 {
+                    let direction = directions[axis] + directions[axis + 1];
+                    let before = self.pixels[index.wrapping_add_signed(-direction)];
+                    let after = self.pixels[index.wrapping_add_signed(direction)];
+                    differences[axis] = (before[colour] as i32 - after[colour] as i32).abs()
+                        + (before[1] as i32 - green).abs()
+                        + (after[1] as i32 - green).abs();
+                    guesses[axis] = before[colour] as i32 + after[colour] as i32 + 2 * green - before[1] as i32 - after[1] as i32;
+                }
+                let guess = if differences[0] == differences[1] {
+                    (guesses[0] + guesses[1]) >> 2
+                } else {
+                    let axis = usize::from(differences[0] > differences[1]);
+                    guesses[axis] >> 1
+                };
+                self.pixels[index][colour] = clip(guess);
+            }
+        }
+    }
+
     fn pattern_colour(&self, row: i32, column: i32) -> usize {
         fcol(self.state, row, column)
     }

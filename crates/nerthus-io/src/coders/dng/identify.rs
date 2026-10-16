@@ -174,6 +174,10 @@ pub(super) struct Raw {
     pub top_margin: u32,
     pub left_margin: u32,
     pub pixel_aspect: f64,
+    /// SuperCCD's diagonal sensor width, before the final 45° rotation.
+    pub fuji_width: u32,
+    /// Rawler has already placed SuperCCD samples on the diagonal grid.
+    pub fuji_raw_rotated: bool,
     pub filters: u32,
     pub colors: usize,
     pub tiff_bps: u32,
@@ -827,9 +831,6 @@ impl Parser<'_> {
             bail!("the DNG file has no raw image");
         };
         let selected = self.ifds[raw].clone();
-        if selected.samples == 2 {
-            bail!("Fuji SuperCCD DNG files are not supported");
-        }
         let tiff_compress = selected.comp as u32;
         let tiff_sampleformat = selected.sample_format as u32;
         let mut state = Raw {
@@ -844,6 +845,8 @@ impl Parser<'_> {
             top_margin: selected.top_margin as u32,
             left_margin: selected.left_margin as u32,
             pixel_aspect: self.pixel_aspect,
+            fuji_width: 0,
+            fuji_raw_rotated: false,
             filters: 0,
             colors: self.colors,
             tiff_bps: selected.bps as u32,
@@ -894,9 +897,6 @@ impl Parser<'_> {
         let known_compression = matches!(tiff_compress, 0 | 1 | 6 | 7 | 8 | 9 | 99 | 262 | 32767 | 32769 | 32770 | 32773 | 32867 | 34713 | 34892 | 52546 | 65000 | 65535);
         if !known_compression {
             bail!("unsupported DNG compression {tiff_compress}");
-        }
-        if selected.fuji_width != 0 {
-            bail!("Fuji rotated DNG files are not supported");
         }
         // identify: sizes, then the DNG branch.
         self.make = normalized_make(&state.make).to_string();
@@ -974,19 +974,29 @@ impl Parser<'_> {
             }
             state.cam_mul[3] = 0.0;
         }
-        // use_camera_matrix: the DNG matrix becomes rgb_cam. (Without
-        // one LibRaw falls back to its own table of camera matrices,
-        // which is not ported: such DNG files stay in camera colours.)
+        // use_camera_matrix: the DNG matrix takes precedence over the
+        // camera table. The table also supplies daylight white balance.
         if cmatrix[0][0] > 0.125 {
             state.rgb_cam = cmatrix;
             state.raw_color = false;
+        } else {
+            super::camera_colors::apply_camera_colors(&mut state, &self.make, &self.model);
         }
 
-        if state.raw_height < state.height {
-            state.raw_height = state.height;
-        }
-        if state.raw_width < state.width {
-            state.raw_width = state.width;
+        if selected.fuji_width != 0 {
+            state.fuji_width = state.width >> 1;
+            state.filters = if state.fuji_width & 1 != 0 { 0x94949494 } else { 0x49494949 };
+            state.width = state.height + state.fuji_width;
+            state.height = state.width - 1;
+            state.pixel_aspect = 1.0;
+            let rotated_pixels = state.width as u64 * state.height as u64;
+            let raw_pixels = state.raw_width as u64 * state.raw_height as u64;
+            if rotated_pixels > raw_pixels * 8 {
+                bail!("the Fuji DNG sensor layout is damaged");
+            }
+        } else {
+            state.raw_height = state.raw_height.max(state.height);
+            state.raw_width = state.raw_width.max(state.width);
         }
         if state.tiff_bps == 0 {
             state.tiff_bps = 12;
@@ -1264,20 +1274,14 @@ impl Parser<'_> {
 
 /// `simplify_make_model`'s maker for the makes DNG fix-ups test.
 fn normalized_make(make: &str) -> &str {
-    let lower = make.to_ascii_lowercase();
-    for (needle, name) in [("leica", "Leica"), ("panasonic", "Panasonic"), ("sony", "Sony"), ("pentax", "Pentax"), ("ricoh", "Ricoh"), ("samsung", "Samsung"), ("fujifilm", "Fujifilm")] {
-        if lower.contains(needle) {
-            return name;
-        }
-    }
-    make.trim_end()
+    super::camera_colors::normalized_make(make)
 }
 
 /// The model without the maker's name in front of it.
 fn normalized_model(make: &str, model: &str) -> String {
     let model = model.trim_end();
     let length = make.len();
-    if model.len() > length && model[..length].eq_ignore_ascii_case(make) && model.as_bytes()[length] == b' ' {
+    if model.get(..length).is_some_and(|prefix| prefix.eq_ignore_ascii_case(make)) && model.as_bytes().get(length) == Some(&b' ') {
         return model[length + 1..].to_string();
     }
     model.to_string()

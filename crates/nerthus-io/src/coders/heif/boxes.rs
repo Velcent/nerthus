@@ -305,6 +305,13 @@ pub struct Av1C {
     pub config_obus: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AvcC {
+    pub length_size: u8,
+    pub bit_depth_luma: u8,
+    pub nal_units: Vec<Vec<u8>>,
+}
+
 /// `Box_colr`'s profile.
 #[derive(Clone, Debug)]
 pub enum ColorProfile {
@@ -334,6 +341,7 @@ pub enum Content {
     Colr(ColorProfile),
     HvcC(HvcC),
     Av1C(Av1C),
+    AvcC(AvcC),
     /// `moov`, `trak`, `mdia`, `minf`, `stbl`, `edts` and `dinf`.
     Container(Vec<HeifBox>),
     Mvhd { timescale: u32, duration: u64 },
@@ -657,6 +665,7 @@ fn parse_content(header: &Header, range: &mut Range) -> Result<Content> {
         b"colr" => parse_colr(header, range)?,
         b"hvcC" => parse_hvcc(range)?,
         b"av1C" => parse_av1c(header, range)?,
+        b"avcC" => parseAvcConfiguration(range)?,
         b"pixi" => {
             let (version, _) = full_box_header(range);
             if version != 0 {
@@ -1191,4 +1200,47 @@ fn parse_av1c(header: &Header, range: &mut Range) -> Result<Content> {
     let config_obus = range.read_bytes(range.remaining()).map(|bytes| bytes.to_vec()).unwrap_or_default();
     range_error(range)?;
     Ok(Content::Av1C(Av1C { high_bitdepth, twelve_bit, config_obus }))
+}
+
+#[allow(non_snake_case)]
+fn parseAvcConfiguration(range: &mut Range) -> Result<Content> {
+    let version = range.read8();
+    if version != 1 {
+        bail!("Unsupported avcC version");
+    }
+    let profile = range.read8();
+    range.read8(); // profile compatibility
+    range.read8(); // level
+    let length_size = (range.read8() & 3) + 1;
+    if length_size == 3 {
+        bail!("Invalid AVC NAL length size");
+    }
+    let sequence_count = range.read8() & 31;
+    let mut nal_units = Vec::new();
+    for _ in 0..sequence_count {
+        let length = range.read16() as usize;
+        let unit = range.read_bytes(length).ok_or_else(|| anyhow!("Truncated AVC sequence parameter set"))?;
+        nal_units.push(unit.to_vec());
+    }
+    let picture_count = range.read8();
+    for _ in 0..picture_count {
+        let length = range.read16() as usize;
+        let unit = range.read_bytes(length).ok_or_else(|| anyhow!("Truncated AVC picture parameter set"))?;
+        nal_units.push(unit.to_vec());
+    }
+    let mut bit_depth_luma = 8;
+    if range.remaining() > 0 && !matches!(profile, 66 | 77 | 88) {
+        range.read8(); // chroma format
+        bit_depth_luma = (range.read8() & 7) + 8;
+        range.read8(); // chroma bit depth
+        let extension_count = range.read8();
+        for _ in 0..extension_count {
+            let length = range.read16() as usize;
+            let unit = range.read_bytes(length).ok_or_else(|| anyhow!("Truncated AVC sequence extension"))?;
+            nal_units.push(unit.to_vec());
+        }
+    }
+    range_error(range)?;
+    let configuration = AvcC { length_size, bit_depth_luma, nal_units };
+    Ok(Content::AvcC(configuration))
 }
