@@ -19,8 +19,24 @@ use super::unpack::RawData;
 pub(super) fn decode_camera_raw(bytes: &[u8]) -> Result<Output> {
     // The engine's own pixel loaders run for the makers whose loader is
     // ported; rawler still decodes the remainder.
-    let engine_metadata = parse_camera_meta(bytes)
-        .filter(|meta| matches!(meta.loader, SensorKind::Samsung));
+    let engine_metadata = parse_camera_meta(bytes).filter(|meta| {
+        matches!(
+            meta.loader,
+            SensorKind::Samsung
+                | SensorKind::Pentax
+                | SensorKind::Olympus
+                | SensorKind::Panasonic
+                | SensorKind::Unpacked
+                | SensorKind::NikonPlain
+                | SensorKind::CanonLosslessJpeg
+                | SensorKind::CanonCiff
+                | SensorKind::CanonSraw
+                | SensorKind::CanonCrx
+                | SensorKind::FujiCompressed
+                | SensorKind::SonyArw2
+                | SensorKind::SonyArw
+        )
+    });
     if let Some(mut meta) = engine_metadata {
         ensure!(
             (22..=64000).contains(&meta.raw_width) && (22..=64000).contains(&meta.raw_height),
@@ -334,20 +350,57 @@ mod diagnostics {
                 let source_bytes = std::fs::read(&path).unwrap();
                 // Only cases the engine's own loader runs on dump; the rest
                 // stay with rawler.
-                let metadata = parse_camera_meta(&source_bytes)
-                    .filter(|meta| matches!(meta.loader, SensorKind::Samsung));
+                let metadata = parse_camera_meta(&source_bytes).filter(|meta| {
+                    matches!(
+                        meta.loader,
+                        SensorKind::Samsung
+                | SensorKind::Pentax
+                | SensorKind::Olympus
+                | SensorKind::Panasonic
+                | SensorKind::Unpacked
+                | SensorKind::NikonPlain
+                | SensorKind::CanonLosslessJpeg
+                | SensorKind::CanonCiff
+                | SensorKind::CanonSraw
+                | SensorKind::CanonCrx
+                | SensorKind::FujiCompressed
+                | SensorKind::SonyArw2
+                | SensorKind::SonyArw
+                    )
+                });
                 let Some(mut meta) = metadata else { continue; };
                 let mut state = unpacked_camera_state(&meta);
                 let raw_data = unpack_camera(&mut meta, &mut state, &source_bytes).unwrap();
 
-                let raw_header = [meta.raw_width, meta.raw_height, meta.raw_pitch, 1];
+                let raw_channels = match raw_data {
+                    RawData::Bayer(_) => 1u32,
+                    RawData::Color3(_) => 3,
+                    RawData::Color4(_) => 4,
+                };
+                let raw_header = [meta.raw_width, meta.raw_height, meta.raw_pitch, raw_channels];
                 let mut raw_dump = Vec::new();
                 for value in raw_header {
                     raw_dump.extend_from_slice(&value.to_le_bytes());
                 }
-                if let RawData::Bayer(ref buffer) = raw_data {
-                    for &sample in buffer {
-                        raw_dump.extend_from_slice(&sample.to_le_bytes());
+                match &raw_data {
+                    RawData::Bayer(buffer) => {
+                        for &sample in buffer {
+                            raw_dump.extend_from_slice(&sample.to_le_bytes());
+                        }
+                    }
+                    RawData::Color3(pixels) => {
+                        for pixel in pixels {
+                            for &sample in pixel {
+                                raw_dump.extend_from_slice(&sample.to_le_bytes());
+                            }
+                        }
+                    }
+                    RawData::Color4(pixels) => {
+                        for pixel in pixels {
+                            for &sample in pixel {
+                                raw_dump.extend_from_slice(&sample.to_le_bytes());
+                            }
+                        }
                     }
                 }
                 let raw_path = std::path::Path::new(&decoded_directory).join(format!("{index:02}-raw.bin"));

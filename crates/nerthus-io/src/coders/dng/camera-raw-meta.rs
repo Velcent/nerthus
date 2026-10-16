@@ -44,6 +44,8 @@ pub(super) enum SensorKind {
     CanonLosslessJpeg,
     CanonSraw,
     CanonCrx,
+    /// `canon_load_raw`: the CRW heap's block-coded rows, with the body's
+    /// pair of JPEG trees and its low-order-bits tail.
     CanonCiff,
     Unpacked,
     Packed,
@@ -564,6 +566,23 @@ struct FujiState {
     compr_lossless: u32,
 }
 
+/// The compressed-stream facts the RAF pixel decoder consumes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FujiComprState {
+    /// `fuji_total_lines`, the row groups per block stream.
+    pub total_lines: u32,
+    /// `fuji_total_blocks`, the blocks sharing one row group width.
+    pub total_blocks: u32,
+    /// `fuji_block_width`, the samples per block.
+    pub block_width: u32,
+    /// `fuji_bits`.
+    pub compr_bits: u32,
+    /// `fuji_raw_type`, 16 or 0.
+    pub compr_raw_type: u32,
+    /// `fuji_lossless`.
+    pub compr_lossless: u32,
+}
+
 /// The Olympus note's facts this pass carries, in `imOly` order.
 #[derive(Debug, Clone, Default)]
 struct OlyState {
@@ -579,6 +598,23 @@ struct OlyState {
     valid_bits: u32,
     /// `imgdata.sizes.raw_aspect`, ImageProcessing tag 0x1112.
     raw_aspect: u32,
+    /// The compression plan's status shorts, 0x0640 through 0x0653, the
+    /// maker loader's Huffman and prediction tuning. Their defaults keep
+    /// their names: the loader names the shorts after the tags.
+    tag_x640: u32,
+    tag_x641: u32,
+    tag_x642: u32,
+    tag_x643: u32,
+    tag_x644: u32,
+    tag_x645: u32,
+    tag_x646: u32,
+    tag_x647: u32,
+    tag_x648: u32,
+    tag_x649: u32,
+    tag_x650: u32,
+    tag_x651: u32,
+    tag_x652: u32,
+    tag_x653: u32,
 }
 
 /// `OlyID_str2hex`: the body code's five characters, from a packed
@@ -686,6 +722,60 @@ const PENTAX_ID_K_3_III: u64 = 0x13254;
 const PENTAX_ID_KF: u64 = 0x132b8;
 const PENTAX_ID_K_3_III_MONO: u64 = 0x132d6;
 
+/// The Olympus compression plan the maker loader tunes through: the body's
+/// `ValidBits` mark and the raw-image record's `tagX640`-`tagX653` status
+/// shorts. Their defaults keep their names, the loader naming each after
+/// its tag.
+#[derive(Debug, Clone, Default)]
+pub(super) struct OlympusState {
+    pub valid_bits: u32,
+    pub tag_x640: u32,
+    pub tag_x641: u32,
+    pub tag_x642: u32,
+    pub tag_x643: u32,
+    pub tag_x644: u32,
+    pub tag_x645: u32,
+    pub tag_x646: u32,
+    pub tag_x647: u32,
+    pub tag_x648: u32,
+    pub tag_x649: u32,
+    pub tag_x650: u32,
+    pub tag_x651: u32,
+    pub tag_x652: u32,
+    pub tag_x653: u32,
+}
+
+/// The Panasonic packing facts the maker's pixel loader branches on: the
+/// body's `BitsPerSample` short, clamped 8..16 when read, and the
+/// `RawFormat` record — 5 is the block layout, anything else the
+/// bit-packed rows.
+#[derive(Debug, Clone, Default)]
+pub(super) struct PanasonicState {
+    pub bits: u32,
+    pub encoding: u32,
+}
+
+/// The CRX image header (`crx_data_header_t`) of the `stsd/CRAW` record the
+/// CR3 track selection picked: the whole CRX decode plan — plane count, bit
+/// depth, wavelet levels, tiling, quantization — comes from it. `f_width`/
+/// `f_height` are the coded plane extents, generally larger than the active
+/// crop the ActiveArea record resolves.
+#[derive(Debug, Clone, Default)]
+pub(super) struct CameraCrxHeader {
+    pub version: u32,
+    pub f_width: u32,
+    pub f_height: u32,
+    pub tile_width: u32,
+    pub tile_height: u32,
+    pub n_planes: u32,
+    pub cfa_layout: u32,
+    pub enc_type: u32,
+    pub image_levels: u32,
+    pub n_bits: u32,
+    pub median_bits: u32,
+    pub mdat_header_size: u32,
+}
+
 /// The resolved metadata for a non-DNG camera raw, ready for the decoder's
 /// `Raw` state. Field names follow the metadata engine's.
 #[derive(Debug, Clone)]
@@ -695,6 +785,10 @@ pub(super) struct CameraMeta {
     pub colors: usize,
     pub filters: u32,
     pub xtrans: [[u8; 6]; 6],
+    /// `xtrans_abs`: the X-Trans pattern in sensor order; the compressed-RAF
+    /// pixel loader copies lines out by it, while `xtrans` carries the
+    /// margin-rotated form.
+    pub xtrans_abs: [[u8; 6]; 6],
     pub raw_width: u32,
     pub raw_height: u32,
     pub width: u32,
@@ -714,6 +808,13 @@ pub(super) struct CameraMeta {
     /// layout record sets; the processing path keys its pixel placement on
     /// it.
     pub fuji_layout: u32,
+    /// `meta_offset`: where a maker record the pixel loader needs sits —
+    /// Pentax's Huffman table, Nikon's tree or curve, the raw-IFD's
+    /// opcode2 base — as its walker left it.
+    pub meta_offset: i64,
+    /// The byte order the parse ends with; the Pentax loader reads its
+    /// table with it, while the Samsung body forces its own little-endian.
+    pub order: u16,
     pub tile_width: u32,
     pub tile_length: u32,
     pub curve: Vec<u16>,
@@ -733,10 +834,28 @@ pub(super) struct CameraMeta {
     pub sraw_mul: [u16; 4],
     /// `load_flags`, needed by the sRAW and CRX unpackers later.
     pub load_flags: u32,
+    /// `tiff_compress`, the compression record: the raw IFD's for files
+    /// without one, and Canon's 0x1835 decoder-table pick for CRW.
+    pub tiff_compress: u32,
     /// `zero_is_bad`, the loader's zero-trim mark.
     pub zero_is_bad: bool,
     /// `raw_pitch` for sRAW (8 bytes per raw column).
     pub raw_pitch: u32,
+    /// `canon_unique_id`, the body id record the Canon makernote 0x0010
+    /// carries; the sRAW loader's hue flip and its RGB pass key on it.
+    pub canon_unique_id: u64,
+    /// `model2`, the firmware string the Canon makernote 0x0007 fgets
+    /// reads; the sRAW loader sniffs a three-part version out of it.
+    pub model2: String,
+    /// The Olympus compression plan, consumed by the maker's pixel loader.
+    pub olympus: OlympusState,
+    /// The Panasonic packing facts, consumed by the maker's pixel loader.
+    pub panasonic: PanasonicState,
+    /// The CRX image header of the chosen CR3 raw track, consumed by the
+    /// CRX pixel loader.
+    pub crx: CameraCrxHeader,
+    /// The Fuji compressed-stream facts, consumed by the RAF pixel loader.
+    pub fuji: FujiComprState,
 }
 
 /// The container walker. Holds the engine's identify-stage globals while the
@@ -799,6 +918,9 @@ struct Walker<'a> {
     /// the engine's exact-equality check against "Digital Photo Professional"
     /// never fire, so the port keeps the newline and the same behaviour.
     software: String,
+    /// `model2`, the Canon makernote 0x0007 firmware string: the sRAW
+    /// loader's hue flip keys on the version it spells.
+    model2: String,
     /// `is_NikonTransfer`: 2 when an 8-bit debayed TIFF was detected.
     nikon_transfer: i32,
     /// `shot_select`: which raw frame or track to open; always 0 here.
@@ -860,6 +982,9 @@ struct Walker<'a> {
     /// The tone curve head, identity by default; Sony tag 0x7010 rewrites the
     /// first four kilometres of it and the maximum consult reads it back.
     curve_head: [u16; 4096],
+    /// The compression record's tone curve the plain Nikon loader's read
+    /// supplies at open, replacing the identity over its own entries.
+    nikon_curve: Option<Vec<u16>>,
 }
 
 /// Sony metadata state: the SR2 private-data stash, the Minolta-private block
@@ -988,6 +1113,7 @@ impl<'a> Walker<'a> {
             is_raw: 1,
             dng_version: 0,
             software: String::new(),
+            model2: String::new(),
             nikon_transfer: 0,
             shot_select: 0,
             use_camera_wb: false,
@@ -1022,6 +1148,7 @@ impl<'a> Walker<'a> {
             parsefuji_processed: false,
             leaked_ifd: None,
             curve_head: std::array::from_fn(|index| index as u16),
+            nikon_curve: None,
         }
     }
 
@@ -4208,11 +4335,39 @@ impl<'a> Walker<'a> {
             // carries no linear maximum, so the reads run and drop.
             let _first = self.stream.getreal(kind);
             let _second = self.stream.getreal(kind);
+        } else if tag == 0x0640 {
+            self.oly.tag_x640 = u32::from(self.stream.get2());
+        } else if tag == 0x0641 {
+            self.oly.tag_x641 = u32::from(self.stream.get2());
+        } else if tag == 0x0642 {
+            self.oly.tag_x642 = u32::from(self.stream.get2());
+        } else if tag == 0x0643 {
+            self.oly.tag_x643 = u32::from(self.stream.get2());
+        } else if tag == 0x0644 {
+            self.oly.tag_x644 = u32::from(self.stream.get2());
+        } else if tag == 0x0645 {
+            self.oly.tag_x645 = u32::from(self.stream.get2());
+        } else if tag == 0x0646 {
+            self.oly.tag_x646 = u32::from(self.stream.get2());
+        } else if tag == 0x0647 {
+            self.oly.tag_x647 = u32::from(self.stream.get2());
+        } else if tag == 0x0648 {
+            self.oly.tag_x648 = u32::from(self.stream.get2());
+        } else if tag == 0x0649 {
+            self.oly.tag_x649 = u32::from(self.stream.get2());
+        } else if tag == 0x0650 {
+            self.oly.tag_x650 = u32::from(self.stream.get2());
+        } else if tag == 0x0651 {
+            self.oly.tag_x651 = u32::from(self.stream.get2());
+        } else if tag == 0x0652 {
+            self.oly.tag_x652 = u32::from(self.stream.get2());
+        } else if tag == 0x0653 {
+            self.oly.tag_x653 = u32::from(self.stream.get2());
         }
         // The white-balance fills (0x0102-0x011f, 0x0121), the inset crop
-        // corners (0x0612-0x0615), the body's 0x0640-0x0653 status shorts,
-        // the 0x1113 aspect frame and the 0x1306 thermometer all feed
-        // records the oracle does not compare and this pass does not keep.
+        // corners (0x0612-0x0615), the 0x1113 aspect frame and the 0x1306
+        // thermometer all feed records the oracle does not compare and this
+        // pass does not keep.
     }
 
     /// The engine's `parseOlympus_RawInfo`.
@@ -4460,8 +4615,24 @@ impl<'a> Walker<'a> {
                     self.cam_mul = [1024.0; 4];
                 }
             }
+            0x0007 if self.dng_version == 0 => {
+                // The firmware string drives the sRAW hue flip: the loader
+                // sniffs a three-part version out of `model2`. The engine's
+                // fgets stops after 63 characters, at the newline, or at the
+                // file's end, and C-string reads see only the first NUL (the
+                // software row's 0x000b arm carries the same shape).
+                let mut firmware_bytes = [0u8; 64];
+                let read = self.stream.read(&mut firmware_bytes[..63]);
+                let newline_end = firmware_bytes[..read]
+                    .iter()
+                    .position(|&byte| byte == b'\n')
+                    .map_or(read, |position| position + 1);
+                let firmware = &firmware_bytes[..newline_end];
+                let firmware = firmware.split(|&byte| byte == 0).next().unwrap_or(firmware);
+                self.model2 = String::from_utf8_lossy(firmware).into_owned();
+            }
             _ => {
-                // Tags 0x0001, 0x0002, 0x0007 through 0x000c, 0x0012 and
+                // Tags 0x0001, 0x0002, 0x0008 through 0x000c, 0x0012 and
                 // 0x0026 or 0x003c (AF data), 0x0029 (PowerShot G9 presets),
                 // 0x0093, 0x0095, 0x00a9, 0x00b4, 0x4013, 0x4018 and 0x4026
                 // feed lens, shooting and colour-space facts this pass does
@@ -5336,6 +5507,9 @@ impl<'a> Walker<'a> {
             // The SuperCCD interleave: half the scan lines per plane, counted
             // past the stored frame height.
             let fuji_width = self.width >> (self.fuji_layout == 0) as u32;
+            // The engine reassigns the field here; the RAF head's 1/0 mark
+            // only decides the branch.
+            self.fuji_width = fuji_width as u32;
             self.filters = if fuji_width & 1 == 1 {
                 0x9494_9494
             } else {
@@ -7476,6 +7650,61 @@ impl<'a> Walker<'a> {
             }
             self.black = lowest;
         }
+        // The engine reads the compression record's tone curve at open for
+        // the bodies whose loader is `nikon_load_raw`; the loader's own
+        // lookup reads back from it.
+        if self.loader == Some(SensorKind::NikonPlain) {
+            self.nikon_read_curve();
+        }
+    }
+
+    /// The engine's `nikon_read_curve`: the compression record's tone curve
+    /// replaces the identity over the entries it supplies, either read
+    /// straight in or interpolated between its knees.
+    fn nikon_read_curve(&mut self) {
+        let mut curve = vec![0u16; 0x10000];
+        for (index, value) in curve.iter_mut().enumerate() {
+            *value = index as u16;
+        }
+        self.stream.seek(self.meta_offset.max(0) as u64);
+        // A byte past the end keeps the -1 fgetc hands to a ushort.
+        let ver0 = self.stream.getc().map_or(-1i16, i16::from) as u16;
+        let ver1 = self.stream.getc().map_or(-1i16, i16::from) as u16;
+        if ver0 == 0x49 || ver1 == 0x58 {
+            self.stream.skip(2110);
+        }
+        let mut vpred = [0u16; 4];
+        self.stream.read_shorts(&mut vpred);
+        // The x86 shift truncates its count to five bits.
+        let ceiling = 1i32.wrapping_shl(self.tiff_bps as u32) & 0x7fff;
+        let mut step = ceiling;
+        let mut max = ceiling;
+        let csize = i32::from(self.stream.get2());
+        if csize > 1 {
+            step = max / (csize - 1);
+        }
+        if ver0 == 0x44 && (ver1 == 0x20 || (ver1 == 0x40 && step > 3)) && step > 0 {
+            if ver1 == 0x40 {
+                step /= 4;
+                max /= 4;
+            }
+            for i in 0..csize {
+                let index = i * step;
+                if (index as usize) < curve.len() {
+                    curve[index as usize] = self.stream.get2();
+                }
+            }
+            for i in 0..max {
+                let remainder = i % step;
+                let left = i - remainder;
+                curve[i as usize] = ((curve[left as usize] as i32 * (step - remainder)
+                    + curve[(left + step) as usize] as i32 * remainder)
+                    / step) as u16;
+            }
+        } else if ver0 != 0x46 && csize <= 0x4001 {
+            self.stream.read_shorts(&mut curve[..csize as usize]);
+        }
+        self.nikon_curve = Some(curve);
     }
 
     // ===== handoff ==========================================================
@@ -7483,16 +7712,23 @@ impl<'a> Walker<'a> {
     /// The metadata record the decoder phases expect, in the engine's
     /// initialization state: an identity curve and zeroed black levels.
     fn into_meta(self) -> CameraMeta {
-        // The engine's curve is a 0x10000 identity fill; only the file's Sony
-        // ladder rewrites its head.
-        let mut curve = self.curve_head.to_vec();
-        curve.extend((4096u32..=0xffffu32).map(|value| value as u16));
+        // The engine's curve is a 0x10000 identity fill; the Sony ladder
+        // rewrites its head and the Nikon records rewrite a prefix.
+        let curve = match self.nikon_curve {
+            Some(curve) => curve,
+            None => {
+                let mut curve = self.curve_head.to_vec();
+                curve.extend((4096u32..=0xffffu32).map(|value| value as u16));
+                curve
+            }
+        };
         CameraMeta {
             make: self.make.clone(),
             model: self.model.clone(),
             colors: self.colors,
             filters: self.filters,
             xtrans: self.xtrans,
+            xtrans_abs: self.xtrans_abs,
             raw_width: self.raw_width as u32,
             raw_height: self.raw_height as u32,
             width: self.width as u32,
@@ -7506,6 +7742,8 @@ impl<'a> Walker<'a> {
             data_offset: self.data_offset,
             data_size: self.data_size,
             strip_offset: self.strip_offset,
+            meta_offset: self.meta_offset,
+            order: self.stream.order,
             fuji_layout: self.fuji_layout as u32,
             tile_width: self.tile_width,
             tile_length: self.tile_length,
@@ -7522,8 +7760,54 @@ impl<'a> Walker<'a> {
             cr2_slice: self.cr2_slice,
             sraw_mul: self.canon.sraw_mul,
             load_flags: self.load_flags,
+            tiff_compress: self.tiff_compress,
             zero_is_bad: self.zero_is_bad,
             raw_pitch: self.raw_pitch,
+            canon_unique_id: self.canon.unique_id,
+            model2: self.model2.clone(),
+            olympus: OlympusState {
+                valid_bits: self.oly.valid_bits,
+                tag_x640: self.oly.tag_x640,
+                tag_x641: self.oly.tag_x641,
+                tag_x642: self.oly.tag_x642,
+                tag_x643: self.oly.tag_x643,
+                tag_x644: self.oly.tag_x644,
+                tag_x645: self.oly.tag_x645,
+                tag_x646: self.oly.tag_x646,
+                tag_x647: self.oly.tag_x647,
+                tag_x648: self.oly.tag_x648,
+                tag_x649: self.oly.tag_x649,
+                tag_x650: self.oly.tag_x650,
+                tag_x651: self.oly.tag_x651,
+                tag_x652: self.oly.tag_x652,
+                tag_x653: self.oly.tag_x653,
+            },
+            panasonic: PanasonicState { bits: self.pana.bits, encoding: self.pana.encoding },
+            crx: {
+                let chosen = &self.cr3.tracks[self.cr3.chosen_track];
+                CameraCrxHeader {
+                    version: chosen.version as u32,
+                    f_width: chosen.f_width as u32,
+                    f_height: chosen.f_height as u32,
+                    tile_width: chosen.tile_width as u32,
+                    tile_height: chosen.tile_height as u32,
+                    n_planes: chosen.n_planes,
+                    cfa_layout: chosen.cfa_layout,
+                    enc_type: chosen.enc_type,
+                    image_levels: chosen.image_levels,
+                    n_bits: chosen.n_bits,
+                    median_bits: chosen.median_bits,
+                    mdat_header_size: chosen.mdat_header_size,
+                }
+            },
+            fuji: FujiComprState {
+                total_lines: self.fuji.total_lines,
+                total_blocks: self.fuji.total_blocks,
+                block_width: self.fuji.block_width,
+                compr_bits: self.fuji.compr_bits,
+                compr_raw_type: self.fuji.compr_raw_type,
+                compr_lossless: self.fuji.compr_lossless,
+            },
         }
     }
 }

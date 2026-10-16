@@ -254,17 +254,19 @@ These parts of Gaea 2.3.1.0 are not in Nerthus yet.
 
 - Camera raw files other than DNG (CR2, CR3, CRW, NEF, ARW, ORF, RAF,
   RW2, PEF, SRW and so on) open and go through the same processing path
-  as DNG files, but only some of them read their pixels from a decoder
-  of this port's own. The port of LibRaw's format-specific path is
-  underway in `crates/nerthus-io/src/coders/dng/camera-loaders.rs`,
+  as DNG files. The port of LibRaw's format-specific path lives in
+  `crates/nerthus-io/src/coders/dng/camera-loaders.rs`,
   `crates/nerthus-io/src/coders/dng/camera-raw-meta.rs` and
-  `crates/nerthus-io/src/coders/dng/camera-raw.rs`: the maker notes are
-  carried maker by maker (Canon, Nikon, Sony, Fujifilm, Olympus,
-  Panasonic, Pentax and Samsung are each checked against the reference
-  engine's own numbers) and Samsung's first SRW generation's pixel
-  loader is carried and verified byte-exact; the rest of the makers'
-  pixel loaders are still to port, and until they are those files read
-  their pixels with Rawler's own decoders.
+  `crates/nerthus-io/src/coders/dng/camera-raw.rs`: the maker notes and
+  the pixel loaders are carried maker by maker and verified against the
+  reference engine's own numbers — Canon (CR2's lossless JPEG, CR3, CRW
+  and sRAW), Nikon's compressed NEF, Sony's ARW and ARW2, Fujifilm's
+  unpacked and compressed RAF streams, Olympus, Panasonic, Pentax and
+  Samsung — each byte-exact through the whole processing path. The
+  remaining loaders (the striped and padded packed NEF forms, the YUV
+  and JPEG-XS NEFs, the 14-bit and DBP RAFs, the later Samsung
+  generations and the two generic packed rows forms) still read their
+  pixels with Rawler's own decoders.
 
 ### Builds
 
