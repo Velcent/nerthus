@@ -92,9 +92,28 @@ pub fn default_builds_root() -> PathBuf {
 
 /// A project path string as a path of this system.
 pub fn to_path(text: &str) -> PathBuf {
+    let mut parts = text.split(['\\', '/']);
+    let mut path = PathBuf::new();
+
+    // A drive with its root (`C:\Users`) is absolute: std's push keeps a
+    // bare `C:` drive-relative (`C:` + `Users` is `C:Users`), so the drive
+    // goes in with the root that follows it.
+    let bytes = text.as_bytes();
+    let driven = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    if driven {
+        let root = format!("{}{}", &text[..2], std::path::MAIN_SEPARATOR_STR);
+        path.push(root);
+        parts.next();
+    }
+
     let absolute = text.starts_with('/') || text.starts_with('\\');
-    let mut path = if absolute { PathBuf::from("/") } else { PathBuf::new() };
-    for part in text.split(['\\', '/']) {
+    if absolute {
+        path.push("/");
+    }
+    for part in parts {
         if part.is_empty() {
             continue;
         }
@@ -257,6 +276,16 @@ mod tests {
         let template = format!("{}/Out/[Filename]/[+++]", root.display());
         let folder = resolve_destination(&context(&template, &root));
         assert_eq!(folder, root.join("Out").join("Canyon").join("001"));
+    }
+
+    #[test]
+    fn a_drive_with_its_root_stays_absolute() {
+        // std's push keeps a bare `C:` drive-relative, so the root the
+        // template gives after the drive must be put in with it. Expected
+        // with joins, so it holds on every system.
+        let drive = PathBuf::from(format!("C:{}", std::path::MAIN_SEPARATOR_STR));
+        let expected = drive.join("Users").join("runner").join("Builds").join("Canyon").join("001");
+        assert_eq!(to_path("C:\\Users\\runner\\Builds\\Canyon\\001"), expected);
     }
 
     #[test]
