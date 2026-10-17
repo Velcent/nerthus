@@ -82,7 +82,7 @@ use bevy::diagnostic::{DiagnosticsStore, SystemInformationDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::{Monitor, OnMonitor, PrimaryMonitor, PrimaryWindow, WindowResizeConstraints};
 use bevy_egui::{egui, EguiContexts};
-use egui::{CursorIcon, Key, KeyboardShortcut, LayerId, Modifiers, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
+use egui::{CursorIcon, Id, Key, KeyboardShortcut, LayerId, Modifiers, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
 use bevy::ecs::system::SystemParam;
 use bevy::math::URect;
 use nerthus_render::{CameraRequest, NavigationSettings, Screenshots, StrategyCamera, ViewportCamera, ViewportInput, ViewportSettings};
@@ -511,14 +511,20 @@ fn draw_editor(
     menu_keys::begin(ctx);
     // Then Esc closes the tool window on top.
     tool_commands::take_escape(ctx, editor, ui_state);
+    let graph_popup_open = ui_state.graph.popup.is_some();
+    options_window::take_escape(ctx, &mut ui_state.options, graph_popup_open);
     // Modal dialogs keep the shell's keys from it while they show.
-    if !tool_commands::modal_open(ctx, ui_state) {
-        options_window::take_escape(ctx, &mut ui_state.options);
-        batch_build::take_escape(ctx, &mut ui_state.batch_build);
+    if !tool_commands::modal_open(ctx, ui_state) && !graph_popup_open {
+        batch_build::take_escape(ctx, &mut ui_state.batch_build, graph_popup_open);
         // Allow node shortcuts only when cursor is inside the graph.
         let node_keys = !editor.user.options.confine_shortcuts() || pointer_over_graph(ctx, &ui_state.graph);
         shortcuts(ctx, node_keys, &mut pending);
         tool_commands::shortcuts(ctx, &mut pending);
+    }
+    // Text fields process typing before egui checks their layer. Release
+    // any editor focus before drawing them behind the Options dialog.
+    if ui_state.options.is_some() {
+        tool_window::focus_scope(ctx, Id::new("options"));
     }
 
     let full = ctx.content_rect();
@@ -638,6 +644,9 @@ fn draw_editor(
         pending.push(Command::Tools(tool_commands::ToolCommand::ShowDocs(target.to_string())));
     }
     let settings_reset = tool_commands::show_windows(ctx, editor, ui_state, &mut pending);
+    if settings_reset && let Some(options) = ui_state.options.as_mut() {
+        options.reload_settings();
+    }
     // Everything is drawn: where the keyboard is, for next frame's Esc.
     tool_window::note_keyboard(ctx);
     // Accepted options (or settings back to their defaults) reach the
@@ -711,14 +720,15 @@ fn draw_editor(
     // Windows (Build Settings, a build's progress) cover the view.
     let layer = pointer.and_then(|pointer| ctx.layer_id_at(pointer));
     let over_window = layer.is_some_and(|layer| layer.order != egui::Order::Background);
-    input.enabled = over_view && !over_window && !ctx.egui_is_using_pointer() && !ctx.any_popup_open();
+    let dialog_open = tool_commands::modal_open(ctx, ui_state);
+    input.enabled = over_view && !over_window && !dialog_open && !ctx.egui_is_using_pointer() && !ctx.any_popup_open();
     // The view keeps the keyboard from a click in it until a click
     // elsewhere; shortcuts with Ctrl or Cmd stay the editor's.
     if ctx.input(|state| state.pointer.any_pressed()) {
         ui_state.viewport_focused = over_view && !over_window;
     }
     let modifiers = ctx.input(|state| state.modifiers);
-    input.keys = ui_state.viewport_focused && !ctx.egui_wants_keyboard_input() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
+    input.keys = ui_state.viewport_focused && !dialog_open && !ctx.egui_wants_keyboard_input() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
     Ok(())
 }
 

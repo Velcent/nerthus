@@ -237,6 +237,9 @@ impl ComputePage {
 /// The window's state while it is open.
 pub struct OptionsState {
     pub tab: OptionsTab,
+    /// The selection last shown: reveal a newly opened or externally
+    /// selected page once, while leaving manual scrolling alone.
+    tab_seen: Option<OptionsTab>,
     compute: ComputePage,
     notice: Option<Notice>,
     /// The other pages' copies of the settings, taken as the window first
@@ -250,11 +253,19 @@ impl OptionsState {
     pub fn new(tab: OptionsTab) -> OptionsState {
         OptionsState {
             tab,
+            tab_seen: None,
             compute: ComputePage::open(),
             notice: None,
             copy: None,
             resetting: false,
         }
+    }
+
+    /// A factory reset supersedes edits made before it. The next frame
+    /// loads the defaults and then follows the first-run setup's choices.
+    pub fn reload_settings(&mut self) {
+        self.copy = None;
+        self.resetting = false;
     }
 }
 
@@ -271,7 +282,7 @@ pub struct OptionsOutcome {
 
 /// The page list: headers right-aligned, the selected one on its group's
 /// brush.
-fn tab_list(ui: &mut Ui, selected: &mut OptionsTab) {
+fn tab_list(ui: &mut Ui, selected: &mut OptionsTab, reveal_selected: bool) {
     ui.vertical(|ui| {
         ui.set_width(TAB_WIDTH);
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -285,7 +296,25 @@ fn tab_list(ui: &mut Ui, selected: &mut OptionsTab) {
             if std::mem::take(&mut group_gap) {
                 ui.add_space(24.0);
             }
-            if crate::ui::widgets::tab_list_item(ui, name, *selected == tab, true, brush).clicked() {
+            let response = crate::ui::widgets::tab_list_item(ui, name, *selected == tab, true, brush);
+            if reveal_selected && *selected == tab {
+                response.scroll_to_me(None);
+                let options_id = Id::new("options");
+                let (focused, modal) = ui.memory(|memory| (memory.focused(), memory.top_modal_layer()));
+                let focused_here = focused.and_then(|id| ui.ctx().read_response(id)).is_some_and(|focused| focused.layer_id.id == options_id);
+                let modal_over = modal.is_some_and(|layer| layer.id != options_id);
+                if !focused_here && !modal_over {
+                    response.request_focus();
+                }
+            }
+            if response.has_focus() {
+                let stroke = Stroke::new(1.0, theme::TEXTBOX_FOCUSED_BORDER);
+                ui.painter().rect_stroke(response.rect.shrink(2.0), 3.0, stroke, egui::StrokeKind::Inside);
+            }
+            if response.gained_focus() {
+                response.scroll_to_me(None);
+            }
+            if response.clicked() {
                 *selected = tab;
             }
         }
@@ -306,12 +335,15 @@ fn button(ui: &mut Ui, text: &str, important: bool, enabled: bool) -> egui::Resp
 
 /// `Button-IconText-Bordered` in red with the `alert-circle` icon.
 fn alert_button(ui: &mut Ui, text: &str) -> egui::Response {
-    let galley = ui.painter().layout_no_wrap(text.to_string(), theme::interface(11.0), theme::ACCENT_RED);
-    let size = Vec2::new(8.0 + 16.0 + 6.0 + galley.size().x + 8.0, 26.0);
+    let available = ui.available_width();
+    let text_width = (available - 38.0).max(1.0);
+    let galley = ui.painter().layout(text.to_string(), theme::interface(11.0), theme::ACCENT_RED, text_width);
+    let size = Vec2::new((38.0 + galley.size().x).min(available), (galley.size().y + 10.0).max(26.0));
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if response.hovered() { theme::BUTTON_HOVER } else { theme::BUTTON_BACKGROUND };
+    let border = if response.has_focus() { ui.visuals().selection.stroke } else { Stroke::new(1.0, theme::BUTTON_BORDER) };
     ui.painter().rect_filled(rect, 2.0, fill);
-    ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, theme::BUTTON_BORDER), egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(rect, 2.0, border, egui::StrokeKind::Inside);
     let icon_rect = Rect::from_min_size(egui::Pos2::new(rect.left() + 8.0, rect.center().y - 8.0), Vec2::splat(16.0));
     icons::paint(ui, icon_rect, "alert-circle", theme::ACCENT_RED);
     let text_position = egui::Pos2::new(icon_rect.right() + 6.0, rect.center().y - galley.size().y / 2.0);
@@ -345,10 +377,15 @@ fn type_brush(device_type: DeviceType) -> Color32 {
 fn backend_box(ui: &mut Ui, device: &DeviceInfo, label: &str, checked: bool, enabled: bool) -> Option<bool> {
     let font = if device.is_fallback_device { theme::semibold(12.0) } else { theme::interface(12.0) };
     let color = if enabled { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
-    let galley = ui.painter().layout_no_wrap(label.to_string(), font, color);
-    let size = Vec2::new(16.0 + 8.0 + galley.size().x, 22.0);
+    let available = ui.available_width();
+    let text_width = (available - 24.0).max(1.0);
+    let galley = ui.painter().layout(label.to_string(), font, color, text_width);
+    let size = Vec2::new((24.0 + galley.size().x).min(available), galley.size().y.max(22.0));
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(size, sense);
+    if response.has_focus() {
+        ui.painter().rect_stroke(rect, 2.0, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
+    }
     let box_rect = Rect::from_min_size(egui::Pos2::new(rect.left(), rect.center().y - 8.0), Vec2::splat(16.0));
     let mut border = type_brush(device.device_type);
     if !enabled {
@@ -394,10 +431,10 @@ fn display_name(name: &str) -> String {
 
 fn device_group(ui: &mut Ui, group: &[&DeviceInfo], page: &mut ComputePage, editor: &mut Editor) {
     let first = group[0];
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         let name = RichText::new(display_name(&first.device_name)).font(theme::semibold(12.0)).color(theme::LABEL_EMPHASIS);
-        ui.label(name);
+        ui.add(egui::Label::new(name).wrap());
         let kind = RichText::new(format!(" ({})", first.device_type.human_name())).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
         ui.label(kind);
     });
@@ -450,15 +487,31 @@ fn device_group(ui: &mut Ui, group: &[&DeviceInfo], page: &mut ComputePage, edit
 /// and the buttons docked at the bottom.
 fn compute_page(ui: &mut Ui, editor: &mut Editor, page: &mut ComputePage, notice: &mut Option<Notice>) {
     ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-        ui.horizontal(|ui| compute_buttons(ui, editor, page, notice));
+        let width = ui.available_width();
+        let stacked = width < 600.0;
+        let rows = if stacked && !editor.compute.cpu_only { 3.0 } else { 1.0 };
+        let buttons_height = rows * 28.0 + (rows - 1.0) * ui.spacing().item_spacing.y;
+        let buttons_layout = if stacked { Layout::top_down(Align::Min) } else { Layout::left_to_right(Align::Center) };
+        // Give these top-down children their final height before placing
+        // them from the bottom. A wrapping row can otherwise grow below
+        // the page, and ScrollArea always starts at its parent's top.
+        ui.allocate_ui_with_layout(Vec2::new(width, buttons_height), buttons_layout, |ui| {
+            compute_buttons(ui, editor, page, notice);
+        });
         ui.add_space(8.0);
         if !editor.compute.cpu_only {
-            compute_console(ui, page);
-            ui.add_space(8.0);
+            let console_height = (ui.available_height() - 72.0).clamp(0.0, 90.0);
+            if console_height > 0.0 {
+                ui.allocate_ui_with_layout(Vec2::new(width, console_height), Layout::top_down(Align::Min), |ui| {
+                    compute_console(ui, page);
+                });
+                ui.add_space(8.0);
+            }
         }
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             let mut devices = egui::ScrollArea::vertical();
             devices = devices.id_salt("compute-devices");
+            devices = devices.min_scrolled_height(0.0);
             devices = devices.auto_shrink([false, false]);
             devices.show(ui, |ui| compute_devices(ui, editor, page, notice));
         });
@@ -473,7 +526,12 @@ fn compute_console(ui: &mut Ui, page: &ComputePage) {
     field = field.desired_rows(4);
     field = field.desired_width(f32::INFINITY);
     field = field.interactive(false);
-    ui.add(field);
+    let mut scroll = egui::ScrollArea::vertical();
+    scroll = scroll.id_salt("compute-console");
+    scroll = scroll.max_height(ui.available_height().min(90.0));
+    scroll = scroll.min_scrolled_height(0.0);
+    scroll = scroll.auto_shrink([false, false]);
+    scroll.show(ui, |ui| ui.add(field));
 }
 
 /// The page's title and its devices (or, in CPU-only mode, the way out).
@@ -500,6 +558,13 @@ fn compute_devices(ui: &mut Ui, editor: &mut Editor, page: &mut ComputePage, not
             // `UniformGrid` with two columns: the groups two to a row.
             let devices = devices.clone();
             let groups = device_groups(&devices);
+            if ui.available_width() < 480.0 {
+                for group in &groups {
+                    device_group(ui, group, page, editor);
+                    ui.add_space(16.0);
+                }
+                return;
+            }
             for pair in groups.chunks(2) {
                 ui.columns(2, |columns| {
                     for (column, group) in columns.iter_mut().zip(pair) {
@@ -571,7 +636,8 @@ fn show_notice(ctx: &egui::Context, notice: &mut Option<Notice>) {
             }
         });
     });
-    if dismissed || response.should_close() {
+    let enter = response.is_top_modal && !response.any_popup_open && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
+    if dismissed || response.should_close() || enter {
         *notice = None;
     }
 }
@@ -609,11 +675,18 @@ fn reset_question(ctx: &egui::Context, options: &mut OptionsState) {
 /// Esc is Cancel (`IsCancel`) while the window shows: taken before the
 /// shell's keys, so that it does not stop a build as well. A message box,
 /// the reset question or a list dropped down on the page takes it instead.
-pub fn take_escape(ctx: &egui::Context, state: &mut Option<OptionsState>) {
+pub fn take_escape(ctx: &egui::Context, state: &mut Option<OptionsState>, graph_popup_open: bool) {
     let Some(options) = state.as_ref() else {
         return;
     };
-    if options.notice.is_some() || options.resetting || egui::Popup::is_any_open(ctx) {
+    if options.notice.is_some() || options.resetting || graph_popup_open || egui::Popup::is_any_open(ctx) {
+        return;
+    }
+    // egui retains a modal's layer for the frame after it closes. The
+    // state above already guards our own questions while they are open.
+    let own_layers = [Id::new("options"), Id::new("options-notice"), Id::new("options-reset")];
+    let modal_over = ctx.memory(|memory| memory.top_modal_layer().is_some_and(|layer| !own_layers.contains(&layer.id)));
+    if modal_over {
         return;
     }
     if tool_window::on_top(ctx) != Some(Id::new("options")) {
@@ -633,6 +706,9 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
     if options.copy.is_none() {
         options.copy = Some(OptionsCopy::load(&editor.user.options, &editor.user.preferences));
     }
+    if let Some(copy) = options.copy.as_mut() {
+        copy.refresh(&editor.user.options, &editor.user.preferences);
+    }
     options.compute.poll();
     if let Some(notice) = options.compute.poll_enforcing() {
         options.notice = Some(notice);
@@ -650,6 +726,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
     window = window.fixed_size(WINDOW_SIZE);
     window = tool_window::place(ctx, window, Id::new("options"), WINDOW_SIZE);
     window = window.open(&mut open);
+    tool_window::focus_scope(ctx, Id::new("options"));
     window.show(ctx, |ui| {
         // The room inside, split between the parts whatever they hold, so
         // that the footer stays in the window and the window in the body.
@@ -663,7 +740,10 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
         let mut tabs = egui::ScrollArea::vertical();
         tabs = tabs.id_salt("options-tabs");
         tabs = tabs.auto_shrink([false, false]);
-        tabs.show(&mut list_ui, |ui| tab_list(ui, &mut options.tab));
+        tabs = tabs.animated(false);
+        let reveal_selected = options.tab_seen != Some(options.tab);
+        tabs.show(&mut list_ui, |ui| tab_list(ui, &mut options.tab, reveal_selected));
+        options.tab_seen = Some(options.tab);
 
         // The page's border goes round its place, and the page is kept
         // inside it, whatever the page holds.
@@ -742,19 +822,25 @@ mod tests {
 
     /// A frame at this screen size with these events, Esc taken before the
     /// window as the shell does. Returns the window's rect and what it did.
-    fn frame(context: &egui::Context, screen: Vec2, editor: &mut Editor, state: &mut Option<OptionsState>, events: Vec<Event>) -> (Rect, OptionsOutcome) {
+    fn painted_frame(context: &egui::Context, screen: Vec2, editor: &mut Editor, state: &mut Option<OptionsState>, events: Vec<Event>) -> (Rect, OptionsOutcome, Vec<egui::epaint::ClippedShape>) {
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
         let mut last_tab = OptionsTab::General;
         let mut dialogs = FileDialogs::default();
         let mut outcome = OptionsOutcome::default();
-        let output = context.run_ui(input, |ui| {
+        let mut output = context.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
-            take_escape(&ctx, state);
+            take_escape(&ctx, state, false);
             outcome = show(&ctx, editor, state, &mut last_tab, &mut dialogs);
         });
+        let shapes = std::mem::take(&mut output.shapes);
         output.drop_without_applying_deltas();
         let rect = AreaState::load(context, Id::new("options")).filter(|area| area.size.is_some()).map(|area| area.rect());
-        (rect.unwrap_or(Rect::NOTHING), outcome)
+        (rect.unwrap_or(Rect::NOTHING), outcome, shapes)
+    }
+
+    fn frame(context: &egui::Context, screen: Vec2, editor: &mut Editor, state: &mut Option<OptionsState>, events: Vec<Event>) -> (Rect, OptionsOutcome) {
+        let (rect, outcome, _) = painted_frame(context, screen, editor, state, events);
+        (rect, outcome)
     }
 
     /// Frames enough for egui's first-frame sizing to settle.
@@ -775,6 +861,213 @@ mod tests {
 
     fn escape() -> Event {
         Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    fn visible_text(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> Option<Rect> {
+        shapes.iter().find_map(|clipped| {
+            let egui::Shape::Text(text) = &clipped.shape else {
+                return None;
+            };
+            let rect = text.visual_bounding_rect();
+            (text.galley.text() == wanted && clipped.clip_rect.contains_rect(rect)).then_some(rect)
+        })
+    }
+
+    #[test]
+    fn selected_headers_are_revealed_on_open_and_external_selection() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        let screen = Vec2::new(533.0, 400.0);
+        let mut state = Some(OptionsState::new(OptionsTab::Experimental));
+        settle(&context, screen, &mut editor, &mut state);
+        let (_, _, shapes) = painted_frame(&context, screen, &mut editor, &mut state, Vec::new());
+        assert!(visible_text(&shapes, "Experimental").is_some(), "the initially selected header is clipped");
+
+        state.as_mut().unwrap().tab = OptionsTab::General;
+        settle(&context, screen, &mut editor, &mut state);
+        let (_, _, shapes) = painted_frame(&context, screen, &mut editor, &mut state, Vec::new());
+        assert!(visible_text(&shapes, "General").is_some(), "the externally selected header is clipped");
+
+        state.as_mut().unwrap().tab = OptionsTab::Experimental;
+        settle(&context, screen, &mut editor, &mut state);
+        let (_, _, shapes) = painted_frame(&context, screen, &mut editor, &mut state, Vec::new());
+        let header = visible_text(&shapes, "Experimental").expect("the newly selected header is visible");
+        let wheel = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, 10_000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&context, screen, &mut editor, &mut state, vec![Event::PointerMoved(header.center()), wheel]);
+        settle(&context, screen, &mut editor, &mut state);
+        let (_, _, shapes) = painted_frame(&context, screen, &mut editor, &mut state, Vec::new());
+        assert_eq!(state.as_ref().unwrap().tab, OptionsTab::Experimental);
+        assert!(visible_text(&shapes, "General").is_some(), "manual scrolling did not reach the first header");
+        assert!(visible_text(&shapes, "Experimental").is_none(), "the selection pinned the manually scrolled list");
+    }
+
+    #[test]
+    fn notices_close_with_ok_escape_enter_and_an_outside_click() {
+        let screen = Vec2::new(1066.0, 600.0);
+        for dismissal in ["OK", "Escape", "Enter", "outside"] {
+            let context = context();
+            let mut editor = Editor::new(Document::new());
+            let mut options = OptionsState::new(OptionsTab::General);
+            options.notice = Some(Notice { title: "Notice", text: "Settings changed.".to_string() });
+            let mut state = Some(options);
+            settle(&context, screen, &mut editor, &mut state);
+            match dismissal {
+                "OK" => {
+                    let (_, _, shapes) = painted_frame(&context, screen, &mut editor, &mut state, Vec::new());
+                    let button = visible_text(&shapes, "OK").expect("the notice has an OK button");
+                    click(&context, screen, &mut editor, &mut state, button.center());
+                }
+                "Escape" => {
+                    frame(&context, screen, &mut editor, &mut state, vec![escape()]);
+                }
+                "Enter" => {
+                    let enter = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+                    frame(&context, screen, &mut editor, &mut state, vec![enter]);
+                }
+                _ => {
+                    click(&context, screen, &mut editor, &mut state, Pos2::new(1.0, 1.0));
+                }
+            }
+            assert!(state.as_ref().is_some_and(|options| options.notice.is_none()), "{dismissal} did not dismiss just the notice");
+        }
+    }
+
+    #[test]
+    fn a_notice_under_another_modal_leaves_enter_for_it() {
+        let context = context();
+        let mut notice = Some(Notice { title: "Notice", text: "Settings changed.".to_string() });
+        let mut enter_seen = false;
+        for step in 0..4 {
+            let enter = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+            let events = if step == 3 { vec![enter] } else { Vec::new() };
+            let input = RawInput { events, ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                show_notice(ui.ctx(), &mut notice);
+                egui::Modal::new(Id::new("over-options-notice")).show(ui.ctx(), |ui| {
+                    ui.label("Another question");
+                });
+                enter_seen = ui.input(|input| input.key_pressed(Key::Enter));
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert!(notice.is_some());
+        assert!(enter_seen, "the covered notice consumed Enter");
+    }
+
+    #[test]
+    fn an_open_bool_graph_menu_takes_escape_before_options() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        let screen = Vec2::new(1066.0, 600.0);
+        let mut state = Some(OptionsState::new(OptionsTab::General));
+        settle(&context, screen, &mut editor, &mut state);
+        let mut graph = crate::ui::graph_canvas::GraphState::default();
+        graph.popup = Some(crate::ui::graph_popups::GraphPopup::Lazy { at: Pos2::new(50.0, 50.0) });
+        for step in 0..4 {
+            let events = if step == 3 { vec![escape()] } else { Vec::new() };
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
+            let mut commands = Vec::new();
+            let output = context.run_ui(input, |ui| {
+                take_escape(ui.ctx(), &mut state, graph.popup.is_some());
+                crate::ui::graph_popups::show(ui, &mut editor, &mut graph, &mut commands);
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert!(state.is_some(), "Options took the graph menu's Escape");
+        assert!(graph.popup.is_none(), "Escape did not close the Lazy Menu");
+    }
+
+    #[test]
+    fn factory_reset_reloads_options_before_accepting_first_run_choices() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        editor.user.options.set_value("GridSize", serde_json::json!(50));
+        editor.user.options.set_value("HideBookmarkShortcuts", serde_json::json!(true));
+        let screen = Vec2::new(1066.0, 600.0);
+        let mut state = Some(OptionsState::new(OptionsTab::Graph));
+        settle(&context, screen, &mut editor, &mut state);
+        assert!(state.as_ref().unwrap().copy.is_some());
+
+        editor.user.options = crate::user::UserOptions::new();
+        editor.user.preferences = crate::user::Preferences::new();
+        state.as_mut().unwrap().reload_settings();
+        assert!(state.as_ref().unwrap().copy.is_none());
+        for name in ["AltPan", "AltZoom", "AltRotate"] {
+            editor.user.options.set_value(name, serde_json::json!(true));
+        }
+        settle(&context, screen, &mut editor, &mut state);
+        let (_, _, shapes) = painted_frame(&context, screen, &mut editor, &mut state, Vec::new());
+        let accept = visible_text(&shapes, "Accept Changes").expect("Accept Changes is visible");
+        let outcome = click(&context, screen, &mut editor, &mut state, accept.center());
+
+        assert!(state.is_none() && outcome.accepted);
+        let defaults = crate::user::UserOptions::new();
+        for name in ["GridSize", "HideBookmarkShortcuts"] {
+            assert_eq!(editor.user.options.value(name), defaults.value(name), "Accept restored the old {name}");
+        }
+        for name in ["AltPan", "AltZoom", "AltRotate"] {
+            assert_eq!(editor.user.options.value(name), serde_json::json!(true), "Accept discarded the first-run {name} choice");
+        }
+    }
+
+    #[test]
+    fn keyboard_starts_on_the_selected_header_and_stays_in_options() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        let mut state = Some(OptionsState::new(OptionsTab::Graph));
+        let screen = Vec2::new(1066.0, 600.0);
+        let mut shell_clicked = false;
+        let mut keyboard_frame = |events: Vec<Event>, request_shell: bool| {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
+            let mut last_tab = OptionsTab::General;
+            let mut dialogs = FileDialogs::default();
+            let mut focused = None;
+            let mut output = context.run_ui(input, |ui| {
+                let shell = ui.button("Shell action");
+                shell_clicked |= shell.clicked();
+                if request_shell {
+                    shell.request_focus();
+                }
+                show(ui.ctx(), &mut editor, &mut state, &mut last_tab, &mut dialogs);
+                focused = ui.memory(|memory| memory.focused()).and_then(|id| ui.ctx().read_response(id));
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            (focused, shapes)
+        };
+        keyboard_frame(Vec::new(), true);
+        for _ in 0..4 {
+            keyboard_frame(Vec::new(), false);
+        }
+        let (focused, shapes) = keyboard_frame(Vec::new(), false);
+        let header = visible_text(&shapes, "Graph").expect("the selected Graph header is visible");
+        let focused = focused.expect("the selected header has keyboard focus");
+        assert_eq!(focused.layer_id.id, Id::new("options"));
+        assert!(focused.rect.contains_rect(header), "the initial focus is not on the selected header");
+
+        for key in [Key::Space, Key::Enter] {
+            let event = Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+            keyboard_frame(vec![event], false);
+        }
+        for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
+            for _ in 0..40 {
+                let event = Event::Key { key: Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers };
+                let (focused, _) = keyboard_frame(vec![event], false);
+                if let Some(focused) = focused {
+                    assert_eq!(focused.layer_id.id, Id::new("options"), "Tab traversal escaped Options");
+                }
+                // egui wraps at either end on the following frame.
+                let (focused, _) = keyboard_frame(Vec::new(), false);
+                let focused = focused.expect("Tab traversal restores focus within Options after wrapping");
+                assert_eq!(focused.layer_id.id, Id::new("options"), "Tab traversal escaped Options");
+            }
+        }
+        assert!(!shell_clicked, "Space or Enter activated the shell behind Options");
     }
 
     #[test]
@@ -876,10 +1169,120 @@ mod tests {
         let input = RawInput { events: vec![escape()], ..Default::default() };
         let mut seen = true;
         let output = context.run_ui(input, |ui| {
-            take_escape(ui.ctx(), &mut state);
+            take_escape(ui.ctx(), &mut state, false);
             seen = ui.input(|input| input.key_pressed(Key::Escape));
         });
         output.drop_without_applying_deltas();
         assert!(state.is_none() && !seen);
+    }
+}
+
+#[cfg(test)]
+mod compute_layout_tests {
+    use super::*;
+    use crate::document::Document;
+    use egui::{Pos2, RawInput, Shape};
+
+    type Drawn = (String, Rect, Rect);
+
+    fn frame(context: &egui::Context, editor: &mut Editor, page: &mut ComputePage, place: Rect) -> Vec<Drawn> {
+        let screen = Rect::from_min_size(Pos2::ZERO, place.max.to_vec2() + Vec2::splat(20.0));
+        let input = RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut notice = None;
+        let output = context.run_ui(input, |ui| {
+            let builder = egui::UiBuilder::new().max_rect(place).layout(Layout::top_down(Align::Min));
+            let mut page_ui = ui.new_child(builder);
+            page_ui.set_clip_rect(place);
+            compute_page(&mut page_ui, editor, page, &mut notice);
+        });
+        let mut texts = Vec::new();
+        let mut shapes: Vec<(Shape, Rect)> = output.shapes.iter().map(|clipped| (clipped.shape.clone(), clipped.clip_rect)).collect();
+        while let Some((shape, clip)) = shapes.pop() {
+            match shape {
+                Shape::Vec(inner) => shapes.extend(inner.into_iter().map(|shape| (shape, clip))),
+                Shape::Text(text) => {
+                    let rect = text.galley.rect.translate(text.pos.to_vec2());
+                    texts.push((text.galley.text().to_string(), rect, clip));
+                }
+                _ => {}
+            }
+        }
+        output.drop_without_applying_deltas();
+        texts
+    }
+
+    fn page() -> ComputePage {
+        let device = DeviceInfo {
+            library_id: "layout-test".to_string(),
+            device_type: DeviceType::GpuDiscrete,
+            backend_name: "A particularly long compute backend name for a device with an outdated driver".to_string(),
+            vendor_name: "Layout tests".to_string(),
+            device_name: "A particularly long graphics processor name with a full manufacturer and model number".to_string(),
+            id: "layout-test-gpu".to_string(),
+            is_fallback_device: false,
+            requires_driver_update: true,
+        };
+        let console = "A long benchmark status line that needs to wrap inside the console without widening the Options page.\n".repeat(30);
+        ComputePage {
+            devices: Some(vec![device]),
+            finding: None,
+            scores: Scores::new(),
+            console,
+            benchmark: None,
+            docs: None,
+            enforcing: None,
+        }
+    }
+
+    #[test]
+    fn compute_labels_and_buttons_fit_narrow_pages_with_long_console_output() {
+        for width in [300.0, 380.0, 685.0] {
+            for cpu_only in [false, true] {
+                let context = egui::Context::default();
+                theme::apply(&context);
+                let mut editor = Editor::new(Document::new());
+                editor.compute.cpu_only = cpu_only;
+                let mut page = page();
+                let place = Rect::from_min_size(Pos2::new(160.0, 100.0), Vec2::new(width, 420.0));
+                frame(&context, &mut editor, &mut page, place);
+                let texts = frame(&context, &mut editor, &mut page, place);
+                for (text, rect, clip) in &texts {
+                    let right_edge = place.right().min(clip.right());
+                    assert!(rect.right() <= right_edge + 0.5, "Compute at {width}, CPU-only {cpu_only}: {text:?} extends beyond {right_edge}: {rect:?}");
+                }
+
+                let mut visible = vec!["Available Devices", "Enforce Optimal Settings"];
+                if cpu_only {
+                    visible.push("Restart Nerthus with all devices enabled!");
+                } else {
+                    visible.push("Scan Hardware and Determine Speeds");
+                    visible.push("Use CPU-only Mode");
+                }
+                for wanted in visible {
+                    let drawn = texts.iter().find(|(text, ..)| text == wanted);
+                    let (_, rect, clip) = drawn.unwrap_or_else(|| panic!("Compute at {width}: {wanted:?} is not drawn"));
+                    assert!(clip.expand(0.5).contains_rect(*rect), "Compute at {width}: {wanted:?} is clipped at {clip:?}: {rect:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_compute_pages_keep_the_device_heading_and_toolbar_visible() {
+        for width in [300.0, 380.0, 685.0] {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            let mut editor = Editor::new(Document::new());
+            let mut page = page();
+            let place = Rect::from_min_size(Pos2::new(160.0, 100.0), Vec2::new(width, 220.0));
+            frame(&context, &mut editor, &mut page, place);
+            let texts = frame(&context, &mut editor, &mut page, place);
+            let visible = ["Available Devices", "Scan Hardware and Determine Speeds", "Enforce Optimal Settings", "Use CPU-only Mode"];
+            for wanted in visible {
+                let drawn = texts.iter().find(|(text, ..)| text == wanted);
+                let (_, rect, clip) = drawn.unwrap_or_else(|| panic!("Compute at {width}: {wanted:?} is not drawn"));
+                assert!(clip.expand(0.5).contains_rect(*rect), "Compute at {width}: {wanted:?} is clipped at {clip:?}: {rect:?}");
+            }
+        }
     }
 }

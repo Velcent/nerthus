@@ -222,8 +222,8 @@ fn run_script(file: &Path) -> Result<(), String> {
 /// before the shell's keys, so that it does not stop a build as well. Esc
 /// in the script only leaves it, as in any text field, and a list dropped
 /// down takes it instead.
-pub fn take_escape(ctx: &egui::Context, window: &mut Option<BatchWindow>) {
-    if !window.as_ref().is_some_and(|shown| shown.active) || egui::Popup::is_any_open(ctx) {
+pub fn take_escape(ctx: &egui::Context, window: &mut Option<BatchWindow>, graph_popup_open: bool) {
+    if !window.as_ref().is_some_and(|shown| shown.active) || graph_popup_open || egui::Popup::is_any_open(ctx) {
         return;
     }
     if tool_window::on_top(ctx) != Some(Id::new("batch-build")) {
@@ -407,7 +407,7 @@ mod tests {
             let mut seen = false;
             let output = context.run_ui(input, |ui| {
                 let ctx = ui.ctx().clone();
-                take_escape(&ctx, &mut self.window);
+                take_escape(&ctx, &mut self.window, false);
                 seen = ctx.input(|input| input.key_pressed(Key::Escape));
                 if let Some(window) = self.window.as_mut()
                     && !show(&ctx, &mut self.editor, window, &mut self.session, &mut self.dialogs)
@@ -535,6 +535,26 @@ mod tests {
         shell.settle(LARGE);
         let (_, seen) = shell.frame_seen(LARGE, vec![escape()]);
         assert!(shell.window.is_none() && !seen);
+    }
+
+    #[test]
+    fn an_open_bool_graph_menu_takes_escape_before_batch_build() {
+        let mut shell = Shell::open();
+        shell.settle(LARGE);
+        let mut graph = crate::ui::graph_canvas::GraphState::default();
+        graph.popup = Some(crate::ui::graph_popups::GraphPopup::Lazy { at: Pos2::new(50.0, 50.0) });
+        for step in 0..4 {
+            let events = if step == 3 { vec![escape()] } else { Vec::new() };
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, LARGE)), events, ..Default::default() };
+            let mut commands = Vec::new();
+            let output = shell.context.run_ui(input, |ui| {
+                take_escape(ui.ctx(), &mut shell.window, graph.popup.is_some());
+                crate::ui::graph_popups::show(ui, &mut shell.editor, &mut graph, &mut commands);
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert!(shell.window.is_some(), "Batch Build took the graph menu's Escape");
+        assert!(graph.popup.is_none(), "Escape did not close the Lazy Menu");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! `ToolboxTab`, `GraphTab`, `NodeTab`, `DataViewTab`, `BuildTab`,
 //! `CacheTab`, `ViewportTab`, `NavigationTab`, `LazyTab`,
 //! `ExperimentalTab`). The pages work on copies of the user's options and
-//! preferences: Accept Changes keeps every page's settings,
+//! preferences: Accept Changes keeps every page's edits,
 //! Cancel drops them, and Reset this page puts the page's settings back to
 //! their defaults (to keep or drop in turn).
 //!
@@ -188,18 +188,28 @@ pub struct OptionsCopy {
     options: UserOptions,
     preferences: Preferences,
     verbose_at_start: bool,
+    /// The live values last compared with the draft, in page order.
+    baseline: Vec<(Setting, Value)>,
     /// The monitors there are, the primary's index (`Screen.AllScreens`).
     monitors: (usize, Option<usize>),
 }
 
 impl OptionsCopy {
     pub fn load(options: &UserOptions, preferences: &Preferences) -> OptionsCopy {
-        OptionsCopy {
+        let mut copy = OptionsCopy {
             options: options.clone(),
             preferences: preferences.clone(),
             verbose_at_start: crate::logging::verbose_at_start(),
+            baseline: Vec::new(),
             monitors: monitor_count(),
+        };
+        for tab in ALL_PAGES {
+            for setting in page_settings(tab) {
+                let value = copy.get(*setting);
+                copy.baseline.push((*setting, value));
+            }
         }
+        copy
     }
 
     fn get(&self, setting: Setting) -> Value {
@@ -230,6 +240,27 @@ impl OptionsCopy {
         self.get(setting).as_str().unwrap_or_default().to_string()
     }
 
+    /// Follow live changes to settings that have not been edited here.
+    /// Local edits remain pending until Accept Changes or Cancel.
+    pub fn refresh(&mut self, options: &UserOptions, preferences: &Preferences) {
+        let verbose_at_start = crate::logging::verbose_at_start();
+        for index in 0..self.baseline.len() {
+            let setting = self.baseline[index].0;
+            let draft = self.get(setting);
+            let untouched = draft == self.baseline[index].1;
+            let live = match setting {
+                Setting::Option(name) => options.value(name),
+                Setting::Preference(section, name) => preferences.member(section, name),
+                Setting::VerboseFile => Value::Bool(verbose_at_start),
+            };
+            if untouched {
+                self.set(setting, live.clone());
+            }
+            self.baseline[index].1 = live;
+        }
+        self.monitors = monitor_count();
+    }
+
     /// `ResetDefaults`: the page's settings back to a fresh `Options` and
     /// `Preferences`.
     pub fn reset(&mut self, tab: OptionsTab) {
@@ -245,19 +276,20 @@ impl OptionsCopy {
         }
     }
 
-    /// `SaveSettings` for every page: each page's settings onto the
-    /// user's.
+    /// `SaveSettings` for every page, applying only the draft's edits so
+    /// other windows' live settings survive accepting this one.
     pub fn save(&self, options: &mut UserOptions, preferences: &mut Preferences) {
-        for tab in ALL_PAGES {
-            for setting in page_settings(tab) {
-                let value = self.get(*setting);
-                match *setting {
-                    Setting::Option(name) => options.set_value(name, value),
-                    Setting::Preference(section, name) => preferences.set_member(section, name, value),
-                    Setting::VerboseFile => {
-                        if let Err(error) = crate::logging::set_verbose_at_start(self.verbose_at_start) {
-                            log::error!("Cannot set Verbose Logging for the next start: {error}");
-                        }
+        for (setting, baseline) in &self.baseline {
+            let value = self.get(*setting);
+            if value == *baseline {
+                continue;
+            }
+            match *setting {
+                Setting::Option(name) => options.set_value(name, value),
+                Setting::Preference(section, name) => preferences.set_member(section, name, value),
+                Setting::VerboseFile => {
+                    if let Err(error) = crate::logging::set_verbose_at_start(self.verbose_at_start) {
+                        log::error!("Cannot set Verbose Logging for the next start: {error}");
                     }
                 }
             }
@@ -309,6 +341,10 @@ pub fn page(ui: &mut Ui, tab: OptionsTab, copy: &mut OptionsCopy, dialogs: &mut 
     scroll = scroll.auto_shrink([false, false]);
     scroll.show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
+        // A horizontal row otherwise tells its check boxes to extend their
+        // text beyond the page. That also widens the scroll content and
+        // leaves subsequent rows laid out beyond the visible right edge.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         match tab {
             OptionsTab::General => request = general(ui, copy),
             OptionsTab::Paths => paths(ui, copy, dialogs),
@@ -347,7 +383,8 @@ fn section(ui: &mut Ui, title: &str, gap_after: f32) {
 /// labels).
 fn row_label(ui: &mut Ui, text: &str, width: f32) {
     ui.allocate_ui_with_layout(Vec2::new(width, 24.0), Layout::right_to_left(Align::Center), |ui| {
-        ui.label(RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
+        let text = RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
+        ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
     });
 }
 
@@ -358,10 +395,11 @@ fn options_x(ui: &mut Ui, choices: &[&str], current: Option<usize>, width: Optio
     let sizes = theme::sizes(ui.ctx());
     let gap = sizes.option_margin;
     let height = 16.0 + 2.0 * sizes.option_padding[1];
-    ui.horizontal(|ui| {
+    let width = width.map(|width| width.min(ui.available_width()));
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
         ui.spacing_mut().button_padding.x = sizes.option_padding[0];
-        let segment_width = width.map(|width| (width - gap * (choices.len() as f32 - 1.0)) / choices.len() as f32);
+        let segment_width = width.map(|width| ((width - gap * (choices.len() as f32 - 1.0)) / choices.len() as f32).max(0.0));
         for (index, name) in choices.iter().enumerate() {
             let selected = current == Some(index);
             let text_color = if selected { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
@@ -380,6 +418,11 @@ fn options_x(ui: &mut Ui, choices: &[&str], current: Option<usize>, width: Optio
 
 /// A labelled choice (`TextBlock` + `ListBox-OptionsX`).
 fn choice(ui: &mut Ui, label: &str, label_width: f32, choices: &[&str], current: Option<usize>, width: Option<f32>) -> Option<usize> {
+    if ui.available_width() < label_width + 228.0 {
+        let label = RichText::new(label).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
+        ui.label(label);
+        return options_x(ui, choices, current, width);
+    }
     let mut chosen = None;
     ui.horizontal(|ui| {
         row_label(ui, label, label_width);
@@ -391,6 +434,7 @@ fn choice(ui: &mut Ui, label: &str, label_width: f32, choices: &[&str], current:
 
 /// A check box `indent` from the left, bound to a flag.
 fn check(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, indent: f32, text: &str) {
+    let indent = indent.min((ui.available_width() - 160.0).max(0.0));
     ui.horizontal(|ui| {
         ui.add_space(indent);
         check_box(ui, copy, setting, text);
@@ -408,6 +452,7 @@ fn check_box(ui: &mut Ui, copy: &mut OptionsCopy, setting: Setting, text: &str) 
 /// A check box that shows but cannot change.
 fn fixed_check(ui: &mut Ui, indent: f32, text: &str, checked: bool, why: &str) {
     let mut shown = checked;
+    let indent = indent.min((ui.available_width() - 160.0).max(0.0));
     ui.horizontal(|ui| {
         ui.add_space(indent);
         ui.add_enabled(false, egui::Checkbox::new(&mut shown, RichText::new(text).font(theme::interface(12.0)))).disabled_tooltip(why);
@@ -416,6 +461,7 @@ fn fixed_check(ui: &mut Ui, indent: f32, text: &str, checked: bool, why: &str) {
 
 /// A dimmed note under a setting.
 fn note(ui: &mut Ui, indent: f32, text: &str, color: Color32) {
+    let indent = indent.min((ui.available_width() - 160.0).max(0.0));
     ui.horizontal(|ui| {
         ui.add_space(indent);
         let label = RichText::new(text).font(theme::interface(11.0)).color(color.gamma_multiply(0.75));
@@ -592,7 +638,7 @@ fn general(ui: &mut Ui, copy: &mut OptionsCopy) -> Option<PageRequest> {
     });
     ui.separator();
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button("Open Data Folder").clicked()
             && let Some(folder) = crate::user::data_folder()
         {
@@ -742,7 +788,7 @@ fn format_choice(ui: &mut Ui, copy: &mut OptionsCopy, member: &'static str, head
         ui.add_space(8.0);
         let mut combo = egui::ComboBox::from_id_salt(("default-format", member));
         combo = combo.selected_text(current.as_str());
-        combo = combo.width(220.0);
+        combo = combo.width(ui.available_width().min(220.0));
         combo.show_ui(ui, |ui| {
             for format in nerthus_export::FileFormat::ALL {
                 let name = format.name();
@@ -876,47 +922,67 @@ fn index_button(index: usize) -> i64 {
 fn navigation(ui: &mut Ui, copy: &mut OptionsCopy) {
     ui.add_space(8.0);
     section(ui, "Mouse Navigation", 16.0);
-    ui.horizontal(|ui| {
-        ui.add_space(60.0);
-        let headers = [("Mouse Button", 220.0), ("Hold Alt", 90.0), ("Sensitivity", 200.0)];
-        for (header, width) in headers {
-            ui.allocate_ui_with_layout(Vec2::new(width, 18.0), Layout::top_down(Align::Center), |ui| {
-                ui.label(RichText::new(header).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
-            });
-        }
-    });
-    let rows = [
-        ("Rotate", "RotateButton", "AltRotate", "RotateSensitivity", theme::ACCENT_MUTED_BLUE),
-        ("Pan", "PanButton", "AltPan", "PanSensitivity", theme::ACCENT_MUTED_GREEN),
-        ("Zoom", "ZoomButton", "AltZoom", "ZoomSensitivity", theme::ACCENT_MUTED_MAGENTA),
-    ];
-    for (label, button, alt, sensitivity, colour) in rows {
+    // Gaea gives the mouse buttons and sensitivity the remaining space,
+    // with the mouse-button column capped at 280. At smaller widths put
+    // each action's controls on separate rows so the slider stays usable.
+    let available_width = ui.available_width();
+    let compact = available_width < 460.0;
+    // Gaea's grid columns: `60 / * (MaxWidth 280) / 90 / *`. The two star
+    // columns share the room evenly, the mouse-button column capped at 280.
+    let controls_width = available_width - 150.0;
+    let buttons_width = (controls_width / 2.0).min(280.0);
+    let sensitivity_width = controls_width - buttons_width;
+    if !compact {
         ui.horizontal(|ui| {
-            row_label(ui, label, 52.0);
-            ui.add_space(8.0);
-            let current = button_index(copy.number(Opt(button)) as i64);
-            ui.allocate_ui_with_layout(Vec2::new(220.0, 26.0), Layout::left_to_right(Align::Center), |ui| {
-                if let Some(chosen) = options_x(ui, &["Left", "Middle", "Right"], Some(current), Some(216.0)) {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(60.0);
+            let headers = [("Mouse Button", buttons_width), ("Hold Alt", 90.0), ("Sensitivity", sensitivity_width)];
+            for (header, width) in headers {
+                ui.allocate_ui_with_layout(Vec2::new(width, 18.0), Layout::top_down(Align::Center), |ui| {
+                    ui.label(RichText::new(header).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
+                });
+            }
+        });
+    }
+    let rows = [
+        ("Rotate", "Rotation Sensitivity", "RotateButton", "AltRotate", "RotateSensitivity", theme::ACCENT_MUTED_BLUE),
+        ("Pan", "Pan Sensitivity", "PanButton", "AltPan", "PanSensitivity", theme::ACCENT_MUTED_GREEN),
+        ("Zoom", "Zoom Sensitivity", "ZoomButton", "AltZoom", "ZoomSensitivity", theme::ACCENT_MUTED_MAGENTA),
+    ];
+    for (label, tooltip, button, alt, sensitivity, colour) in rows {
+        ui.push_id(button, |ui| {
+            let current = Some(button_index(copy.number(Opt(button)) as i64));
+            if compact {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).font(theme::semibold(12.0)).color(colour));
+                    ui.add_space(8.0);
+                    check_box(ui, copy, Opt(alt), "Hold Alt");
+                });
+                let width = (ui.available_width() - 120.0).clamp(0.0, 220.0);
+                if let Some(chosen) = choice(ui, "Mouse Button", 96.0, &["Left", "Middle", "Right"], current, Some(width)) {
                     copy.set(Opt(button), json!(index_button(chosen)));
                 }
-            });
-            ui.allocate_ui_with_layout(Vec2::new(90.0, 26.0), Layout::top_down(Align::Center), |ui| {
-                let mut held = copy.flag(Opt(alt));
-                if ui.checkbox(&mut held, "").changed() {
-                    copy.set(Opt(alt), Value::Bool(held));
-                }
-            });
-            let mut value = copy.number(Opt(sensitivity)) as f32;
-            let mut slider = egui::Slider::new(&mut value, 0.0..=2.0);
-            slider = slider.show_value(false);
-            slider = slider.trailing_fill(true);
-            let response = ui.scope(|ui| {
-                ui.visuals_mut().selection.bg_fill = colour;
-                ui.add_sized(Vec2::new(200.0, 20.0), slider)
-            });
-            let response = response.inner.tooltip(format!("{label} Sensitivity"));
-            if response.changed() {
-                copy.set(Opt(sensitivity), json!(value as f64));
+                ui.horizontal(|ui| {
+                    row_label(ui, "Sensitivity", 96.0);
+                    ui.add_space(8.0);
+                    let width = ui.available_width();
+                    navigation_slider(ui, copy, sensitivity, tooltip, colour, width);
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    row_label(ui, label, 52.0);
+                    ui.add_space(8.0);
+                    ui.allocate_ui_with_layout(Vec2::new(buttons_width, 26.0), Layout::left_to_right(Align::Center), |ui| {
+                        if let Some(chosen) = options_x(ui, &["Left", "Middle", "Right"], current, Some(buttons_width)) {
+                            copy.set(Opt(button), json!(index_button(chosen)));
+                        }
+                    });
+                    ui.allocate_ui_with_layout(Vec2::new(90.0, 26.0), Layout::top_down(Align::Center), |ui| {
+                        check_box(ui, copy, Opt(alt), "");
+                    });
+                    navigation_slider(ui, copy, sensitivity, tooltip, colour, sensitivity_width);
+                });
             }
         });
         ui.add_space(4.0);
@@ -930,6 +996,24 @@ fn navigation(ui: &mut Ui, copy: &mut OptionsCopy) {
     check(ui, copy, Opt("InvertZoom"), 60.0, "Invert zoom direction");
     ui.add_space(8.0);
     check(ui, copy, Opt("ShowNavigationHint"), 60.0, "Show viewport navigation hint for 10 seconds when Nerthus starts");
+}
+
+fn navigation_slider(ui: &mut Ui, copy: &mut OptionsCopy, sensitivity: &'static str, tooltip: &str, colour: Color32, width: f32) {
+    let mut value = copy.number(Opt(sensitivity)) as f32;
+    let mut slider = egui::Slider::new(&mut value, 0.0..=2.0);
+    slider = slider.show_value(false);
+    slider = slider.trailing_fill(true);
+    let response = ui.scope(|ui| {
+        ui.visuals_mut().selection.bg_fill = colour;
+        // Slider uses this spacing value for its interactive track; a
+        // larger add_sized allocation only enlarges the surrounding UI.
+        ui.spacing_mut().slider_width = width;
+        ui.add(slider)
+    });
+    let response = response.inner.tooltip(tooltip);
+    if response.changed() {
+        copy.set(Opt(sensitivity), json!(value as f64));
+    }
 }
 
 /// `LazyTab`: each part of the Lazy Menu hidden, muted or bright.
@@ -1017,10 +1101,15 @@ mod tests {
 
     /// A frame of `tab` with these events. Returns the texts drawn.
     fn frame(context: &egui::Context, tab: OptionsTab, copy: &mut OptionsCopy, events: Vec<Event>) -> Vec<Drawn> {
-        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1333.0, 800.0))), events, ..Default::default() };
+        frame_at(context, tab, copy, events, PLACE)
+    }
+
+    fn frame_at(context: &egui::Context, tab: OptionsTab, copy: &mut OptionsCopy, events: Vec<Event>, place: Rect) -> Vec<Drawn> {
+        let screen_size = Vec2::new(1333.0, (place.bottom() + 16.0).max(800.0));
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen_size)), events, ..Default::default() };
         let mut dialogs = FileDialogs::default();
         let output = context.run_ui(input, |ui| {
-            let mut page_ui = ui.new_child(egui::UiBuilder::new().max_rect(PLACE).layout(Layout::top_down(Align::Min)));
+            let mut page_ui = ui.new_child(egui::UiBuilder::new().max_rect(place).layout(Layout::top_down(Align::Min)));
             page(&mut page_ui, tab, copy, &mut dialogs);
         });
         let mut texts = Vec::new();
@@ -1051,6 +1140,109 @@ mod tests {
         frame(context, tab, copy, vec![Event::PointerMoved(position)]);
         frame(context, tab, copy, vec![button(true)]);
         frame(context, tab, copy, vec![button(false)]);
+    }
+
+    #[test]
+    fn accepting_edits_preserves_other_windows_live_settings() {
+        let mut options = UserOptions::new();
+        let mut preferences = Preferences::new();
+        let mut copy = OptionsCopy::load(&options, &preferences);
+        copy.set(Opt("GridSize"), json!(50));
+        copy.set(Pref("Cache", "SmartCache"), json!(true));
+
+        options.set_value("ExpandDataView", json!(false));
+        options.set_value("ShowGrid", json!(false));
+        preferences.set_member("Locations", "Projects", json!("/external/projects"));
+        copy.save(&mut options, &mut preferences);
+
+        assert_eq!(options.value("GridSize"), json!(50));
+        assert_eq!(preferences.member("Cache", "SmartCache"), json!(true));
+        assert_eq!(options.value("ExpandDataView"), json!(false));
+        assert_eq!(options.value("ShowGrid"), json!(false));
+        assert_eq!(preferences.member("Locations", "Projects"), json!("/external/projects"));
+    }
+
+    #[test]
+    fn untouched_drafts_follow_live_settings_without_becoming_edits() {
+        let mut options = UserOptions::new();
+        let mut preferences = Preferences::new();
+        let mut copy = OptionsCopy::load(&options, &preferences);
+
+        options.set_value("ExpandDataView", json!(false));
+        options.set_value("ShowGrid", json!(false));
+        options.set_value("AltRotate", json!(true));
+        options.set_value("AltPan", json!(true));
+        options.set_value("AltZoom", json!(true));
+        options.set_value("ToolboxStyle", json!("Panel"));
+        preferences.set_member("Locations", "Projects", json!("/onboard/projects"));
+        copy.refresh(&options, &preferences);
+
+        for name in ["ExpandDataView", "ShowGrid", "AltRotate", "AltPan", "AltZoom", "ToolboxStyle"] {
+            assert_eq!(copy.get(Opt(name)), options.value(name));
+        }
+        assert_eq!(copy.get(Pref("Locations", "Projects")), json!("/onboard/projects"));
+
+        // An external change after the last refresh still wins when the
+        // user has not edited that setting in Options.
+        options.set_value("ShowGrid", json!(true));
+        preferences.set_member("Locations", "Projects", json!("/latest/projects"));
+        copy.save(&mut options, &mut preferences);
+        assert_eq!(options.value("ShowGrid"), json!(true));
+        assert_eq!(preferences.member("Locations", "Projects"), json!("/latest/projects"));
+    }
+
+    #[test]
+    fn refresh_preserves_edits_until_the_live_settings_match() {
+        let mut options = UserOptions::new();
+        let mut preferences = Preferences::new();
+        let mut copy = OptionsCopy::load(&options, &preferences);
+        copy.set(Opt("GridSize"), json!(50));
+        copy.set(Pref("Locations", "Projects"), json!("/draft/projects"));
+
+        options.set_value("GridSize", json!(75));
+        preferences.set_member("Locations", "Projects", json!("/external/projects"));
+        copy.refresh(&options, &preferences);
+        assert_eq!(copy.get(Opt("GridSize")), json!(50));
+        assert_eq!(copy.get(Pref("Locations", "Projects")), json!("/draft/projects"));
+
+        options.set_value("GridSize", json!(50));
+        preferences.set_member("Locations", "Projects", json!("/draft/projects"));
+        copy.refresh(&options, &preferences);
+        options.set_value("GridSize", json!(100));
+        preferences.set_member("Locations", "Projects", json!("/latest/projects"));
+        copy.refresh(&options, &preferences);
+        assert_eq!(copy.get(Opt("GridSize")), json!(100));
+        assert_eq!(copy.get(Pref("Locations", "Projects")), json!("/latest/projects"));
+    }
+
+    #[test]
+    fn page_reset_stays_pending_and_preserves_other_pages_live_values() {
+        let mut options = UserOptions::new();
+        let mut preferences = Preferences::new();
+        options.set_value("GridSize", json!(75));
+        options.set_value("ShowGrid", json!(false));
+        let mut copy = OptionsCopy::load(&options, &preferences);
+
+        copy.reset(OptionsTab::Graph);
+        preferences.set_member("Locations", "Projects", json!("/external/projects"));
+        copy.refresh(&options, &preferences);
+        assert_eq!(copy.get(Opt("GridSize")), UserOptions::new().value("GridSize"));
+        assert_eq!(options.value("GridSize"), json!(75));
+        copy.save(&mut options, &mut preferences);
+
+        assert_eq!(options.value("GridSize"), UserOptions::new().value("GridSize"));
+        assert_eq!(options.value("ShowGrid"), json!(false));
+        assert_eq!(preferences.member("Locations", "Projects"), json!("/external/projects"));
+    }
+
+    #[test]
+    fn accepting_an_untouched_draft_keeps_settings_clean() {
+        let mut options = UserOptions::new();
+        let mut preferences = Preferences::new();
+        let copy = OptionsCopy::load(&options, &preferences);
+        copy.save(&mut options, &mut preferences);
+        assert!(!options.changed());
+        assert!(!preferences.changed());
     }
 
     #[test]
@@ -1111,6 +1303,41 @@ mod tests {
         frame(&context, OptionsTab::Paths, &mut copy, vec![Event::Text("s".to_string())]);
         assert_eq!(copy.text(Pref("Locations", "Documents")), format!("{user_files}s"));
         assert_eq!(copy.text(Pref("Locations", "Projects")), project_files);
+    }
+
+    #[test]
+    fn pages_keep_their_labels_inside_narrow_viewports() {
+        for width in [300.0, 380.0, 430.0, 685.0] {
+            let place = Rect::from_min_size(PLACE.min, Vec2::new(width, 1600.0));
+            for tab in ALL_PAGES {
+                let context = context();
+                let mut copy = copy();
+                frame_at(&context, tab, &mut copy, Vec::new(), place);
+                let texts = frame_at(&context, tab, &mut copy, Vec::new(), place);
+                for (text, rect, _) in texts {
+                    assert!(rect.right() <= place.right() + 0.5, "{tab:?} at {width}: {text:?} extends beyond the page: {rect:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_navigation_sliders_can_reach_their_right_end() {
+        for width in [300.0, 380.0, 430.0] {
+            let context = context();
+            let mut copy = copy();
+            let place = Rect::from_min_size(PLACE.min, Vec2::new(width, 1000.0));
+            frame_at(&context, OptionsTab::Navigation, &mut copy, Vec::new(), place);
+            let texts = frame_at(&context, OptionsTab::Navigation, &mut copy, Vec::new(), place);
+            let sensitivity = texts.iter().filter(|(text, ..)| text == "Sensitivity").min_by(|left, right| left.1.top().total_cmp(&right.1.top()));
+            let sensitivity = sensitivity.expect("the sensitivity label must remain visible").1;
+            let position = Pos2::new(place.right() - 4.0, sensitivity.center().y);
+            let button = |pressed| Event::PointerButton { pos: position, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            frame_at(&context, OptionsTab::Navigation, &mut copy, vec![Event::PointerMoved(position)], place);
+            frame_at(&context, OptionsTab::Navigation, &mut copy, vec![button(true)], place);
+            frame_at(&context, OptionsTab::Navigation, &mut copy, vec![button(false)], place);
+            assert!(copy.number(Opt("RotateSensitivity")) > 1.99, "at {width}, the visible slider cannot reach its maximum");
+        }
     }
 
     #[test]

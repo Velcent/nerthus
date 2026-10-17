@@ -123,6 +123,38 @@ pub fn part(ui: &mut Ui, id: &str, rect: Rect, layout: Layout) -> Ui {
     part
 }
 
+/// Keeps keyboard traversal and editor widgets behind a dialog on its
+/// layer. Windows opened above it (such as Diagnostics from Options)
+/// remain usable, as do the dialog's menus and message boxes.
+/// Call before drawing the editor: text fields process their events
+/// before egui surrenders focus on a blocked layer.
+pub fn focus_scope(ctx: &Context, window: Id) {
+    let layer = LayerId::new(Order::Middle, window);
+    ctx.memory_mut(|memory| memory.set_modal_layer(layer));
+    let focused = ctx.memory(|memory| memory.focused());
+    let response = focused.and_then(|id| ctx.read_response(id));
+    if let Some(response) = response {
+        let blocked = ctx.memory(|memory| {
+            let below_window = if response.layer_id.order != layer.order {
+                response.layer_id.order < layer.order
+            } else {
+                let focused_position = memory.layer_ids().position(|shown| shown == response.layer_id);
+                let window_position = memory.layer_ids().position(|shown| shown == layer);
+                match (focused_position, window_position) {
+                    (Some(focused), Some(window)) => focused < window,
+                    _ => false,
+                }
+            };
+            let below_modal = !memory.is_above_modal_layer(response.layer_id);
+            below_window || below_modal
+        });
+        if blocked {
+            ctx.memory_mut(|memory| memory.surrender_focus(response.id));
+        }
+    }
+    ctx.data_mut(|data| data.insert_temp(Id::new("tool-window-focus-scope"), window));
+}
+
 /// Whether `rect` is inside `body` (give or take rounding).
 fn fits(rect: Rect, body: Rect) -> bool {
     body.expand(0.5).contains_rect(rect)
@@ -146,13 +178,14 @@ fn dragging(ctx: &Context, id: Id) -> bool {
 /// rest. The shell's alert and egui's modals are handled separately.
 pub fn on_top(ctx: &Context) -> Option<Id> {
     let alert = alert::area_id();
+    let scope = ctx.data(|data| data.get_temp::<Id>(Id::new("tool-window-focus-scope")));
     ctx.memory(|memory| {
         let areas = memory.areas();
         let modal = memory.top_modal_layer();
         let window = |layer: &LayerId| {
             matches!(layer.order, Order::Middle | Order::Foreground)
                 && layer.id != alert
-                && Some(*layer) != modal
+                && (Some(*layer) != modal || Some(layer.id) == scope)
                 && areas.parent_layer(*layer).is_none()
                 && areas.visible_last_frame(layer)
         };
@@ -169,7 +202,8 @@ pub fn on_top(ctx: &Context) -> Option<Id> {
 /// shell being typed in, which Esc puts back.
 pub fn take_escape(ctx: &Context, windows: &[Id]) -> Option<Id> {
     let top = on_top(ctx).filter(|top| windows.contains(top))?;
-    let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
+    let scope = ctx.data(|data| data.get_temp::<Id>(Id::new("tool-window-focus-scope")));
+    let modal = ctx.memory(|memory| memory.top_modal_layer().is_some_and(|layer| Some(layer.id) != scope));
     let typing_elsewhere = shell_has_keyboard(ctx);
     if modal || typing_elsewhere || egui::Popup::is_any_open(ctx) {
         return None;
@@ -540,5 +574,215 @@ mod tests {
         assert_eq!(within(rect, body), Rect::from_min_size(Pos2::new(0.0, 36.0), Vec2::new(100.0, 100.0)));
         let rect = Rect::from_min_size(Pos2::new(450.0, 380.0), Vec2::new(100.0, 100.0));
         assert_eq!(within(rect, body), Rect::from_min_size(Pos2::new(400.0, 300.0), Vec2::new(100.0, 100.0)));
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+    use egui::{Event, PointerButton, RawInput};
+
+    #[derive(Default)]
+    struct FocusFrame {
+        shell_ids: Vec<Id>,
+        shell_text: String,
+        options_ids: Vec<Id>,
+        diagnostics_id: Option<Id>,
+        modal_ids: Vec<Id>,
+        activated: Vec<&'static str>,
+    }
+
+    /// Match the editor's drawing order: focus preflight, shell widgets,
+    /// a possible foreground question, Options, and then Diagnostics.
+    fn frame(context: &Context, diagnostics: bool, modal: bool, events: Vec<Event>) -> FocusFrame {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+        let input = RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut result = FocusFrame::default();
+        let output = context.run_ui(input, |ui| {
+            let context = ui.ctx().clone();
+            focus_scope(&context, Id::new("focus-options"));
+            let field = egui::TextEdit::singleline(&mut result.shell_text).id(Id::new("focus-shell-field"));
+            let response = ui.add(field);
+            result.shell_ids.push(response.id);
+            for label in ["Shell first", "Shell last"] {
+                let response = ui.button(label);
+                result.shell_ids.push(response.id);
+                if response.clicked() {
+                    result.activated.push(label);
+                }
+            }
+
+            if modal {
+                egui::Modal::new(Id::new("focus-modal")).show(&context, |ui| {
+                    for label in ["Modal yes", "Modal no"] {
+                        let response = ui.button(label);
+                        result.modal_ids.push(response.id);
+                        if response.clicked() {
+                            result.activated.push(label);
+                        }
+                    }
+                });
+            }
+
+            focus_scope(&context, Id::new("focus-options"));
+            let mut options = egui::Window::new("Focus Options");
+            options = options.id(Id::new("focus-options"));
+            options = options.collapsible(false);
+            options = options.default_pos(Pos2::new(180.0, 100.0));
+            options.show(&context, |ui| {
+                for label in ["Options first", "Accept Changes", "Cancel"] {
+                    let response = ui.button(label);
+                    result.options_ids.push(response.id);
+                    if response.clicked() {
+                        result.activated.push(label);
+                    }
+                }
+            });
+
+            if diagnostics {
+                let mut diagnostics = egui::Window::new("Focus Diagnostics");
+                diagnostics = diagnostics.id(Id::new("focus-diagnostics"));
+                diagnostics = diagnostics.collapsible(false);
+                diagnostics = diagnostics.default_pos(Pos2::new(600.0, 100.0));
+                diagnostics.show(&context, |ui| {
+                    let response = ui.button("Run Diagnostics");
+                    result.diagnostics_id = Some(response.id);
+                    if response.clicked() {
+                        result.activated.push("Run Diagnostics");
+                    }
+                });
+            }
+        });
+        output.drop_without_applying_deltas();
+        result
+    }
+
+    fn settle(context: &Context, diagnostics: bool, modal: bool) -> FocusFrame {
+        for _ in 0..3 {
+            frame(context, diagnostics, modal, Vec::new());
+        }
+        frame(context, diagnostics, modal, Vec::new())
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> Vec<Event> {
+        let pressed = Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let released = Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers };
+        vec![pressed, released]
+    }
+
+    fn assert_focused_on(context: &Context, layer: &str) {
+        let focused = context.memory(|memory| memory.focused()).expect("a scoped widget has focus");
+        let response = context.read_response(focused).expect("the focused widget was drawn");
+        assert_eq!(response.layer_id.id, Id::new(layer));
+    }
+
+    #[test]
+    fn tab_and_shift_tab_wrap_without_entering_editor_widgets() {
+        let context = Context::default();
+        let shown = settle(&context, false, false);
+        context.memory_mut(|memory| memory.request_focus(shown.options_ids[0]));
+        let mut visited = Vec::new();
+
+        for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
+            for _ in 0..9 {
+                frame(&context, false, false, key(Key::Tab, modifiers));
+                let focused = context.memory(|memory| memory.focused());
+                assert!(!shown.shell_ids.iter().any(|id| Some(*id) == focused));
+                // egui completes wrapping to the first or last widget at
+                // the start of the following pass.
+                frame(&context, false, false, Vec::new());
+                assert_focused_on(&context, "focus-options");
+                visited.push(context.memory(|memory| memory.focused()).unwrap());
+            }
+        }
+
+        for id in shown.options_ids {
+            assert!(visited.contains(&id), "Options widget {id:?} was skipped");
+        }
+    }
+
+    #[test]
+    fn space_enter_and_text_cannot_activate_editor_widgets_behind_the_scope() {
+        let context = Context::default();
+        let shown = settle(&context, false, false);
+        for id in &shown.shell_ids {
+            for activation in [Key::Space, Key::Enter] {
+                context.memory_mut(|memory| memory.request_focus(*id));
+                let result = frame(&context, false, false, key(activation, Modifiers::NONE));
+                assert!(result.activated.is_empty(), "a shell widget activated: {:?}", result.activated);
+            }
+        }
+        context.memory_mut(|memory| memory.request_focus(shown.shell_ids[0]));
+        let result = frame(&context, false, false, vec![Event::Text("shell must stay unchanged".to_string())]);
+        assert!(result.shell_text.is_empty());
+
+        for activation in [Key::Space, Key::Enter] {
+            context.memory_mut(|memory| memory.request_focus(shown.options_ids[0]));
+            let result = frame(&context, false, false, key(activation, Modifiers::NONE));
+            assert_eq!(result.activated, vec!["Options first"]);
+        }
+    }
+
+    #[test]
+    fn opening_the_scope_clears_an_editor_text_fields_focus_before_typing() {
+        let context = Context::default();
+        let shell_id = Id::new("focus-shell-field");
+        let mut shell_text = String::new();
+        let output = context.run_ui(RawInput::default(), |ui| {
+            let field = egui::TextEdit::singleline(&mut shell_text).id(shell_id);
+            ui.add(field).request_focus();
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(context.memory(|memory| memory.focused()), Some(shell_id));
+
+        let result = frame(&context, false, false, vec![Event::Text("hidden edit".to_string())]);
+        assert!(result.shell_text.is_empty());
+        assert_ne!(context.memory(|memory| memory.focused()), Some(shell_id));
+    }
+
+    #[test]
+    fn a_higher_diagnostics_window_keeps_keyboard_and_pointer_input() {
+        let context = Context::default();
+        let shown = settle(&context, true, false);
+        let diagnostics_id = shown.diagnostics_id.unwrap();
+        assert_eq!(on_top(&context), Some(Id::new("focus-diagnostics")));
+
+        context.memory_mut(|memory| memory.request_focus(diagnostics_id));
+        let result = frame(&context, true, false, key(Key::Enter, Modifiers::NONE));
+        assert_eq!(result.activated, vec!["Run Diagnostics"]);
+        assert_focused_on(&context, "focus-diagnostics");
+
+        let position = context.read_response(diagnostics_id).unwrap().rect.center();
+        frame(&context, true, false, vec![Event::PointerMoved(position)]);
+        let pressed = Event::PointerButton { pos: position, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
+        frame(&context, true, false, vec![pressed]);
+        let released = Event::PointerButton { pos: position, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE };
+        let result = frame(&context, true, false, vec![released]);
+        assert_eq!(result.activated, vec!["Run Diagnostics"]);
+    }
+
+    #[test]
+    fn a_foreground_modal_drawn_before_options_keeps_its_keyboard_scope() {
+        let context = Context::default();
+        let shown = settle(&context, true, true);
+        let modal = context.memory(|memory| memory.top_modal_layer()).unwrap();
+        assert_eq!(modal.id, Id::new("focus-modal"));
+
+        context.memory_mut(|memory| memory.request_focus(shown.modal_ids[0]));
+        let result = frame(&context, true, true, key(Key::Enter, Modifiers::NONE));
+        assert_eq!(result.activated, vec!["Modal yes"]);
+        for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
+            for _ in 0..4 {
+                frame(&context, true, true, key(Key::Tab, modifiers));
+                frame(&context, true, true, Vec::new());
+                assert_focused_on(&context, "focus-modal");
+            }
+        }
+
+        for id in [shown.options_ids[0], shown.diagnostics_id.unwrap()] {
+            context.memory_mut(|memory| memory.request_focus(id));
+            let result = frame(&context, true, true, key(Key::Space, Modifiers::NONE));
+            assert!(result.activated.is_empty(), "a covered window activated: {:?}", result.activated);
+        }
     }
 }
