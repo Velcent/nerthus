@@ -203,7 +203,7 @@ pub struct ThermalShaper;
 impl NodeBuilder for ThermalShaper {
     fn build(&self, context: &mut BuildContext) -> Result<(), NodeError> {
         let input = context.require_input("In")?;
-        let intensity = context.input("Intensity");
+        let intensity = context.input_at(1);
         let settings = ThermalShaperSettings {
             terrain_width: context.terrain_width(),
             terrain_height: context.terrain_height(),

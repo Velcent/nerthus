@@ -6,6 +6,7 @@
 use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -447,6 +448,15 @@ impl<'a> BuildContext<'a> {
     /// (`Port.GetMap()`).
     pub fn input(&self, port: &str) -> Option<Arc<Map>> {
         let record = self.node.port(port)?.record.as_ref()?;
+        read_output(self.terrain, self.cache, self.states, record.from, &record.from_port)
+    }
+
+    /// The map feeding `Node.Ins[index]`, including unconnected ports
+    /// and masks in the saved port order. Migrations append inputs, so
+    /// an older node's mask can precede a later input here.
+    pub fn input_at(&self, index: usize) -> Option<Arc<Map>> {
+        let port = self.node.ports.iter().filter(|port| port.is_input()).nth(index)?;
+        let record = port.record.as_ref()?;
         read_output(self.terrain, self.cache, self.states, record.from, &record.from_port)
     }
 
@@ -1179,7 +1189,13 @@ impl Engine {
 
         // The node as the build holds it: earlier builds' member changes applied.
         let current = self.current_node(node);
-        let result = self.build_current(terrain, &current, resolution);
+        // Gaea's build loop catches exceptions for each node, including
+        // validation, bindings and modifiers, then continues downstream.
+        let attempt = catch_unwind(AssertUnwindSafe(|| self.build_current(terrain, &current, resolution)));
+        let result = match attempt {
+            Ok(result) => result,
+            Err(payload) => Err(node_panic(payload)),
+        };
         match result {
             Ok(outputs) => {
                 self.cache.remove_node(id);
@@ -1335,6 +1351,19 @@ impl Engine {
         Ok(outputs)
     }
 
+}
+
+/// A Rust build panic represented as the node failure Gaea reports.
+fn node_panic(payload: Box<dyn Any + Send>) -> NodeError {
+    let message = payload.downcast_ref::<String>().map(String::as_str);
+    let message = message.or_else(|| payload.downcast_ref::<&str>().copied());
+    let message = message.unwrap_or("Node build panicked.");
+    let message = if message.starts_with("index out of bounds:") {
+        "Index was outside the bounds of the array."
+    } else {
+        message
+    };
+    NodeError::Failed(message.to_string())
 }
 
 /// What one node build produced.

@@ -21,14 +21,22 @@ const ROWS_PER_TASK: usize = 16;
 /// does.
 struct PassSettings {
     whole: usize,
+    // The wide kernel uses Q4 weights; the narrow kernel uses Q28.
     fraction: i64,
     complement: i64,
     leading_weight: i64,
+    wide: bool,
     norm: f64,
 }
 
 impl PassSettings {
-    fn new(radius: f32) -> Self {
+    fn new(mut radius: f32) -> Self {
+        let wide = radius > 32.0;
+        if wide {
+            // The wide kernel stores its fractional radius in Q4.
+            let sixteenths = (radius * 16.0) as i32;
+            radius = sixteenths as f32 / 16.0;
+        }
         let whole = radius as i32;
         let fraction = radius - whole as f32;
         let mut denominator = fraction + (whole * 2) as f32;
@@ -37,14 +45,23 @@ impl PassSettings {
         let norm = x86::rcp_refined(denominator) as f64;
 
         let fraction_fixed = (fraction as f64 * FIXED_SCALE) as i64;
+        let weight_shift = if wide { 4 } else { FIXED_SHIFT };
+        let weight_one = 1i64 << weight_shift;
+        let fraction_weight = fraction_fixed >> (FIXED_SHIFT - weight_shift);
         let whole_fixed = (whole as f32 as f64 * FIXED_SCALE) as i64;
         Self {
             whole: whole.max(0) as usize,
-            fraction: fraction_fixed,
-            complement: FIXED_ONE - fraction_fixed,
+            fraction: fraction_weight,
+            complement: weight_one - fraction_weight,
             leading_weight: whole_fixed + FIXED_ONE + fraction_fixed,
+            wide,
             norm,
         }
+    }
+
+    fn multiply_weight(&self, value: i64, weight: i64) -> i64 {
+        let shift = if self.wide { 4 } else { FIXED_SHIFT };
+        value.wrapping_mul(weight) >> shift
     }
 }
 
@@ -69,48 +86,56 @@ fn blur_row(row: &[f32], output: &mut [f32], settings: &PassSettings) {
     let norm = settings.norm;
 
     let mut leaving = to_fixed(row[0]);
-    let mut sum = fixed_multiply(settings.leading_weight, leaving);
+    let mut sum = if settings.wide {
+        // The native wide kernel keeps the full signed product before
+        // shifting to Q28. Its leading weight can exceed 128, overflowing
+        // an i64 product even when the input is between zero and one.
+        let leading_product = settings.leading_weight as i128 * leaving as i128;
+        (leading_product >> FIXED_SHIFT) as i64
+    } else {
+        fixed_multiply(settings.leading_weight, leaving)
+    };
     for &value in &row[..whole] {
         sum += to_fixed(value);
     }
     let mut entering = to_fixed(row[whole]);
-    sum += fixed_multiply(entering, fraction);
+    sum += settings.multiply_weight(entering, fraction);
 
     let mut out = 0;
     let mut right = whole + 1;
     for _ in 0..whole + 1 {
         sum -= leaving;
-        sum += fixed_multiply(entering, complement);
+        sum += settings.multiply_weight(entering, complement);
         entering = to_fixed(row[right]);
         right += 1;
-        sum += fixed_multiply(entering, fraction);
+        sum += settings.multiply_weight(entering, fraction);
         output[out] = from_fixed(sum, norm);
         out += 1;
     }
 
     let mut left = 0;
     for _ in whole + 1..length - whole - 1 {
-        sum -= fixed_multiply(leaving, fraction);
+        sum -= settings.multiply_weight(leaving, fraction);
         leaving = to_fixed(row[left]);
         left += 1;
-        sum -= fixed_multiply(leaving, complement);
-        sum += fixed_multiply(entering, complement);
+        sum -= settings.multiply_weight(leaving, complement);
+        sum += settings.multiply_weight(entering, complement);
         entering = to_fixed(row[right]);
         right += 1;
-        sum += fixed_multiply(entering, fraction);
+        sum += settings.multiply_weight(entering, fraction);
         output[out] = from_fixed(sum, norm);
         out += 1;
     }
 
     let last = to_fixed(row[length - 1]);
     for _ in length - whole - 1..length {
-        sum -= fixed_multiply(leaving, fraction);
+        sum -= settings.multiply_weight(leaving, fraction);
         leaving = to_fixed(row[left]);
         left += 1;
-        sum -= fixed_multiply(leaving, complement);
-        sum += fixed_multiply(entering, complement);
+        sum -= settings.multiply_weight(leaving, complement);
+        sum += settings.multiply_weight(entering, complement);
         entering = last;
-        sum += fixed_multiply(entering, fraction);
+        sum += settings.multiply_weight(entering, fraction);
         output[out] = from_fixed(sum, norm);
         out += 1;
     }
@@ -149,12 +174,6 @@ pub fn fast_blur4(data: &mut [f32], width: usize, height: usize, radius: f32) {
         scaled = height_limit;
     }
 
-    // Above 32 pixels the kernel takes another code path that works in
-    // sixteenths of a pixel, flooring the radius to them.
-    if scaled > 32.0 {
-        let sixteenths = (scaled * 16.0) as i32;
-        scaled = sixteenths as f32 / 16.0;
-    }
     let settings = PassSettings::new(scaled);
     let mut buffer = vec![0.0f32; width * height];
     for _ in 0..4 {
@@ -262,4 +281,62 @@ pub fn managed_box_blur(data: &[f32], size: usize, radius: f32, iterations: i32)
         }
     }
     current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blur_rows_match_native_fractional_kernels() {
+        // Pixel bits from Gaea.Native.dll's blur pass (RVA 0x1210),
+        // including both clamped edges and the middle running window.
+        let cases = [
+            (
+                64,
+                3.25,
+                [0, 1, 3, 4, 32, 59, 60, 63],
+                [0x3f4c7721, 0x3f3175b9, 0x3f18c36e, 0x3f128170, 0x3f0e7d6c, 0x3f0e4a05, 0x3f109921, 0x3f3b2187],
+            ),
+            (
+                1024,
+                129.25,
+                [0, 1, 129, 130, 512, 893, 894, 1023],
+                [0x3f4461bb, 0x3f438818, 0x3f008e9d, 0x3f003ca9, 0x3efffc88, 0x3effff81, 0x3effda5d, 0x3f16f824],
+            ),
+            (
+                4096,
+                600.75,
+                [0, 1, 600, 601, 2048, 3494, 3495, 4095],
+                [0x3f40c811, 0x3f40b1ca, 0x3f00e04d, 0x3f00cf26, 0x3f000847, 0x3efe5701, 0x3efe500f, 0x3f1a82ee],
+            ),
+        ];
+
+        for (length, radius, positions, expected) in cases {
+            let row: Vec<f32> = (0..length).map(|index| ((index * 73 + 255) % 256) as f32 / 255.0).collect();
+            let mut output = vec![0.0; length];
+            let settings = PassSettings::new(radius);
+            blur_row(&row, &mut output, &settings);
+
+            for (position, expected_bits) in positions.into_iter().zip(expected) {
+                assert_eq!(output[position].to_bits(), expected_bits, "length={length}, radius={radius}, position={position}");
+            }
+        }
+    }
+
+    #[test]
+    fn wide_blur_preserves_high_constant_rows() {
+        let cases = [(1024, 129.0, 1.0f32), (4096, 600.75, 0.25), (4096, 1800.5, 0.125), (1024, 129.25, 256.25)];
+        for (length, radius, value) in cases {
+            let row = vec![value; length];
+            let mut output = vec![0.0; length];
+            let settings = PassSettings::new(radius);
+            blur_row(&row, &mut output, &settings);
+
+            let tolerance = value.abs().max(1.0) * 0.000001;
+            for (position, blurred) in output.into_iter().enumerate() {
+                assert!((blurred - value).abs() < tolerance, "radius={radius}, position={position}: {blurred}");
+            }
+        }
+    }
 }

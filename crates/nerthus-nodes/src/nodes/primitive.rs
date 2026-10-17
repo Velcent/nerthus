@@ -128,7 +128,7 @@ pub struct Cellular3d;
 impl NodeBuilder for Cellular3d {
     fn build(&self, context: &mut BuildContext) -> Result<(), NodeError> {
         let input = context.input("In");
-        let gap_input = context.input("Gap");
+        let gap_input = context.input_at(1);
         let (heights, gap_map) = if context.bool("NormalizeInput") {
             let heights = match input {
                 Some(map) => map.map_values(normalize_input),

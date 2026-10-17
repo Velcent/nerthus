@@ -331,7 +331,8 @@ fn write_chunk(file: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 /// A comparison wanting to know whether two files carry the same content
 /// strips them first.
 pub fn without_time_stamps(bytes: &[u8]) -> Vec<u8> {
-    if bytes.len() < 16 || &bytes[8..12] != b"IHDR" {
+    const SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if bytes.len() < 8 || bytes[..8] != SIGNATURE {
         return bytes.to_vec();
     }
     let mut stripped = bytes[..8].to_vec();
@@ -955,5 +956,37 @@ mod tests {
         assert_eq!(palette.len(), 3);
         assert_eq!(plan.transparency, Some(vec![0]));
         assert_eq!(plan.indexes, vec![1, 0, 2, 0]);
+    }
+
+    #[test]
+    fn exports_at_different_moments_agree_without_their_time_stamps() {
+        // The stamps say when the file was written, second precision, so
+        // two exports of one image differ whenever they straddle a
+        // second. Without them the content must agree.
+        let map = Map::filled(Resolution::square(16), 0.25);
+        let image = MagickImage::from_map(&map);
+        use chrono::TimeZone;
+        let earlier = Utc.with_ymd_and_hms(2026, 10, 17, 4, 21, 6).unwrap();
+        let later = Utc.with_ymd_and_hms(2026, 10, 17, 4, 21, 7).unwrap();
+        let first = png_bytes(image.clone(), earlier);
+        let second = png_bytes(image, later);
+        assert_ne!(first, second);
+        assert_eq!(without_time_stamps(&first), without_time_stamps(&second));
+        // The stamps are gone, the image chunks are not.
+        let has_chunk = |file: &[u8], wanted: &[u8; 4]| {
+            let mut cursor = 8;
+            while cursor + 12 <= file.len() {
+                let length = u32::from_be_bytes([file[cursor], file[cursor + 1], file[cursor + 2], file[cursor + 3]]) as usize;
+                if &file[cursor + 4..cursor + 8] == wanted {
+                    return true;
+                }
+                cursor += 12 + length;
+            }
+            false
+        };
+        assert!(has_chunk(&first, b"tIME"));
+        assert!(!has_chunk(&without_time_stamps(&first), b"tIME"));
+        // A file that is not a PNG passes through unchanged.
+        assert_eq!(without_time_stamps(b"not a png"), Vec::from(b"not a png".as_slice()));
     }
 }

@@ -253,7 +253,7 @@ impl NodeBuilder for TextureBase {
     fn build(&self, context: &mut BuildContext) -> Result<(), NodeError> {
         context.render_as(RenderIntent::Mask);
         let input = context.require_input("In")?;
-        let guide = context.input("Guide");
+        let guide = context.input_at(1);
         let settings = TextureBaseSettings {
             slope: context.f32("Slope"),
             scale: context.f32("Scale"),

@@ -49,7 +49,7 @@ impl NodeBuilder for ErosionPro {
         let input = context.require_input("In")?;
         context.render_secondary_as(RenderIntent::Mask);
         let mut inhibitors = if context.bool("Enable") { Some(erosion_pro_inhibitors(context, &input)) } else { None };
-        let precipitation = context.input("Precipitation");
+        let precipitation = context.input_at(1);
         if let (Some(inhibitors), Some(precipitation)) = (inhibitors.as_mut(), precipitation.as_deref()) {
             // `Process(mapB, (i, a) => i * a)`: the inhibitors keep their one
             // channel and take the precipitation's first.

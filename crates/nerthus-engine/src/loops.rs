@@ -17,6 +17,7 @@
 //! changes nothing, unless the build is a mutation (`nerthus-build --seed`).
 
 use std::collections::HashSet;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -202,31 +203,36 @@ impl Engine {
         let process = source_of(terrain, loop_end, "Processes");
         let input = loop_end.port("In").and_then(|port| port.record.clone());
 
-        self.loops_in_progress.insert(id);
-        for _ in 1..loops {
-            // Any failure ends the loop (it is caught), keeping what the
-            // passes so far made.
-            if self.run_loop_end_processes(terrain, process, resolution).is_err() {
-                break;
-            }
-            let fed_back = input.as_ref().and_then(|record| read_output(terrain, &self.cache, &self.states, record.from, &record.from_port));
-            let Some(fed_back) = fed_back else {
-                break;
-            };
-            if self.commit_as(terrain, loop_begin, &fed_back, resolution).is_err() {
-                break;
-            }
-            for node in downstream(terrain, loop_begin) {
-                if Some(node) == process {
-                    continue;
+        let run_passes = || {
+            self.loops_in_progress.insert(id);
+            for _ in 1..loops {
+                // Any failure ends the loop (it is caught), keeping what the
+                // passes so far made.
+                if self.run_loop_end_processes(terrain, process, resolution).is_err() {
+                    break;
                 }
-                if mutate_seeds && self.mutation != 0 {
-                    self.mutate_seeds(&terrain.nodes[&node]);
+                let fed_back = input.as_ref().and_then(|record| read_output(terrain, &self.cache, &self.states, record.from, &record.from_port));
+                let Some(fed_back) = fed_back else {
+                    break;
+                };
+                if self.commit_as(terrain, loop_begin, &fed_back, resolution).is_err() {
+                    break;
                 }
-                self.unbuild(terrain, node);
+                for node in downstream(terrain, loop_begin) {
+                    if Some(node) == process {
+                        continue;
+                    }
+                    if mutate_seeds && self.mutation != 0 {
+                        self.mutate_seeds(&terrain.nodes[&node]);
+                    }
+                    self.unbuild(terrain, node);
+                }
+                self.build(terrain, id, resolution);
             }
-            self.build(terrain, id, resolution);
-        }
+        };
+        // LoopEnd catches exceptions within its passes and always clears
+        // LoopInProgress in its finally block, then commits its current input.
+        let _ = catch_unwind(AssertUnwindSafe(run_passes));
         self.loops_in_progress.remove(&id);
     }
 }

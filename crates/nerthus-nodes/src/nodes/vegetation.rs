@@ -259,9 +259,9 @@ impl Trees {
         let relative = context.bool("IsRelative");
         let healthy = ((tree_count * 1000) as f32 * context.f32("Health")) as i32;
         let guide = inhibitors.add(&dead);
-        let planted = random_noises::fixed_white_mapped(&guide, area.min(healthy), size, relative, seed);
+        let planted = random_noises::fixed_white_mapped(&guide, area.min(healthy), size, relative, seed)?;
         let strays = ((tree_count * 200) as f32 * context.f32("Random")) as i32;
-        let random_trees = random_noises::fixed_white(cells.resolution(), area.min(strays), size, relative, seed + 1);
+        let random_trees = random_noises::fixed_white(cells.resolution(), area.min(strays), size, relative, seed + 1)?;
 
         let mut trees = planted.multiply(&cells).multiply(&fresh);
         trees = maths::clip_map(&trees, size * context.f32("TrimUnder"), 1.0);
@@ -463,7 +463,7 @@ impl NodeBuilder for Shrubs {
 
         let area = (context.resolution.x * context.resolution.y) as i32 / 2;
         let shrub_count = context.i32("ShrubCount") * 1000;
-        let scatter = random_noises::fixed_white(cells.resolution(), area.min(shrub_count), 0.001, context.bool("IsRelative"), seed);
+        let scatter = random_noises::fixed_white(cells.resolution(), area.min(shrub_count), 0.001, context.bool("IsRelative"), seed)?;
         let mut shrubs = scatter.multiply(&cells).multiply(&fresh);
 
         let mut touched = false;

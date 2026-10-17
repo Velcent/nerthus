@@ -461,9 +461,9 @@ impl NodeBuilder for BlobRemover {
         let image = magick::to_image(&source);
         let area_threshold = (context.resolution.x as f32 * context.f32("Range")) as f64;
         let connectivity = context.i32("Connectivity").max(0) as usize;
-        let Ok(components) = nerthus_image::quanta::connected_components(&image, connectivity, Some(area_threshold), true) else {
-            return Err(NodeError::Failed("Reduce complexity or choose Enforce Quantization.".to_string()));
-        };
+        // Gaea catches "too many objects" and constructs, but never throws,
+        // its NodeFailed exception. It still converts the original image.
+        let components = nerthus_image::quanta::connected_components(&image, connectivity, Some(area_threshold), true).unwrap_or(image);
         let gray = nerthus_image::quanta::grayscale(&components);
         context.commit(magick::to_map(&gray))
     }
@@ -645,6 +645,71 @@ impl NodeBuilder for MathX {
         match result {
             Ok(data) => context.commit(Map::from_data(context.resolution, data)),
             Err(error) => Err(NodeError::Failed(crate::mathx::node_message(&error))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nerthus_engine::{BuildResult, Catalogue, ConnectionRecord, Engine, NodeData, Resolution, Terrain};
+
+    use super::*;
+
+    fn build_blob_remover(input: Map) -> Arc<Map> {
+        let catalogue = Catalogue::get();
+        let source_spec = catalogue.node("Constant").unwrap();
+        let source = NodeData::new(source_spec, 1, 0);
+        let blob_spec = catalogue.node("BlobRemover").unwrap();
+        let mut node = NodeData::new(blob_spec, 2, 0);
+        let record = ConnectionRecord {
+            from: 1,
+            to: 2,
+            from_port: "Out".to_string(),
+            to_port: "In".to_string(),
+            is_valid: true,
+        };
+        node.ports.iter_mut().find(|port| port.name == "In").unwrap().record = Some(record);
+        let nodes = [(source.id, source), (node.id, node)].into_iter().collect();
+        let terrain = Terrain { id: String::new(), nodes, width: 5000.0, height: 2500.0, extra: Default::default() };
+        let registry = Arc::new(crate::registry());
+        let mut engine = Engine::new(registry);
+        let resolution = input.resolution();
+        engine.cache.store(1, "Out", Arc::new(input));
+        engine.mark_built(1);
+
+        assert_eq!(engine.build(&terrain, 2, resolution), BuildResult::Succeeded);
+        engine.cache.get(2, "Out").unwrap()
+    }
+
+    #[test]
+    fn blob_remover_passes_through_more_than_65536_patches() {
+        let resolution = Resolution::square(257);
+        let values: Vec<f32> = (0..resolution.area()).map(|index| index as f32 / resolution.area() as f32).collect();
+        let input = Map::from_data(resolution, values.clone());
+        let result = build_blob_remover(input);
+
+        assert_eq!(result.channel_count(), 1);
+        for (&actual, &expected) in result.data().iter().zip(&values) {
+            assert!((actual - expected).abs() <= f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn blob_remover_still_converts_excess_color_patches_to_gray() {
+        let resolution = Resolution::square(257);
+        let red: Vec<f32> = (0..resolution.area()).map(|index| (index % 2) as f32).collect();
+        let green: Vec<f32> = red.iter().map(|value| 1.0 - value).collect();
+        let blue = vec![0.0; resolution.area()];
+        let planes = vec![red.clone(), green, blue];
+        let input = Map::from_channels(resolution, planes);
+        let result = build_blob_remover(input);
+
+        assert_eq!(result.channel_count(), 1);
+        for (&actual, &red_value) in result.data().iter().zip(&red) {
+            let expected = if red_value == 1.0 { 0.212656 } else { 0.715158 };
+            assert!((actual - expected).abs() <= f32::EPSILON);
         }
     }
 }

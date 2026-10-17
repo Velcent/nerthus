@@ -189,37 +189,6 @@ Its tools:
   `repair_project_file`, `patch_project_file`, which change a `.terrain`
   file without opening it in the editor.
 
-## Not done yet
-
-These parts of Gaea 2.3.1.0 are not in Nerthus yet.
-
-### Builds
-
-- BlobRemover with Enforce Quantization off fails ("Reduce complexity or
-  choose Enforce Quantization.") when its input has more than 65,536
-  separate patches of one value, as most heightfields larger than 256 × 256
-  pixels do. Gaea doesn't fail there: the node passes its input through
-  unchanged.
-- In projects from older versions of Gaea, ErosionPro, TextureBase,
-  Cellular3D, ThermalShaper and Debris nodes with a mask input can build
-  differently. Gaea reads the inputs those nodes gained later (Precipitation,
-  Guide, Gap, Intensity and Debris's Removal) by their place in the node's
-  list of inputs, and a mask input added before them comes first, so Gaea
-  reads the mask there instead. Nerthus reads these inputs by name. Gaea's
-  own Crater - Impact Blast example has an ErosionPro like this.
-- Trees and Shrubs now and then place a tree one row past the bottom of the
-  map (a random position comes out as exactly 1), as one of the Trees nodes
-  in Gaea's Trees - Multiple Ecotopes example does at 512 × 512. Gaea marks
-  just that node as failed (its log says "Index was outside the bounds of
-  the array."), the nodes fed by it report "The port In returned bad or no
-  data.", and the rest of the graph builds. Nerthus's build crashes
-  instead: `nerthus-build` stops, and the editor builds nothing more until
-  it's restarted.
-- Blurs wider than about 360 pixels can come out wrong: Blur at Radius 0.36
-  or more on a 1024 × 1024 build (0.09 or more at 4096), and other nodes
-  and modifiers that blur that far. Nerthus's fixed-point sums overflow on
-  rows that start with high values (values near 1 at 360 pixels, lower ones
-  for wider blurs), where Gaea's don't.
 
 ## Intentional differences
 

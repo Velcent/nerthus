@@ -1,6 +1,6 @@
 //! The per-pixel random maps (`RandomNoises`).
 
-use nerthus_engine::{Map, Resolution};
+use nerthus_engine::{Map, NodeError, Resolution};
 use crate::maths;
 use crate::noise::{self, NoisesPerlin};
 use crate::random::XorShift64Star;
@@ -49,7 +49,7 @@ pub fn fixed(resolution: Resolution, count: i32, relative: bool, min: f32, max: 
 }
 
 /// `RandomNoises.FixedWhite`: `count` random pixels set to `value`.
-pub fn fixed_white(resolution: Resolution, count: i32, value: f32, relative: bool, seed: i32) -> Map {
+pub fn fixed_white(resolution: Resolution, count: i32, value: f32, relative: bool, seed: i32) -> Result<Map, NodeError> {
     let mut map = Map::new(resolution, 1);
     let mut random = XorShift64Star::new(seed);
     let width = resolution.x as i32;
@@ -61,14 +61,18 @@ pub fn fixed_white(resolution: Resolution, count: i32, value: f32, relative: boo
     for _ in 0..total {
         let x = (random.next_float() * span + 1.0) as usize;
         let y = (random.next_float() * span + 1.0) as usize;
-        map.set(x, y, value);
+        // Gaea indexes a flat array: x == width can reach the next row,
+        // but a sample past the last row fails the node.
+        let pixel_index = y * resolution.x + x;
+        let pixel = map.data_mut().get_mut(pixel_index).ok_or_else(|| NodeError::Failed("Index was outside the bounds of the array.".to_string()))?;
+        *pixel = value;
     }
-    map
+    Ok(map)
 }
 
 /// `RandomNoises.FixedWhiteMapped`: like [`fixed_white`], but only where
 /// `guide` is above 0.01 (it keeps drawing until `count` pixels land).
-pub fn fixed_white_mapped(guide: &Map, count: i32, value: f32, relative: bool, seed: i32) -> Map {
+pub fn fixed_white_mapped(guide: &Map, count: i32, value: f32, relative: bool, seed: i32) -> Result<Map, NodeError> {
     let mut map = Map::new(guide.resolution(), 1);
     let mut random = XorShift64Star::new(seed);
     let width = guide.width() as i32;
@@ -81,12 +85,14 @@ pub fn fixed_white_mapped(guide: &Map, count: i32, value: f32, relative: bool, s
     while placed < total {
         let x = (random.next_float() * span + 1.0) as usize;
         let y = (random.next_float() * span + 1.0) as usize;
-        if guide.get(x, y) > 0.01 {
-            map.set(x, y, value);
+        let pixel_index = y * guide.width() + x;
+        let guide_value = guide.data().get(pixel_index).ok_or_else(|| NodeError::Failed("Index was outside the bounds of the array.".to_string()))?;
+        if *guide_value > 0.01 {
+            map.data_mut()[pixel_index] = value;
             placed += 1;
         }
     }
-    map
+    Ok(map)
 }
 
 /// `RandomNoises.Perlin`: fine, fixed-seed Perlin noise leveled to

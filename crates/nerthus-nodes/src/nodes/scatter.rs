@@ -169,8 +169,8 @@ pub struct Debris;
 impl NodeBuilder for Debris {
     fn build(&self, context: &mut BuildContext) -> Result<(), NodeError> {
         let input = context.require_input("In")?;
-        let emitter = context.input("Emitter");
-        let removal = context.input("Removal");
+        let emitter = context.input_at(1);
+        let removal = context.input_at(2);
         let amount = context.i32("DebrisAmount") as f32 * context.f32("AmountMultiplier");
         let scale = context.f32("Scale");
         let [min_size, max_size] = context.float2("Size");
