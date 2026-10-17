@@ -73,7 +73,7 @@ jobs:
         id: package
         shell: bash
         run: |
-          package="nerthus-${GITHUB_SHA::7}-${{ matrix.platform }}"
+          package="nerthus-${{ matrix.platform }}"
           extension=""
           if [ "$RUNNER_OS" = "Windows" ]; then
             extension=".exe"
@@ -102,7 +102,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           path: ${{ steps.package.outputs.archive }}
-          name: nerthus-${{ matrix.platform }}
           archive: false
           if-no-files-found: error
           retention-days: 14
