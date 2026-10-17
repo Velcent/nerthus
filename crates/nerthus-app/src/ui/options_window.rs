@@ -240,6 +240,10 @@ pub struct OptionsState {
     /// The selection last shown: reveal a newly opened or externally
     /// selected page once, while leaving manual scrolling alone.
     tab_seen: Option<OptionsTab>,
+    /// The list's room last shown: the first frames of a run are drawn at
+    /// a scale and size that the interface settles after, so a selected
+    /// page that fell out of the list then is revealed again.
+    list_rect: Option<Rect>,
     compute: ComputePage,
     notice: Option<Notice>,
     /// The other pages' copies of the settings, taken as the window first
@@ -254,6 +258,7 @@ impl OptionsState {
         OptionsState {
             tab,
             tab_seen: None,
+            list_rect: None,
             compute: ComputePage::open(),
             notice: None,
             copy: None,
@@ -281,8 +286,11 @@ pub struct OptionsOutcome {
 }
 
 /// The page list: headers right-aligned, the selected one on its group's
-/// brush.
-fn tab_list(ui: &mut Ui, selected: &mut OptionsTab, reveal_selected: bool) {
+/// brush. `reveal_selected` opens a newly selected page (scrolling and
+/// keyboard); `follow_resized` keeps it in view when the list's room
+/// changed since last frame, which the first frames of a run (whose size
+/// and scale the interface settles after) still see.
+fn tab_list(ui: &mut Ui, selected: &mut OptionsTab, reveal_selected: bool, follow_resized: bool) {
     ui.vertical(|ui| {
         ui.set_width(TAB_WIDTH);
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -297,13 +305,13 @@ fn tab_list(ui: &mut Ui, selected: &mut OptionsTab, reveal_selected: bool) {
                 ui.add_space(24.0);
             }
             let response = crate::ui::widgets::tab_list_item(ui, name, *selected == tab, true, brush);
-            if reveal_selected && *selected == tab {
+            if (reveal_selected || follow_resized) && *selected == tab {
                 response.scroll_to_me(None);
                 let options_id = Id::new("options");
                 let (focused, modal) = ui.memory(|memory| (memory.focused(), memory.top_modal_layer()));
                 let focused_here = focused.and_then(|id| ui.ctx().read_response(id)).is_some_and(|focused| focused.layer_id.id == options_id);
                 let modal_over = modal.is_some_and(|layer| layer.id != options_id);
-                if !focused_here && !modal_over {
+                if reveal_selected && !focused_here && !modal_over {
                     response.request_focus();
                 }
             }
@@ -742,7 +750,13 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<Options
         tabs = tabs.auto_shrink([false, false]);
         tabs = tabs.animated(false);
         let reveal_selected = options.tab_seen != Some(options.tab);
-        tabs.show(&mut list_ui, |ui| tab_list(ui, &mut options.tab, reveal_selected));
+        // The room the list had last frame: a settled window keeps the
+        // reveal above honest; a first frame whose size the interface
+        // then corrects (the scale is applied a frame late) may have had
+        // the selected header in view for nothing.
+        let follow_resized = options.list_rect != Some(list);
+        options.list_rect = Some(list);
+        tabs.show(&mut list_ui, |ui| tab_list(ui, &mut options.tab, reveal_selected, follow_resized));
         options.tab_seen = Some(options.tab);
 
         // The page's border goes round its place, and the page is kept
@@ -904,6 +918,26 @@ mod tests {
         assert_eq!(state.as_ref().unwrap().tab, OptionsTab::Experimental);
         assert!(visible_text(&shapes, "General").is_some(), "manual scrolling did not reach the first header");
         assert!(visible_text(&shapes, "Experimental").is_none(), "the selection pinned the manually scrolled list");
+    }
+
+    #[test]
+    fn a_selected_header_is_revealed_when_the_list_settles_smaller() {
+        // A run's first frame is drawn before the interface scale is
+        // applied, at the raw pixels of the screen: the list shows every
+        // header then, and the settled screen leaves the selected one out.
+        // The selection follows it into view.
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        let mut state = Some(OptionsState::new(OptionsTab::Compute));
+        frame(&context, Vec2::new(1066.0, 600.0), &mut editor, &mut state, Vec::new());
+        let (_, _, opening) = painted_frame(&context, Vec2::new(1066.0, 600.0), &mut editor, &mut state, Vec::new());
+        assert!(visible_text(&opening, "Compute").is_some(), "the first frame does not show every header");
+        let settled = Vec2::new(533.0, 400.0);
+        for _ in 0..4 {
+            frame(&context, settled, &mut editor, &mut state, Vec::new());
+        }
+        let (_, _, shapes) = painted_frame(&context, settled, &mut editor, &mut state, Vec::new());
+        assert!(visible_text(&shapes, "Compute").is_some(), "the header fell out of the list when the screen settled");
     }
 
     #[test]

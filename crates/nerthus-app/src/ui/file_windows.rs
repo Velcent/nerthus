@@ -12,7 +12,7 @@ use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::options_window::OptionsState;
-use crate::ui::tool_commands::{self, ToolCommand};
+use crate::ui::tool_commands::ToolCommand;
 use crate::ui::tool_window;
 use crate::ui::widgets::{DialogFit, Tooltips};
 use crate::ui::UiState;
@@ -626,6 +626,7 @@ fn export_macro_checks(editor: &mut Editor, form: &files::ExportForm, commands: 
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::ui::tool_commands;
     use egui::epaint::ClippedShape;
     use egui::{AreaState, Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Shape};
 
