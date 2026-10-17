@@ -325,6 +325,30 @@ fn write_chunk(file: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     file.extend_from_slice(&checksum.to_be_bytes());
 }
 
+/// The file without its time stamps. Every export stamps the moment it
+/// was written into `tIME` and the `date:*` text chunks, so two exports
+/// of the same pixels at different moments differ only in those chunks.
+/// A comparison wanting to know whether two files carry the same content
+/// strips them first.
+pub fn without_time_stamps(bytes: &[u8]) -> Vec<u8> {
+    if bytes.len() < 16 || &bytes[8..12] != b"IHDR" {
+        return bytes.to_vec();
+    }
+    let mut stripped = bytes[..8].to_vec();
+    let mut cursor = 8;
+    while cursor + 12 <= bytes.len() {
+        let length = u32::from_be_bytes([bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]]) as usize;
+        let kind = &bytes[cursor + 4..cursor + 8];
+        let data = &bytes[cursor + 8..cursor + 8 + length];
+        let stamped = kind == b"tIME" || (kind == b"tEXt" && data.starts_with(b"date:"));
+        if !stamped {
+            stripped.extend_from_slice(&bytes[cursor..cursor + 12 + length]);
+        }
+        cursor += 12 + length;
+    }
+    stripped
+}
+
 /// ImageMagick's sRGB chromaticity in cHRM units (100000ths): the white
 /// point, then red, green and blue.
 fn srgb_chromaticity() -> Vec<u8> {

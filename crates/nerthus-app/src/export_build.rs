@@ -704,9 +704,12 @@ mod tests {
         let preferences = ExportPreferences::default();
         build::run(project.terrain(), &mut engine, &project_path, &definition, &preferences, None, &cancel, &mut |_| {}).unwrap();
         let name = format!("{}_Out.png", project.terrain().nodes[&perlin].name);
-        let cached = std::fs::read(root.join("cached").join(&name)).unwrap();
-        let built = std::fs::read(root.join("built").join(&name)).unwrap();
-        assert!(cached == built, "the cached export differs from the build");
+        let cached_bytes = std::fs::read(root.join("cached").join(&name)).unwrap();
+        let built_bytes = std::fs::read(root.join("built").join(&name)).unwrap();
+        // Both files stamp when they were written; the builds are a moment
+        // apart, so what can differ is only those stamps.
+        let cached = nerthus_export::png::without_time_stamps(&cached_bytes);
+        assert_eq!(cached, nerthus_export::png::without_time_stamps(&built_bytes), "the cached export differs from the build");
         std::fs::remove_dir_all(&root).ok();
     }
 

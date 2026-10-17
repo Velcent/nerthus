@@ -1677,6 +1677,7 @@ pub fn project_path_text(text: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::png;
     use nerthus_engine::ConnectionRecord;
     use serde_json::json;
 
@@ -1735,7 +1736,10 @@ mod tests {
         assert!(exported.failures.is_empty(), "{:?}", exported.failures);
         assert_eq!(exported.files, vec![root.join("exported").join("Perlin_Out.png")]);
         assert_eq!(built.files, vec![root.join("built").join("Perlin_Out.png")]);
-        assert_eq!(fs::read(&exported.files[0]).unwrap(), fs::read(&built.files[0]).unwrap());
+        // Both files stamp when they were written; the builds are a moment
+        // apart, so what can differ is only those stamps.
+        let exported = png::without_time_stamps(&fs::read(&exported.files[0]).unwrap());
+        assert_eq!(exported, png::without_time_stamps(&fs::read(&built.files[0]).unwrap()), "the export differs from the build");
         assert!(matches!(events[0], BuildEvent::Started { nodes: 1, .. }));
         assert!(matches!(events[1], BuildEvent::Exporting { node: 1, index: 1, count: 1 }));
         // Nothing but the images: no report, unlike the build.
@@ -1782,7 +1786,11 @@ mod tests {
             assert_eq!(engine.cache.ports(1).next().is_none(), offload);
             assert_eq!(engine.cache.ports(2).next().is_none(), offload);
         }
-        assert_eq!(kept_files[0], kept_files[1]);
+        // The files stamp when they were written; the builds are a moment
+        // apart, so what can differ is only those stamps. Format here is
+        // PNG 16, whose stamps are `tIME` and `date:*` text chunks.
+        let first = png::without_time_stamps(&kept_files[0]);
+        assert_eq!(first, png::without_time_stamps(&kept_files[1]), "the offloaded build differs");
         fs::remove_dir_all(&root).unwrap();
     }
 
