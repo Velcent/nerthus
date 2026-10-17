@@ -381,6 +381,11 @@ fn lighting_popup_left(sun_button: Rect, window: Rect) -> f32 {
     left.min(window.right() - LIGHTING_POPUP_WIDTH).max(window.left())
 }
 
+/// The lighting panel's layer in either viewport context.
+pub fn lighting_panel_id() -> egui::Id {
+    egui::Id::new("lighting-panel")
+}
+
 /// `skyPopup`: the lighting panel (`PrivateSky` in an `EditorBase`) beside
 /// the sun button (`lighting_popup_left`): a toolbar with Reset Sky, the
 /// sun dial and the parameters. Returns where the panel is.
@@ -388,7 +393,7 @@ fn lighting_panel(ui: &Ui, sun_button: Rect, editor: &Editor, settings: &mut Vie
     let left = lighting_popup_left(sun_button, ui.ctx().content_rect()) + LIGHTING_POPUP_MARGIN;
     let panel_width = LIGHTING_POPUP_WIDTH - 2.0 * LIGHTING_POPUP_MARGIN;
     let position = Pos2::new(left, sun_button.top() + LIGHTING_POPUP_MARGIN);
-    let area = egui::Area::new(ui.id().with("lighting-panel")).fixed_pos(position).order(egui::Order::Foreground);
+    let area = egui::Area::new(lighting_panel_id()).fixed_pos(position).order(egui::Order::Foreground);
     let shown = area.show(ui.ctx(), |ui| {
         let mut frame = egui::Frame::new();
         frame.fill = theme::PANEL_BACKGROUND;

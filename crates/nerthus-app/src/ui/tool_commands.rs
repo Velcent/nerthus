@@ -15,6 +15,7 @@ use crate::ui::diagnostics_window::{self, DiagnosticsRequest, DiagnosticsWindow}
 use crate::ui::docs_window::{self, DocsWindow};
 use crate::ui::file_windows;
 use crate::ui::help_windows::{self, UpdateDialog};
+use crate::ui::{math_editor, painter, viewport_area};
 use crate::ui::nahimic_warning::{self, NahimicWarning};
 use crate::ui::onboard::{self, Onboard};
 use crate::ui::prompt::Prompt;
@@ -201,16 +202,15 @@ pub fn proxy_settings(preferences: &Preferences) -> ProxySettings {
 /// The shell's keys for these commands (`Shell.OnPreviewKeyDown`); none
 /// while a text field has the keyboard.
 pub fn shortcuts(ctx: &egui::Context, pending: &mut Vec<Command>) {
-    if ctx.egui_wants_keyboard_input() {
+    if ctx.egui_wants_keyboard_input() || egui::Popup::is_any_open(ctx) {
         return;
     }
-    // Esc is left for the graph and the windows too: the shell does not
-    // handle it (it also ends a drag in the graph).
+    // Windows take Esc before these shortcuts. In the shell it stops the
+    // preview build and is also left for the graph to end a drag.
     let (escape, command_held) = ctx.input(|input| (input.key_pressed(Key::Escape), input.modifiers.command));
-    if escape && command_held {
-        pending.push(Command::Tools(ToolCommand::ResetCancellation));
-    } else if escape {
-        pending.push(Command::Tools(ToolCommand::CancelPreviewBuild));
+    if escape && !tool_window::shell_has_keyboard(ctx) {
+        let command = if command_held { ToolCommand::ResetCancellation } else { ToolCommand::CancelPreviewBuild };
+        pending.push(Command::Tools(command));
     }
     let console = KeyboardShortcut::new(Modifiers::NONE, Key::F12);
     if ctx.input_mut(|input| consume_shortcut(input, &console)) {
@@ -241,19 +241,35 @@ pub fn start(editor: &Editor, ui_state: &mut UiState) {
     }
 }
 
-/// Esc closes the tool window on top, as its close button does, when it
-/// is Diagnostics, the documentation or Export Macro (`IsCancel`); the
-/// Artifact Explorer and the console have no Cancel button and stay.
-/// Taken before the shell's keys: the windows that close themselves on
-/// Esc (Options, Help's, the Start dialog) and egui's modals keep it from
-/// a window under them.
+/// Esc closes the window on top before the shell can cancel a preview
+/// build. Each window runs its own close action, including Math's Cancel
+/// rollback, the Painter's cleanup, and a running export's cancellation.
+/// The Artifact Explorer and console keep their source behavior and stay.
 pub fn take_escape(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState) {
+    let build_progress = editor.export_build.as_ref().is_some_and(|build| matches!(build.kind, crate::export_build::ExportKind::Build));
     let shown = [
         (ui_state.diagnostics.is_some(), diagnostics_window::window_id()),
         (ui_state.docs.is_some(), docs_window::window_id()),
+        (ui_state.console.is_some(), console_window::window_id()),
+        (ui_state.artifact_explorer.is_some(), artifact_explorer::window_id()),
         (editor.files.export_macro.is_some(), file_windows::export_macro_id()),
+        (editor.files.start_dialog_open, egui::Id::new("start-dialog")),
+        (editor.files.examples_open, egui::Id::new("examples-window")),
+        (ui_state.build_settings.is_some(), egui::Id::new("build-settings")),
+        (ui_state.statistics.is_some(), egui::Id::new("statistics-window")),
+        (build_progress, egui::Id::new("build-progress")),
+        (ui_state.help.shortcuts, egui::Id::new("shortcut-guide")),
+        (ui_state.help.whats_new.is_some(), egui::Id::new("whats-new")),
+        (ui_state.help.about, egui::Id::new("about-nerthus")),
+        (ui_state.sun_open, viewport_area::lighting_panel_id()),
+        (math_editor::is_open(ctx), math_editor::area_id()),
+        (painter::is_open(ctx), painter::area_id()),
     ];
-    let windows: Vec<egui::Id> = shown.into_iter().filter_map(|(open, id)| open.then_some(id)).collect();
+    let mut windows: Vec<egui::Id> = shown.into_iter().filter_map(|(open, id)| open.then_some(id)).collect();
+    if let Some(constructor) = ui_state.constructor.as_ref() {
+        windows.push(egui::Id::new(("constructor", constructor.node())));
+    }
+    windows.extend(ui_state.viewport_2d.window_ids());
     let Some(closed) = tool_window::take_escape(ctx, &windows) else {
         return;
     };
@@ -263,6 +279,13 @@ pub fn take_escape(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiSt
         ui_state.docs = None;
     } else if closed == file_windows::export_macro_id() {
         file_windows::close_export_macro(editor);
+    } else if closed == viewport_area::lighting_panel_id() {
+        ui_state.sun_open = false;
+    } else if closed == console_window::window_id() || closed == artifact_explorer::window_id() {
+        // These windows have no Cancel action. Esc stays in the window
+        // and cannot cancel an unrelated preview build in the shell.
+    } else {
+        tool_window::request_close(ctx, closed);
     }
 }
 
@@ -355,6 +378,7 @@ mod tests {
     use crate::document::Document;
     use crate::files::ExportForm;
     use crate::theme;
+    use crate::ui::{batch_build, build_settings, constructor, options_window, statistics_window, viewport_2d};
 
     fn escape() -> Event {
         Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
@@ -369,8 +393,34 @@ mod tests {
         let output = context.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
             take_escape(&ctx, editor, ui_state);
+            if !modal_open(&ctx, ui_state) {
+                options_window::take_escape(&ctx, &mut ui_state.options);
+                batch_build::take_escape(&ctx, &mut ui_state.batch_build);
+                shortcuts(&ctx, &mut pending);
+            }
             seen = ctx.input(|input| input.key_pressed(Key::Escape));
+            for command in std::mem::take(&mut pending) {
+                if let Command::Tools(command) = command {
+                    run(command, editor, ui_state);
+                }
+            }
+            build_settings::show(&ctx, editor, &mut ui_state.build_settings, &mut pending);
+            statistics_window::show(&ctx, &mut ui_state.statistics, &mut pending);
+            if let Some(window) = ui_state.constructor.as_mut()
+                && !constructor::show(&ctx, editor, window)
+            {
+                ui_state.constructor = None;
+            }
+            math_editor::show(&ctx, editor);
+            painter::show(&ctx, editor);
+            viewport_2d::show_floating(&ctx, editor, &mut ui_state.viewport_2d, &[], &mut pending);
             file_windows::show(&ctx, editor, ui_state, &mut pending);
+            options_window::show(&ctx, editor, &mut ui_state.options, &mut ui_state.last_options_tab, &mut ui_state.file_dialogs);
+            if let Some(window) = ui_state.batch_build.as_mut()
+                && !batch_build::show(&ctx, editor, window, &mut ui_state.batch_session, &mut ui_state.file_dialogs)
+            {
+                ui_state.batch_build = None;
+            }
             show_windows(&ctx, editor, ui_state, &mut pending);
             tool_window::note_keyboard(&ctx);
         });
@@ -387,7 +437,10 @@ mod tests {
     fn shell() -> (egui::Context, Editor, UiState) {
         let context = egui::Context::default();
         theme::apply(&context);
-        (context, Editor::new(Document::new()), UiState::default())
+        let mut editor = Editor::new(Document::new());
+        let empty_documents = std::env::temp_dir().join(format!("nerthus-dialog-test-no-projects-{}", std::process::id()));
+        editor.user.preferences.set_member("Locations", "Documents", serde_json::json!(empty_documents));
+        (context, editor, UiState::default())
     }
 
     /// Which of the documentation, Diagnostics and Export Macro are open.
@@ -421,9 +474,144 @@ mod tests {
         assert!(frame(&context, &mut editor, &mut ui_state, vec![escape()]));
     }
 
+    fn open_app_windows(editor: &Editor, ui_state: &UiState) -> Vec<bool> {
+        vec![
+            editor.files.start_dialog_open,
+            ui_state.build_settings.is_some(),
+            ui_state.statistics.is_some(),
+            editor.files.examples_open,
+            ui_state.constructor.is_some(),
+            ui_state.help.shortcuts,
+            ui_state.help.whats_new.is_some(),
+            ui_state.help.about,
+        ]
+    }
+
+    #[test]
+    fn escape_closes_each_app_window_without_cancelling_a_preview_build() {
+        let (context, mut editor, mut ui_state) = shell();
+        editor.building = true;
+        let opening: [fn(&mut Editor, &mut UiState); 8] = [
+            |editor, _| editor.files.start_dialog_open = true,
+            |_, ui_state| ui_state.build_settings = Some(build_settings::BuildSettingsState::new(build_settings::SettingsTab::Resolution)),
+            |editor, ui_state| ui_state.statistics = Some(statistics_window::StatisticsWindow::new(editor)),
+            |editor, _| editor.files.examples_open = true,
+            |editor, ui_state| {
+                let node = editor.document.add_node("Construction", [0.0, 0.0]).unwrap();
+                ui_state.constructor = Some(constructor::ConstructorWindow::new(node));
+            },
+            |_, ui_state| ui_state.help.shortcuts = true,
+            |_, ui_state| ui_state.help.whats_new = Some(0),
+            |_, ui_state| ui_state.help.about = true,
+        ];
+        for open_window in opening {
+            open_window(&mut editor, &mut ui_state);
+            settle(&context, &mut editor, &mut ui_state);
+        }
+        assert_eq!(open_app_windows(&editor, &ui_state), [true; 8]);
+        for left in (0..8).rev() {
+            let seen = frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+            assert!(!seen && !editor.cancel_build, "closing a window also cancelled the preview");
+            let expected: Vec<bool> = (0..8).map(|window| window < left).collect();
+            assert_eq!(open_app_windows(&editor, &ui_state), expected);
+        }
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(editor.cancel_build, "Esc in the shell still cancels its preview build");
+    }
+
+    #[test]
+    fn options_does_not_take_escape_from_a_newer_window() {
+        let (context, mut editor, mut ui_state) = shell();
+        ui_state.options = Some(options_window::OptionsState::new(options_window::OptionsTab::General));
+        settle(&context, &mut editor, &mut ui_state);
+        ui_state.statistics = Some(statistics_window::StatisticsWindow::new(&editor));
+        settle(&context, &mut editor, &mut ui_state);
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(ui_state.statistics.is_none() && ui_state.options.is_some());
+        settle(&context, &mut editor, &mut ui_state);
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(ui_state.options.is_none());
+    }
+
+    #[test]
+    fn escape_closes_one_map_viewer_at_a_time() {
+        let (context, mut editor, mut ui_state) = shell();
+        let first = editor.document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let second = editor.document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let following = egui::Id::new("map-viewer-following");
+        let first_window = egui::Id::new(("map-viewer", first));
+        let second_window = egui::Id::new(("map-viewer", second));
+        ui_state.viewport_2d.show_2d_view(&editor);
+        settle(&context, &mut editor, &mut ui_state);
+        ui_state.viewport_2d.open_floating(first);
+        settle(&context, &mut editor, &mut ui_state);
+        ui_state.viewport_2d.open_floating(second);
+        settle(&context, &mut editor, &mut ui_state);
+        assert_eq!(ui_state.viewport_2d.window_ids(), [first_window, second_window, following]);
+        for expected in [vec![first_window, following], vec![following], Vec::new()] {
+            frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+            assert_eq!(ui_state.viewport_2d.window_ids(), expected);
+        }
+    }
+
+    #[test]
+    fn consecutive_escapes_close_math_and_painter_without_leaving_a_close_request() {
+        let (context, mut editor, mut ui_state) = shell();
+        editor.preview_resolution = 32;
+        editor.building = true;
+        let math_node = editor.document.add_node("MathX", [0.0, 0.0]).unwrap();
+        let draw_node = editor.document.add_node("Draw", [0.0, 0.0]).unwrap();
+        ui_state.docs = Some(DocsWindow::open(crate::docs::HOME));
+        settle(&context, &mut editor, &mut ui_state);
+        math_editor::open(&context, &editor, math_node);
+        settle(&context, &mut editor, &mut ui_state);
+        painter::open(&context, &editor, draw_node);
+        settle(&context, &mut editor, &mut ui_state);
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(!painter::is_open(&context) && math_editor::is_open(&context));
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(!math_editor::is_open(&context) && ui_state.docs.is_some());
+        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(ui_state.docs.is_none() && !editor.cancel_build);
+        math_editor::open(&context, &editor, math_node);
+        painter::open(&context, &editor, draw_node);
+        settle(&context, &mut editor, &mut ui_state);
+        assert!(math_editor::is_open(&context) && painter::is_open(&context));
+    }
+
+    #[test]
+    fn escape_closes_the_lighting_panel_before_a_preview_build() {
+        let (context, mut editor, mut ui_state) = shell();
+        editor.building = true;
+        ui_state.sun_open = true;
+        let mut settings = nerthus_render::ViewportSettings::default();
+        let overlays = viewport_area::ViewOverlays { north_angle: 0.0, navigation_hint: None };
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1333.0, 800.0));
+        let area = Rect::from_min_size(Pos2::new(20.0, 60.0), Vec2::new(900.0, 600.0));
+        for step in 0..4 {
+            let events = if step == 3 { vec![escape()] } else { Vec::new() };
+            let input = RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut pending = Vec::new();
+            let output = context.run_ui(input, |ui| {
+                take_escape(ui.ctx(), &mut editor, &mut ui_state);
+                shortcuts(ui.ctx(), &mut pending);
+                viewport_area::show(ui, area, &editor, &mut settings, &mut ui_state.sun_open, &mut ui_state.viewport_2d, &overlays, &mut pending);
+                tool_window::note_keyboard(ui.ctx());
+            });
+            output.drop_without_applying_deltas();
+            for command in pending {
+                if let Command::Tools(command) = command {
+                    run(command, &mut editor, &mut ui_state);
+                }
+            }
+        }
+        assert!(!ui_state.sun_open && !editor.cancel_build);
+    }
+
     #[test]
     fn the_console_and_the_artifact_explorer_stay_on_escape() {
         let (context, mut editor, mut ui_state) = shell();
+        editor.building = true;
         ui_state.console = Some(ConsoleWindow::open());
         settle(&context, &mut editor, &mut ui_state);
         // About over the console closes; the console, with no Cancel
@@ -433,12 +621,12 @@ mod tests {
         frame(&context, &mut editor, &mut ui_state, vec![escape()]);
         assert!(!ui_state.help.about && ui_state.console.is_some());
         settle(&context, &mut editor, &mut ui_state);
-        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
-        assert!(ui_state.console.is_some());
+        let seen = frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(ui_state.console.is_some() && !seen && !editor.cancel_build);
         // So does the Artifact Explorer.
         ui_state.artifact_explorer = Some(ArtifactExplorer::open(&editor));
         settle(&context, &mut editor, &mut ui_state);
-        frame(&context, &mut editor, &mut ui_state, vec![escape()]);
-        assert!(ui_state.artifact_explorer.is_some());
+        let seen = frame(&context, &mut editor, &mut ui_state, vec![escape()]);
+        assert!(ui_state.artifact_explorer.is_some() && !seen && !editor.cancel_build);
     }
 }

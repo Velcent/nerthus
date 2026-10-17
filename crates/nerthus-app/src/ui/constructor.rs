@@ -173,6 +173,13 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut ConstructorWi
     if editor.document.node(window.node).is_none() {
         return false;
     }
+    let window_id = Id::new(("constructor", window.node));
+    if tool_window::close_requested(ctx, window_id) {
+        if window.unbuilt {
+            editor.changed();
+        }
+        return false;
+    }
     take_preview(ctx, window);
     let mut open = true;
     let mut frame = egui::Frame::window(&ctx.global_style());
@@ -182,7 +189,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, window: &mut ConstructorWi
     constructor = constructor.open(&mut open);
     constructor = constructor.collapsible(false);
     constructor = constructor.frame(frame);
-    constructor = tool_window::place(ctx, constructor, Id::new(("constructor", window.node)), Vec2::new(1280.0, 720.0));
+    constructor = tool_window::place(ctx, constructor, window_id, Vec2::new(1280.0, 720.0));
     constructor.show(ctx, |ui| {
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, Sense::hover());

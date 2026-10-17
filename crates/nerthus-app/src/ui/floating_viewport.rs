@@ -19,7 +19,7 @@ use nerthus_render::{NavigationSettings, StrategyCamera, ViewportCamera, Viewpor
 
 use crate::editor::Editor;
 use crate::theme;
-use crate::ui::{fit_camera, surround, viewport_area, UiState};
+use crate::ui::{fit_camera, surround, tool_window, viewport_area, UiState};
 
 /// The floating window's egui pass.
 #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
@@ -157,6 +157,10 @@ pub fn draw(
     crate::theme::set_settings(&ctx, editor.user.options.interface_settings());
     crate::ui::formulas::publish(&ctx, &editor);
     crate::ui::menu_keys::begin(&ctx);
+    let lighting = viewport_area::lighting_panel_id();
+    if ui_state.sun_open && tool_window::take_escape(&ctx, &[lighting]).is_some() {
+        ui_state.sun_open = false;
+    }
     let full = ctx.content_rect();
     let builder = UiBuilder::new().layer_id(LayerId::background()).max_rect(full);
     let mut root = Ui::new(ctx.clone(), "nerthus-floating-viewport".into(), builder);
@@ -174,6 +178,7 @@ pub fn draw(
     let area = full.shrink(AREA_MARGIN);
     let interface = ui_state.as_mut();
     let host = viewport_area::show(&mut root, area, &editor, &mut settings, &mut interface.sun_open, &mut interface.viewport_2d, &overlays, &mut pending);
+    tool_window::note_keyboard(&ctx);
     root.painter().set(background, surround(full, host));
     interface.floating_commands.extend(pending);
 

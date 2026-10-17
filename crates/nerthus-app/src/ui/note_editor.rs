@@ -27,7 +27,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut GraphState) {
     let Some((id, mut text)) = state.editing_note.take() else {
         return;
     };
-    let mut close = ctx.input(|input| input.key_pressed(Key::Escape));
+    let mut close = false;
     let mut frame = Frame::new();
     frame = frame.fill(theme::MENU_BACKGROUND);
     frame = frame.stroke(Stroke::new(1.0, theme::MENU_BORDER));
@@ -39,7 +39,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut GraphState) {
     let panel = PANEL_SIZE.min(ctx.content_rect().size() - Vec2::splat(WINDOW_MARGIN));
     let content = panel - frame.total_margin().sum();
     let modal = egui::Modal::new(Id::new("note-editor")).frame(frame);
-    modal.show(ctx, |ui| {
+    let response = modal.show(ctx, |ui| {
         ui.set_min_size(content);
         ui.set_max_size(content);
         let caption = RichText::new("Note Editor").font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS);
@@ -86,6 +86,9 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut GraphState) {
             }
         });
     });
+    if response.is_top_modal && !response.any_popup_open {
+        close |= ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape));
+    }
     if close {
         // `btnCancel_Click`: the note takes the text.
         editor.document.set_note_text(id, &text);
@@ -99,6 +102,50 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use egui::{AreaState, Pos2, RawInput, Rect};
+
+    #[test]
+    fn escape_closes_only_the_top_modal_then_saves_the_note_when_its_turn_comes() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut editor = Editor::new(Document::new());
+        let id = editor.document.add_note([0.0, 0.0], 0);
+        let mut state = GraphState::default();
+        state.editing_note = Some((id, "The edited note".to_string()));
+        let mut top_open = true;
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1333.0, 800.0));
+        for frame in 0..6 {
+            let events = if matches!(frame, 3 | 5) {
+                let escape = egui::Event::Key {
+                    key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE,
+                };
+                vec![escape]
+            } else {
+                Vec::new()
+            };
+            let input = RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                show(ui.ctx(), &mut editor, &mut state);
+                if top_open {
+                    let modal = egui::Modal::new(Id::new("note-editor-confirmation"));
+                    let response = modal.show(ui.ctx(), |ui| ui.label("Another dialog above the note"));
+                    if response.should_close() {
+                        top_open = false;
+                    }
+                }
+                if matches!(frame, 3 | 5) {
+                    assert!(!ui.input(|input| input.key_pressed(Key::Escape)));
+                }
+            });
+            output.drop_without_applying_deltas();
+            if frame == 3 {
+                assert!(!top_open);
+                assert!(state.editing_note.is_some(), "the lower Note Editor closed as well");
+                assert_eq!(editor.document.notes()[0].1["Markdown"], "");
+            }
+        }
+        assert!(state.editing_note.is_none());
+        assert_eq!(editor.document.notes()[0].1["Markdown"], "The edited note");
+    }
 
     /// A few frames of the editor open on a screen this size. Returns the
     /// panel's rect and where its caption and Close button were drawn.

@@ -206,6 +206,10 @@ pub fn show(ctx: &egui::Context, window: &mut Option<StatisticsWindow>, commands
     let Some(statistics) = window.as_mut() else {
         return;
     };
+    if tool_window::close_requested(ctx, Id::new("statistics-window")) {
+        *window = None;
+        return;
+    }
     let mut open = statistics.open;
     let mut picked = Vec::new();
     let mut frame = egui::Frame::window(&ctx.global_style());

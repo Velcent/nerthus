@@ -185,6 +185,10 @@ fn caption(ui: &mut Ui, text: &str, color: Color32) {
 /// The window: tabs on the left, the tab's page, Execute Build, Copy
 /// Command Line and Close below.
 pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSettingsState>, commands: &mut Vec<Command>) {
+    if tool_window::close_requested(ctx, Id::new("build-settings")) {
+        *state = None;
+        return;
+    }
     let Some(settings) = state.as_mut() else {
         return;
     };

@@ -69,6 +69,11 @@ fn window_id() -> Id {
     Id::new("painter")
 }
 
+/// The window's layer, separate from its saved painting state.
+pub fn area_id() -> Id {
+    window_id().with("window")
+}
+
 fn settings_id() -> Id {
     Id::new("painter-settings")
 }
@@ -82,8 +87,13 @@ pub fn painting(ctx: &egui::Context) -> bool {
     ctx.data(|data| data.get_temp::<bool>(painting_id())).unwrap_or(false)
 }
 
+pub fn is_open(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(painting_id()).is_some())
+}
+
 /// `Editor_CommandExecuted("OpenPainter")`: the window for a Draw node.
 pub fn open(ctx: &egui::Context, editor: &Editor, node: i32) {
+    tool_window::close_requested(ctx, area_id());
     let stroke_data = editor.document.node(node).and_then(|data| data.values.get("StrokeData")).and_then(Value::as_str).unwrap_or_default().to_string();
     let strokes = if stroke_data.trim().is_empty() { Vec::new() } else { vector_mask::parse_stroke_data(&stroke_data).unwrap_or_default() };
     let overlay_size = editor.preview_resolution.min(OVERLAY_MAX);
@@ -104,6 +114,7 @@ pub fn open(ctx: &egui::Context, editor: &Editor, node: i32) {
     let rendered = vector_mask::render(&state.strokes, overlay_size);
     state.overlay = rendered;
     ctx.data_mut(|data| data.insert_temp(window_id(), state));
+    ctx.data_mut(|data| data.insert_temp(painting_id(), false));
 }
 
 /// Draws the window while it is open.
@@ -111,7 +122,8 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor) {
     let Some(mut state) = ctx.data(|data| data.get_temp::<PainterState>(window_id())) else {
         return;
     };
-    if editor.document.node(state.node).is_none_or(|node| node.type_name != "Draw") {
+    let close = tool_window::close_requested(ctx, area_id());
+    if close || editor.document.node(state.node).is_none_or(|node| node.type_name != "Draw") {
         ctx.data_mut(|data| data.remove::<PainterState>(window_id()));
         ctx.data_mut(|data| data.remove::<bool>(painting_id()));
         return;
@@ -128,7 +140,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor) {
     // window's margin.
     window = window.frame(frame.inner_margin(0));
     window = window.title_frame(frame.inner_margin(tool_window::MARGIN));
-    window = tool_window::place(ctx, window, window_id().with("window"), Vec2::new(WINDOW_SIZE, WINDOW_SIZE + TOOLBAR_HEIGHT));
+    window = tool_window::place(ctx, window, area_id(), Vec2::new(WINDOW_SIZE, WINDOW_SIZE + TOOLBAR_HEIGHT));
     window.show(ctx, |ui| {
         let available = ui.available_size();
         let side = available.x.min(available.y - TOOLBAR_HEIGHT).max(64.0);
@@ -371,5 +383,46 @@ fn slider_box(ui: &mut Ui, label: &str, value: &mut f32, range: (f32, f32), bord
         }
     }
     moved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::ui::{tool_commands, UiState};
+
+    #[test]
+    fn escape_closes_the_painter_and_clears_the_painting_flag() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut editor = Editor::new(Document::new());
+        editor.preview_resolution = 32;
+        let node = editor.document.add_node("Draw", [0.0, 0.0]).unwrap();
+        let mut ui_state = UiState::default();
+        open(&context, &editor, node);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1333.0, 800.0));
+        for _ in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let output = context.run_ui(input, |ui| show(ui.ctx(), &mut editor));
+            output.drop_without_applying_deltas();
+        }
+        context.data_mut(|data| {
+            let mut state = data.get_temp::<PainterState>(window_id()).unwrap();
+            state.painting = true;
+            data.insert_temp(window_id(), state);
+            data.insert_temp(painting_id(), true);
+        });
+        assert!(painting(&context));
+        let escape = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let input = egui::RawInput { screen_rect: Some(screen), events: vec![escape], ..Default::default() };
+        let output = context.run_ui(input, |ui| {
+            tool_commands::take_escape(ui.ctx(), &mut editor, &mut ui_state);
+            show(ui.ctx(), &mut editor);
+            assert!(!ui.input(|input| input.key_pressed(egui::Key::Escape)));
+        });
+        output.drop_without_applying_deltas();
+        assert!(context.data(|data| data.get_temp::<PainterState>(window_id())).is_none());
+        assert!(!painting(&context));
+    }
 }
 

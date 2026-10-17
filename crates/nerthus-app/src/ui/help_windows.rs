@@ -213,13 +213,16 @@ pub fn side_tabs(ui: &mut Ui, tabs: &[SideTab], selected: &mut usize, width: f32
 
 /// Escape or Enter, which close a window whose button is both `IsCancel`
 /// and `IsDefault`.
-fn close_key(ctx: &egui::Context) -> bool {
-    ctx.input(|input| input.key_pressed(egui::Key::Escape) || input.key_pressed(egui::Key::Enter))
+fn close_key(ctx: &egui::Context, id: Id) -> bool {
+    tool_window::close_requested(ctx, id) || ctx.input(|input| input.key_pressed(egui::Key::Enter))
 }
 
 /// The Shortcut Guide (`shortcuts.md`). Returns whether it stays open.
 fn shortcuts_window(ctx: &egui::Context) -> bool {
-    let mut open = !close_key(ctx);
+    let mut open = !close_key(ctx, Id::new("shortcut-guide"));
+    if !open {
+        return false;
+    }
     let window = dialog_window(ctx, "shortcut-guide", Vec2::new(680.0, 920.0));
     window.show(ctx, |ui| {
         ui.vertical_centered(|ui| {
@@ -259,7 +262,10 @@ fn shortcuts_window(ctx: &egui::Context) -> bool {
 /// What's new in this version (`whatsnew.md` and `whatsnew-notes.md`).
 /// Returns whether it stays open.
 fn whats_new_window(ctx: &egui::Context, tab: &mut usize) -> bool {
-    let mut open = !close_key(ctx);
+    let mut open = !close_key(ctx, Id::new("whats-new"));
+    if !open {
+        return false;
+    }
     let window = dialog_window(ctx, "whats-new", Vec2::new(1240.0, 880.0));
     window.show(ctx, |ui| {
         let size = ui.available_size();
@@ -360,9 +366,12 @@ fn authors() -> String {
 /// About Nerthus, 476 across with its frame where there is room. Returns
 /// whether it stays open.
 fn about_window(ctx: &egui::Context) -> bool {
+    let id = Id::new("about-nerthus");
+    if close_key(ctx, id) {
+        return false;
+    }
     let mut open = true;
     let title = concat!("About Nerthus ", env!("CARGO_PKG_VERSION"));
-    let id = Id::new("about-nerthus");
     let frame = egui::Frame::window(&ctx.global_style());
     let fit = DialogFit::new(ctx, id, &frame);
     let mut window = egui::Window::new(title);
@@ -373,7 +382,7 @@ fn about_window(ctx: &egui::Context) -> bool {
     window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
     window = window.order(egui::Order::Foreground);
     window = window.open(&mut open);
-    let mut close = ctx.input(|input| input.key_pressed(egui::Key::Escape) || input.key_pressed(egui::Key::Enter));
+    let mut close = false;
     let shown = window.show(ctx, |ui| {
         fit.body(ui, |ui| {
             ui.add_space(16.0);

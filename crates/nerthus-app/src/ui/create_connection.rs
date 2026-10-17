@@ -10,7 +10,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_canvas::elided_galley;
 use crate::ui::graph_commands::GraphCommand;
-use crate::ui::widgets::{dialog_button, DIALOG_BUTTON_HEIGHT, Tooltips};
+use crate::ui::widgets::{dialog_button, DialogFit, DIALOG_BUTTON_HEIGHT, Tooltips};
 
 /// The window's `Border`: the window's 440 less the 20 its shadow takes
 /// each side, and what lies inside its line (`Padding` 1 and the panel's
@@ -98,10 +98,14 @@ pub fn show(ctx: &egui::Context, editor: &Editor, window: &mut Option<CreateConn
     // `DropShadowEffect`: blur 20, depth 5 straight down, half opaque.
     let shadow = egui::Shadow { offset: [0, 5], blur: 20, spread: 0, color: Color32::from_black_alpha(128) };
     frame = frame.shadow(shadow);
-    let mut modal = egui::Modal::new(Id::new("create-connection"));
+    let id = Id::new("create-connection");
+    let fit = DialogFit::new(ctx, id, &frame);
+    let mut modal = egui::Modal::new(id);
     modal = modal.frame(frame);
+    modal = fit.modal(ctx, modal);
     let response = modal.show(ctx, |ui| {
-        ui.set_width(BORDER_WIDTH - 2.0 * (1.0 + BORDER_INSIDE));
+        let width = BORDER_WIDTH - 2.0 * (1.0 + BORDER_INSIDE);
+        ui.set_width(fit.width(width));
         // The two lists' facing margins part them.
         ui.spacing_mut().item_spacing = Vec2::new(2.0 * LIST_MARGIN, 0.0);
         let label = |text: &str| RichText::new(text).font(theme::interface(12.0)).color(theme::LABEL_DEFAULT);
@@ -110,9 +114,11 @@ pub fn show(ctx: &egui::Context, editor: &Editor, window: &mut Option<CreateConn
             columns[1].label(label(&to_label));
         });
         ui.add_space(8.0);
-        ui.columns(2, |columns| {
-            port_list(&mut columns[0], &outputs, rows, &mut state.output);
-            port_list(&mut columns[1], &inputs, rows, &mut state.input);
+        fit.body(ui, |ui| {
+            ui.columns(2, |columns| {
+                port_list(&mut columns[0], &outputs, rows, &mut state.output);
+                port_list(&mut columns[1], &inputs, rows, &mut state.input);
+            });
         });
         ui.add_space(8.0 + BUTTONS_MARGIN);
         // A row of the buttons' height: a layout given the rest of the
@@ -134,6 +140,7 @@ pub fn show(ctx: &egui::Context, editor: &Editor, window: &mut Option<CreateConn
             create = true;
         }
     });
+    fit.end(ctx, response.response.rect);
     if response.should_close() {
         close = true;
     }
@@ -261,5 +268,59 @@ mod tests {
         let inputs = describe(listed_ports(&editor, combine, false));
         let expected_inputs = [("In", false), ("Input2", true), ("Mask", false)];
         assert_eq!(inputs, expected_inputs.map(|(name, connected)| (name.to_string(), connected)));
+    }
+
+    #[test]
+    fn a_full_mixer_scrolls_to_its_last_input_with_headers_and_buttons_in_view() {
+        use crate::ui::widgets::fit_checks;
+
+        let mut document = crate::document::Document::new();
+        let source = document.add_node("Perlin", [0.0, 0.0]).unwrap();
+        let target = document.add_node("Mixer", [300.0, 0.0]).unwrap();
+        while document.add_input(target) {}
+        let editor = Editor::new(document);
+        let inputs = listed_ports(&editor, target, false);
+        assert_eq!(inputs.len(), 32);
+        let last_input = &inputs.last().unwrap().name;
+        let screens = fit_checks::SMALL_SCREENS.into_iter().chain([Vec2::new(400.0, 300.0)]);
+        for screen in screens {
+            let context = fit_checks::context();
+            let mut window = Some(CreateConnection::new(source, target, true));
+            let mut pending = Vec::new();
+            let mut draw = |ctx: &egui::Context| show(ctx, &editor, &mut window, &mut pending);
+            let words = fit_checks::settle(&context, screen, &mut draw);
+            let expected = ["From Perlin:", "To Mixer:", "Create Connection", "Cancel", "Out"];
+            fit_checks::assert_fits(&context, screen, Id::new("create-connection"), &words, &expected);
+
+            let output = words.iter().find(|(text, _, _)| text == "Out").expect("the source port is painted");
+            let position = output.1.center();
+            let button = |pressed| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            fit_checks::frame(&context, screen, vec![egui::Event::PointerMoved(position), button(true)], &mut draw);
+            fit_checks::frame(&context, screen, vec![button(false)], &mut draw);
+
+            let fully_shown = |(text, rect, clip): &(String, Rect, Rect)| text == last_input && clip.contains_rect(*rect);
+            assert!(!words.iter().any(fully_shown), "the full Mixer should require scrolling to its last input on {screen:?}");
+            let body = output.2;
+            let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+            fit_checks::frame(&context, screen, vec![egui::Event::PointerMoved(body.center())], &mut draw);
+            fit_checks::frame(&context, screen, vec![wheel], &mut draw);
+            for _ in 0..30 {
+                fit_checks::frame(&context, screen, Vec::new(), &mut draw);
+            }
+            let words = fit_checks::frame(&context, screen, Vec::new(), &mut draw);
+            let expected = ["From Perlin:", "To Mixer:", "Create Connection", "Cancel", last_input.as_str()];
+            fit_checks::assert_fits(&context, screen, Id::new("create-connection"), &words, &expected);
+
+            for label in [last_input.as_str(), "Create Connection"] {
+                let row = words.iter().find(|(text, _, _)| text == label).expect("the selected port or action is painted");
+                let position = row.1.center();
+                let button = |pressed| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+                fit_checks::frame(&context, screen, vec![egui::Event::PointerMoved(position), button(true)], &mut draw);
+                fit_checks::frame(&context, screen, vec![button(false)], &mut draw);
+            }
+            let connect = GraphCommand::ConnectPorts { from: source, from_port: "Out".to_string(), to: target, to_port: last_input.clone() };
+            assert_eq!(pending, vec![Command::Graph(connect)]);
+            assert!(window.is_none());
+        }
     }
 }

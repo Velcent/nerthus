@@ -616,6 +616,9 @@ pub fn take_escape(ctx: &egui::Context, state: &mut Option<OptionsState>) {
     if options.notice.is_some() || options.resetting || egui::Popup::is_any_open(ctx) {
         return;
     }
+    if tool_window::on_top(ctx) != Some(Id::new("options")) {
+        return;
+    }
     if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
         *state = None;
     }
@@ -867,7 +870,9 @@ mod tests {
     #[test]
     fn the_shell_does_not_see_the_escape_the_window_takes() {
         let context = context();
+        let mut editor = Editor::new(Document::new());
         let mut state = Some(OptionsState::new(OptionsTab::General));
+        settle(&context, Vec2::new(1066.0, 600.0), &mut editor, &mut state);
         let input = RawInput { events: vec![escape()], ..Default::default() };
         let mut seen = true;
         let output = context.run_ui(input, |ui| {

@@ -12,7 +12,7 @@ use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::swatch_grid;
-use crate::ui::prompt::{task_button, TaskDialog};
+use crate::ui::prompt::{task_actions, TaskDialog};
 use crate::ui::widgets::{icon_button, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, toolbar_background_corners, toolbar_separator, vertical_toolbar, Tooltips};
 use crate::ui::{data_view, graph_canvas, menus, toolbox, UiState};
 use crate::user::ToolboxStyle;
@@ -348,12 +348,13 @@ fn confirm_tab_delete(ui: &mut Ui, tabs: &[GraphTabInfo], ui_state: &mut UiState
             ui.add(egui::Label::new(format!("Are you sure you want to delete this Graph \"{name}\" ")).wrap());
         });
         task.buttons(ui, |ui| {
-            if task_button(ui, "No").clicked() {
-                ui_state.graph.confirm_delete_tab = None;
-            }
-            if task_button(ui, "Yes").clicked() {
-                commands.push(Command::DeleteGraphTab(index));
-                ui_state.graph.confirm_delete_tab = None;
+            match task_actions(ui, &["Yes", "No"]) {
+                Some(0) => {
+                    commands.push(Command::DeleteGraphTab(index));
+                    ui_state.graph.confirm_delete_tab = None;
+                }
+                Some(_) => ui_state.graph.confirm_delete_tab = None,
+                None => {}
             }
         });
     });
@@ -637,6 +638,35 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::user::ToolboxMode;
+
+    #[test]
+    fn delete_tab_confirmation_defaults_to_yes_and_tab_selects_no() {
+        for activation in [egui::Key::Enter, egui::Key::Space] {
+            for choose_no in [false, true] {
+                let context = egui::Context::default();
+                let mut ui_state = UiState::default();
+                ui_state.graph.confirm_delete_tab = Some(1);
+                let mut commands = Vec::new();
+                let key = |key| egui::Event::Key {
+                    key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE,
+                };
+                let mut frames = vec![Vec::new()];
+                if choose_no {
+                    frames.push(vec![key(egui::Key::Tab)]);
+                }
+                frames.push(vec![key(activation)]);
+                for events in frames {
+                    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+                    let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                    let output = context.run_ui(input, |ui| confirm_tab_delete(ui, &[], &mut ui_state, &mut commands));
+                    output.drop_without_applying_deltas();
+                }
+                assert!(ui_state.graph.confirm_delete_tab.is_none());
+                let expected = if choose_no { Vec::new() } else { vec![Command::DeleteGraphTab(1)] };
+                assert_eq!(commands, expected);
+            }
+        }
+    }
 
     /// The build strip painted at the bottom of a graph frame `width` wide,
     /// in a terrain of `nodes` nodes: the frame, the strip as laid out, and

@@ -64,6 +64,7 @@ impl TaskDialog {
 
     pub fn show<R>(&self, ctx: &egui::Context, content: impl FnOnce(&mut Ui, &Self) -> R) -> egui::ModalResponse<R> {
         let modal = egui::Modal::new(self.id).frame(self.frame);
+        let modal = self.fit.modal(ctx, modal);
         let response = modal.show(ctx, |ui| {
             ui.set_width(self.fit.width(self.width));
             ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -124,6 +125,86 @@ pub fn task_button(ui: &mut Ui, text: &str) -> egui::Response {
     let label = styled(text, TEXT_SIZE, TEXT_LINE, theme::LABEL_EMPHASIS);
     let button = egui::Button::new(label).min_size(BUTTON_MIN_SIZE);
     ui.add(button)
+}
+
+/// Right-aligned actions in their visual and keyboard order. The first
+/// action is the default whenever none of the other actions has focus.
+pub fn task_actions(ui: &mut Ui, labels: &[&str]) -> Option<usize> {
+    if labels.is_empty() {
+        return None;
+    }
+    ui.spacing_mut().item_spacing.x = BUTTON_GAP;
+    ui.spacing_mut().button_padding.x = BUTTON_PADDING;
+    let mut width = BUTTON_GAP * (labels.len() - 1) as f32;
+    for label in labels {
+        let galley = ui.painter().layout_no_wrap((*label).to_string(), theme::interface(TEXT_SIZE), theme::LABEL_EMPHASIS);
+        width += (galley.size().x + 2.0 * BUTTON_PADDING).max(BUTTON_MIN_SIZE.x);
+    }
+    let size = Vec2::new(width, BUTTON_MIN_SIZE.y);
+    let row = ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Min), |ui| {
+        let active_layer = ui.memory(|memory| memory.allows_interaction(ui.layer_id()));
+        let interactive = ui.is_enabled() && active_layer;
+        let focus_id = ui.id().with("task-actions");
+        let previous_ids = ui.data(|data| data.get_temp::<Vec<egui::Id>>(focus_id)).unwrap_or_default();
+        let tab = ui.input_mut(|input| {
+            if !interactive {
+                None
+            } else if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                Some(true)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        if let Some(backwards) = tab {
+            ui.memory_mut(|memory| {
+                // Keep traversal inside the action strip, including the
+                // wrap from its last button back to the default.
+                memory.move_focus(egui::FocusDirection::None);
+                if previous_ids.len() != labels.len() {
+                    return;
+                }
+                let current = previous_ids.iter().position(|id| Some(*id) == memory.focused());
+                let next = match (current, backwards) {
+                    (Some(index), true) => (index + labels.len() - 1) % labels.len(),
+                    (Some(index), false) => (index + 1) % labels.len(),
+                    (None, true) => labels.len() - 1,
+                    (None, false) => 0,
+                };
+                memory.request_focus(previous_ids[next]);
+            });
+        }
+        let mut responses = Vec::with_capacity(labels.len());
+        let mut answer = None;
+        for (index, label) in labels.iter().enumerate() {
+            let response = task_button(ui, label);
+            if response.clicked() {
+                answer = Some(index);
+            }
+            responses.push(response);
+        }
+        let ids: Vec<egui::Id> = responses.iter().map(|response| response.id).collect();
+        ui.data_mut(|data| data.insert_temp(focus_id, ids));
+        let focused = ui.memory(|memory| memory.focused());
+        let action_focused = responses.iter().any(|response| Some(response.id) == focused);
+        if active_layer && !action_focused {
+            responses[0].request_focus();
+            let activate_default = ui.input_mut(|input| {
+                if !interactive {
+                    return false;
+                }
+                let enter = input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                let space = input.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+                enter || space
+            });
+            if activate_default && answer.is_none() {
+                answer = Some(0);
+            }
+        }
+        answer
+    });
+    row.inner
 }
 
 /// A command link whose instruction and explanation wrap together.
@@ -236,6 +317,13 @@ pub fn show(ctx: &egui::Context, ui_state: &mut UiState, commands: &mut Vec<Comm
         }
         new
     });
+    if measure {
+        ctx.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+        });
+    }
     let area = egui::Modal::default_area(id).sizing_pass(measure);
     let modal = egui::Modal::new(id).area(area).frame(frame);
     let response = modal.show(ctx, |ui| {
@@ -257,6 +345,7 @@ pub fn show(ctx: &egui::Context, ui_state: &mut UiState, commands: &mut Vec<Comm
     }
     if answer.is_some() || closing {
         ui_state.prompt = None;
+        ctx.data_mut(|data| data.remove::<Option<Prompt>>(id.with("shown")));
     }
 }
 
@@ -329,34 +418,25 @@ fn lower_panel(ui: &mut Ui, prompt: &Prompt, corner_radius: u8) -> Option<Answer
     shown.inner
 }
 
-/// The buttons from the right: OK alone for a message, else Cancel (when
-/// there is one), No and Yes. The row is aligned to its top: centred, it
-/// would take all the height left in the window.
+/// The actions register from left to right so Tab follows their visual
+/// order. The first action, Yes or OK, is the default.
 fn buttons(ui: &mut Ui, prompt: &Prompt) -> Option<Answer> {
-    ui.spacing_mut().item_spacing.x = BUTTON_GAP;
-    ui.spacing_mut().button_padding.x = BUTTON_PADDING;
     let row = ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
         if prompt.yes.is_none() {
-            return button(ui, "OK").then_some(Answer::No);
+            return task_actions(ui, &["OK"]).map(|_| Answer::No);
         }
-        let mut answer = None;
-        if prompt.cancel && button(ui, "Cancel") {
-            answer = Some(Answer::Cancel);
+        let mut labels = vec![prompt.yes_text.as_str(), prompt.no_text.as_str()];
+        if prompt.cancel {
+            labels.push("Cancel");
         }
-        if button(ui, &prompt.no_text) {
-            answer = Some(Answer::No);
-        }
-        if button(ui, &prompt.yes_text) {
-            answer = Some(Answer::Yes);
-        }
-        answer
+        let answer = task_actions(ui, &labels)?;
+        Some(match answer {
+            0 => Answer::Yes,
+            1 => Answer::No,
+            _ => Answer::Cancel,
+        })
     });
     row.inner
-}
-
-/// A button at least 70 by 21; whether it was clicked.
-fn button(ui: &mut Ui, text: &str) -> bool {
-    task_button(ui, text).clicked()
 }
 
 /// A line across the window, between its panels.
@@ -407,6 +487,10 @@ mod tests {
 
     fn escape() -> Event {
         Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    fn key(key: Key) -> Event {
+        Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
     }
 
     /// The box where the last frame left it.
@@ -485,6 +569,128 @@ mod tests {
 
         assert_eq!(second_frame, vec![Command::File(FileCommand::DiscardChanges)]);
         assert!(ui_state.prompt.is_none());
+    }
+
+    #[test]
+    fn enter_and_space_accept_the_default_question_and_custom_action() {
+        for activation in [Key::Enter, Key::Space] {
+            let questions = [
+                Prompt::new("Question", "Continue?", Command::RunBuild { close: false }),
+                Prompt::with_button("Question", "Continue?", "Build now", Command::RunBuild { close: false }),
+            ];
+            for question in questions {
+                let context = egui::Context::default();
+                let mut ui_state = UiState { prompt: Some(question), ..Default::default() };
+                prompt_frame(&context, &mut ui_state, Vec::new());
+                assert!(context.memory(|memory| memory.focused().is_some()));
+
+                let commands = prompt_frame(&context, &mut ui_state, vec![key(activation)]);
+                assert_eq!(commands, vec![Command::RunBuild { close: false }]);
+                assert!(ui_state.prompt.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn enter_and_space_dismiss_ok_messages_without_running_the_dismissal_command() {
+        for activation in [Key::Enter, Key::Space] {
+            let context = egui::Context::default();
+            let mut message = Prompt::message("Message", "Finished.");
+            message.dismissed = Some(Command::File(FileCommand::DiscardChanges));
+            let mut ui_state = UiState { prompt: Some(message), ..Default::default() };
+            prompt_frame(&context, &mut ui_state, Vec::new());
+
+            let commands = prompt_frame(&context, &mut ui_state, vec![key(activation)]);
+            assert!(commands.is_empty());
+            assert!(ui_state.prompt.is_none());
+        }
+    }
+
+    #[test]
+    fn tab_follows_yes_no_cancel_and_activates_the_focused_answer() {
+        for activation in [Key::Enter, Key::Space] {
+            for tab_count in 1..=3 {
+                let context = egui::Context::default();
+                let yes = Command::RunBuild { close: false };
+                let no = Command::File(FileCommand::DiscardChanges);
+                let question = Prompt::yes_no_cancel("Question", "Save changes?", yes.clone(), no.clone());
+                let mut ui_state = UiState { prompt: Some(question), ..Default::default() };
+                prompt_frame(&context, &mut ui_state, Vec::new());
+                for _ in 0..tab_count {
+                    prompt_frame(&context, &mut ui_state, vec![key(Key::Tab)]);
+                }
+
+                let commands = prompt_frame(&context, &mut ui_state, vec![key(activation)]);
+                let expected = match tab_count {
+                    1 => vec![no],
+                    2 => Vec::new(),
+                    _ => vec![yes],
+                };
+                assert_eq!(commands, expected, "{activation:?}, {tab_count} Tabs");
+                assert!(ui_state.prompt.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn a_reopened_question_restores_the_default_and_accepts_after_focus_is_lost() {
+        let context = egui::Context::default();
+        let question = Prompt::new("Question", "Continue?", Command::RunBuild { close: false });
+        let mut ui_state = UiState { prompt: Some(question.clone()), ..Default::default() };
+        prompt_frame(&context, &mut ui_state, Vec::new());
+        prompt_frame(&context, &mut ui_state, vec![key(Key::Tab)]);
+        assert!(prompt_frame(&context, &mut ui_state, vec![key(Key::Enter)]).is_empty());
+        assert!(ui_state.prompt.is_none());
+
+        ui_state.prompt = Some(question);
+        prompt_frame(&context, &mut ui_state, Vec::new());
+        context.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+        });
+        let commands = prompt_frame(&context, &mut ui_state, vec![key(Key::Enter)]);
+        assert_eq!(commands, vec![Command::RunBuild { close: false }]);
+        assert!(ui_state.prompt.is_none());
+    }
+
+    #[test]
+    fn shift_tab_wraps_from_yes_to_cancel() {
+        let context = egui::Context::default();
+        let yes = Command::RunBuild { close: false };
+        let no = Command::File(FileCommand::DiscardChanges);
+        let question = Prompt::yes_no_cancel("Question", "Save changes?", yes, no);
+        let mut ui_state = UiState { prompt: Some(question), ..Default::default() };
+        prompt_frame(&context, &mut ui_state, Vec::new());
+        let shift_tab = Event::Key {
+            key: Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::SHIFT,
+        };
+        prompt_frame(&context, &mut ui_state, vec![shift_tab]);
+        assert!(prompt_frame(&context, &mut ui_state, vec![key(Key::Enter)]).is_empty());
+        assert!(ui_state.prompt.is_none());
+    }
+
+    #[test]
+    fn a_default_action_below_another_modal_does_not_take_its_key() {
+        for activation in [Key::Enter, Key::Space] {
+            let context = egui::Context::default();
+            let mut answers = [None; 2];
+            let frames = [Vec::new(), Vec::new(), Vec::new(), vec![key(activation)]];
+            for events in frames {
+                let input = RawInput { screen_rect: Some(SCREEN), events, ..Default::default() };
+                let output = context.run_ui(input, |ui| {
+                    for (index, answer) in answers.iter_mut().enumerate() {
+                        let dialog = TaskDialog::new(ui.ctx(), egui::Id::new(("stacked-task", index)), 350.0);
+                        dialog.show(ui.ctx(), |ui, task| {
+                            task.body(ui, "Question", false, |_| {});
+                            *answer = task.buttons(ui, |ui| task_actions(ui, &["Yes", "No"]));
+                        });
+                    }
+                });
+                output.drop_without_applying_deltas();
+            }
+            assert_eq!(answers, [None, Some(0)]);
+        }
     }
 
     #[test]

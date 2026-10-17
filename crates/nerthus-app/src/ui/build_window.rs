@@ -64,6 +64,7 @@ pub fn confirm(ctx: &egui::Context, editor: &Editor, ui_state: &mut UiState, com
                 ui.label("Adjust your ");
                 if ui.link("build settings").clicked() {
                     commands.push(Command::BuildSettings);
+                    cancel = true;
                 }
                 ui.label(", export file formats, and other details before proceeding. You can also access them in the Project menu.");
             });
@@ -127,6 +128,11 @@ pub fn progress(ctx: &egui::Context, editor: &Editor, commands: &mut Vec<Command
         return;
     }
     let title = format!("Building {} at {} x {}", build.project_name, build.resolution, build.resolution);
+    if tool_window::close_requested(ctx, egui::Id::new("build-progress")) {
+        let command = if build.finished { Command::CloseBuildWindow } else { Command::CancelBuild };
+        commands.push(command);
+        return;
+    }
     let mut open = true;
     let mut window = egui::Window::new(title);
     window = window.collapsible(false);
@@ -349,6 +355,87 @@ mod tests {
             fit_checks::assert_fits(&context, screen, egui::Id::new("build-and-export"), &words, &expected);
             assert!(ui_state.build_confirm.as_ref().is_some_and(|state| state.open_folder));
             assert!(pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_build_settings_link_dismisses_confirmation_before_opening_settings() {
+        use crate::ui::widgets::fit_checks;
+
+        let context = fit_checks::context();
+        let screen = fit_checks::SMALL_SCREENS[0];
+        let mut editor = Editor::new(Document::new());
+        let build_confirm = Some(BuildConfirm { open_folder: true });
+        let mut ui_state = UiState { build_confirm, ..Default::default() };
+        let mut pending = Vec::new();
+        let mut draw = |ctx: &egui::Context| confirm(ctx, &editor, &mut ui_state, &mut pending);
+        let words = fit_checks::settle(&context, screen, &mut draw);
+        let link = words.iter().find(|(text, _, _)| text == "build settings").expect("the settings link is painted");
+        let position = link.1.center();
+        let button = |pressed| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        fit_checks::frame(&context, screen, vec![egui::Event::PointerMoved(position), button(true)], &mut draw);
+        fit_checks::frame(&context, screen, vec![button(false)], &mut draw);
+
+        assert_eq!(pending, vec![Command::BuildSettings]);
+        assert!(ui_state.build_confirm.is_none());
+        commands::run(pending, &mut editor, &mut ui_state, &mut Window::default());
+        assert!(ui_state.build_settings.is_some());
+        assert!(editor.export_build.is_none());
+    }
+
+    #[test]
+    fn a_short_confirmation_scrolls_to_its_build_actions() {
+        use crate::ui::widgets::fit_checks;
+
+        let context = fit_checks::context();
+        let screen = Vec2::new(400.0, 300.0);
+        let editor = Editor::new(Document::new());
+        let build_confirm = Some(BuildConfirm { open_folder: true });
+        let mut ui_state = UiState { build_confirm, ..Default::default() };
+        let mut pending = Vec::new();
+        let mut draw = |ctx: &egui::Context| confirm(ctx, &editor, &mut ui_state, &mut pending);
+        let words = fit_checks::settle(&context, screen, &mut draw);
+        let expected = ["Build Terrain at", "Open folder after build finishes", "Cancel", "Close the Nerthus interface during a build"];
+        fit_checks::assert_fits(&context, screen, egui::Id::new("build-and-export"), &words, &expected);
+
+        let heading = words.iter().find(|(text, _, _)| text.starts_with("Build Terrain at")).expect("the instruction is painted");
+        let body = heading.2;
+        let fully_shown = |(text, rect, clip): &(String, egui::Rect, egui::Rect)| text == "Close Nerthus and Build" && clip.contains_rect(*rect);
+        assert!(!words.iter().any(fully_shown), "the short confirmation should require scrolling to the last action");
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+        fit_checks::frame(&context, screen, vec![egui::Event::PointerMoved(body.center())], &mut draw);
+        fit_checks::frame(&context, screen, vec![wheel], &mut draw);
+        for _ in 0..30 {
+            fit_checks::frame(&context, screen, Vec::new(), &mut draw);
+        }
+        let words = fit_checks::frame(&context, screen, Vec::new(), &mut draw);
+        let expected = ["Close Nerthus and Build", "Open folder after build finishes", "Cancel", "Close the Nerthus interface during a build"];
+        fit_checks::assert_fits(&context, screen, egui::Id::new("build-and-export"), &words, &expected);
+
+        let action = words.iter().find(|(text, _, _)| text == "Close Nerthus and Build").expect("the build action is painted");
+        let position = action.1.center();
+        let button = |pressed| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        fit_checks::frame(&context, screen, vec![egui::Event::PointerMoved(position), button(true)], &mut draw);
+        fit_checks::frame(&context, screen, vec![button(false)], &mut draw);
+        assert_eq!(pending, vec![Command::StartBuild { open_folder: true, close: true }]);
+        assert!(ui_state.build_confirm.is_none());
+    }
+
+    #[test]
+    fn closing_build_progress_cancels_a_running_build_and_closes_a_finished_one() {
+        let context = egui::Context::default();
+        for finished in [false, true] {
+            let mut editor = Editor::new(Document::new());
+            let (_sender, messages) = crossbeam_channel::unbounded();
+            let mut build = ExportBuild::following("Escape".to_string(), 1024, false, messages);
+            build.finished = finished;
+            editor.export_build = Some(build);
+            tool_window::request_close(&context, egui::Id::new("build-progress"));
+            let mut pending = Vec::new();
+            let output = context.run_ui(egui::RawInput::default(), |ui| progress(ui.ctx(), &editor, &mut pending));
+            output.drop_without_applying_deltas();
+            let expected = if finished { Command::CloseBuildWindow } else { Command::CancelBuild };
+            assert_eq!(pending, vec![expected]);
         }
     }
 

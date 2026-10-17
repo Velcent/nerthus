@@ -160,6 +160,15 @@ pub struct Viewport2DState {
 }
 
 impl Viewport2DState {
+    /// The floating Map Viewers' layers, for routing Esc to the top one.
+    pub fn window_ids(&self) -> Vec<Id> {
+        let mut windows: Vec<Id> = self.floating.iter().filter(|view| view.open).map(|view| Id::new(("map-viewer", view.node))).collect();
+        if self.following.is_some() {
+            windows.push(Id::new("map-viewer-following"));
+        }
+        windows
+    }
+
     /// `Toggle2DViewport` (F6).
     pub fn toggle_docked(&mut self) {
         self.docked = !self.docked;
@@ -475,6 +484,10 @@ pub fn show_floating(ctx: &egui::Context, editor: &mut Editor, state: &mut Viewp
         refresh_floating(editor, floating);
         let title = editor.document.node(floating.node).map(|node| node.name.clone()).unwrap_or_default();
         let window_id = Id::new(("map-viewer", floating.node));
+        if tool_window::close_requested(ctx, window_id) {
+            floating.open = false;
+            continue;
+        }
         let mut open = true;
         let window = map_viewer_window(ctx, window_id, title, &mut open);
         let ports = output_ports(editor, floating.node);
@@ -527,11 +540,15 @@ fn window_view(ui: &mut Ui, id: Id, view: &mut View2D, colours: Option<&Arc<Terr
 /// The Map Viewer while it shows: the previewed node's outputs in its
 /// menu, the one shown checked.
 fn show_following(ctx: &egui::Context, editor: &Editor, state: &mut Viewport2DState, commands: &mut Vec<Command>) {
+    let window_id = Id::new("map-viewer-following");
+    if tool_window::close_requested(ctx, window_id) {
+        state.following = None;
+        return;
+    }
     let Some(following) = state.following.as_mut() else {
         return;
     };
     refresh_following(editor, following);
-    let window_id = Id::new("map-viewer-following");
     let mut open = true;
     let window = map_viewer_window(ctx, window_id, FOLLOWING_TITLE.to_string(), &mut open);
     let ports = editor.preview_node.map(|node| output_ports(editor, node)).unwrap_or_default();

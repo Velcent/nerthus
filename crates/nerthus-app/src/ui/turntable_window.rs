@@ -96,6 +96,7 @@ pub fn show(ctx: &egui::Context, window: &mut TurntableWindow, memory: &mut Turn
     let fit = DialogFit::new(ctx, id, &frame);
     let mut modal = egui::Modal::new(id);
     modal = modal.frame(frame);
+    modal = fit.modal(ctx, modal);
     let response = modal.show(ctx, |ui| {
         let width = fit.width(WIDTH);
         ui.set_width(width);

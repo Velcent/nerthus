@@ -227,6 +227,9 @@ pub fn take_escape(ctx: &egui::Context, window: &mut Option<BatchWindow>) {
     if !window.as_ref().is_some_and(|shown| shown.active) || egui::Popup::is_any_open(ctx) {
         return;
     }
+    if tool_window::on_top(ctx) != Some(Id::new("batch-build")) {
+        return;
+    }
     // egui has already taken the keyboard from the script for this Esc.
     let typing = ctx.memory(|memory| memory.had_focus_last_frame(script_id()));
     if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) && !typing {

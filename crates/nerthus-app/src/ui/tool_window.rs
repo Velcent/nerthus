@@ -143,12 +143,19 @@ fn dragging(ctx: &Context, id: Id) -> bool {
 
 /// The window on top: of the windows shown last frame, the one raised
 /// last, those in front (About, the Painter, a list dropped down) over the
-/// rest. The shell's alert shows among them without being one.
+/// rest. The shell's alert and egui's modals are handled separately.
 pub fn on_top(ctx: &Context) -> Option<Id> {
     let alert = alert::area_id();
     ctx.memory(|memory| {
         let areas = memory.areas();
-        let window = |layer: &LayerId| matches!(layer.order, Order::Middle | Order::Foreground) && layer.id != alert && areas.parent_layer(*layer).is_none() && areas.visible_last_frame(layer);
+        let modal = memory.top_modal_layer();
+        let window = |layer: &LayerId| {
+            matches!(layer.order, Order::Middle | Order::Foreground)
+                && layer.id != alert
+                && Some(*layer) != modal
+                && areas.parent_layer(*layer).is_none()
+                && areas.visible_last_frame(layer)
+        };
         let shown: Vec<LayerId> = memory.layer_ids().filter(window).collect();
         let top = |order: Order| shown.iter().rfind(|layer| layer.order == order).map(|layer| layer.id);
         top(Order::Foreground).or_else(|| top(Order::Middle))
@@ -158,16 +165,27 @@ pub fn on_top(ctx: &Context) -> Option<Id> {
 /// Esc closes the window on top (`IsCancel`) when it is one of `windows`,
 /// as its close button does: taken before the shell's keys, so that it
 /// does not stop a build as well. Returns the window to close. A modal or
-/// a list dropped down takes Esc instead, and so does a field outside the
-/// windows being typed in, which Esc puts back.
+/// a list dropped down takes Esc instead, and so does a field in the
+/// shell being typed in, which Esc puts back.
 pub fn take_escape(ctx: &Context, windows: &[Id]) -> Option<Id> {
     let top = on_top(ctx).filter(|top| windows.contains(top))?;
     let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
-    let typing_elsewhere = keyboard_layer(ctx).is_some_and(|layer| !windows.contains(&layer.id));
+    let typing_elsewhere = shell_has_keyboard(ctx);
     if modal || typing_elsewhere || egui::Popup::is_any_open(ctx) {
         return None;
     }
     ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)).then_some(top)
+}
+
+/// Asks a window to run its usual close action when it is drawn. Keeping
+/// that action in the window preserves Cancel's rollback and cleanup.
+pub fn request_close(ctx: &Context, window: Id) {
+    ctx.data_mut(|data| data.insert_temp(window.with("close-requested"), true));
+}
+
+/// Takes the close request routed to this window before the shell's keys.
+pub fn close_requested(ctx: &Context, window: Id) -> bool {
+    ctx.data_mut(|data| data.remove_temp::<bool>(window.with("close-requested"))).unwrap_or(false)
 }
 
 /// Notes the layer of the widget with the keyboard, once the frame is
@@ -177,6 +195,11 @@ pub fn note_keyboard(ctx: &Context) {
     let focused = ctx.memory(|memory| memory.focused());
     let layer = focused.and_then(|id| ctx.read_response(id)).map(|response| response.layer_id);
     ctx.data_mut(|data| data.insert_temp(keyboard_id(), layer));
+}
+
+/// Whether a field in the shell had the keyboard before egui handled Esc.
+pub fn shell_has_keyboard(ctx: &Context) -> bool {
+    keyboard_layer(ctx).is_some_and(|layer| layer.order == Order::Background)
 }
 
 /// The layer of the widget that had the keyboard last frame.

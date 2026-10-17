@@ -18,7 +18,7 @@ use crate::ui::commands::Command;
 use crate::ui::data_view::{toolbar, toolbar_divider, toolbar_row};
 use crate::ui::editors::{dropdown_box, palette_color, range_slider, slider, toggle, RangeSpec, SliderSpec};
 use crate::ui::slider_popups::{self, BoxWidth, TypingLook};
-use crate::ui::prompt::{task_button, TaskDialog};
+use crate::ui::prompt::{task_actions, TaskDialog};
 use crate::ui::widgets::{icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator};
 
 /// `Create Variable`'s entries: header, icon (`Accent-Muted-Teal`).
@@ -849,13 +849,14 @@ fn confirm_delete_all(ui: &mut Ui, editor: &mut Editor, state: &mut VariablesSta
             ui.add(egui::Label::new("All variables in the current project will be removed").wrap());
         });
         task.buttons(ui, |ui| {
-            if task_button(ui, "No").clicked() {
-                state.confirm_delete_all = false;
-            }
-            if task_button(ui, "Yes").clicked() {
-                editor.document.delete_all_variables();
-                editor.changed();
-                state.confirm_delete_all = false;
+            match task_actions(ui, &["Yes", "No"]) {
+                Some(0) => {
+                    editor.document.delete_all_variables();
+                    editor.changed();
+                    state.confirm_delete_all = false;
+                }
+                Some(_) => state.confirm_delete_all = false,
+                None => {}
             }
         });
     });
@@ -868,6 +869,34 @@ fn confirm_delete_all(ui: &mut Ui, editor: &mut Editor, state: &mut VariablesSta
 mod tests {
     use super::*;
     use crate::document::Document;
+
+    #[test]
+    fn delete_all_confirmation_defaults_to_yes_and_tab_selects_no() {
+        for activation in [Key::Enter, Key::Space] {
+            for choose_no in [false, true] {
+                let context = egui::Context::default();
+                let mut editor = Editor::new(Document::new());
+                editor.document.add_variable("Float");
+                let mut state = VariablesState { confirm_delete_all: true, ..Default::default() };
+                let key = |key| egui::Event::Key {
+                    key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE,
+                };
+                let mut frames = vec![Vec::new()];
+                if choose_no {
+                    frames.push(vec![key(Key::Tab)]);
+                }
+                frames.push(vec![key(activation)]);
+                for events in frames {
+                    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+                    let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                    let output = context.run_ui(input, |ui| confirm_delete_all(ui, &mut editor, &mut state));
+                    output.drop_without_applying_deltas();
+                }
+                assert!(!state.confirm_delete_all);
+                assert_eq!(editor.document.automation().variables.is_empty(), !choose_no);
+            }
+        }
+    }
 
     #[test]
     fn colour_rows_narrower_than_their_name_column_lay_out() {

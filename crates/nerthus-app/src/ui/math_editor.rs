@@ -40,8 +40,18 @@ fn window_id() -> Id {
     Id::new("math-editor")
 }
 
+/// The window's layer, separate from the editor state in egui's memory.
+pub fn area_id() -> Id {
+    window_id().with("window")
+}
+
+pub fn is_open(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<MathEditor>(window_id()).is_some())
+}
+
 /// `Editor_CommandExecuted("OpenEditor")`: the window for a Math node.
 pub fn open(ctx: &egui::Context, editor: &Editor, node: i32) {
+    tool_window::close_requested(ctx, area_id());
     let expression = editor.document.node(node).and_then(|data| data.values.get("Expression")).and_then(Value::as_str).unwrap_or_default().to_string();
     let state = MathEditor { node, text: expression.clone(), old_expression: expression, changed_at: None, result: None };
     ctx.data_mut(|data| data.insert_temp(window_id(), state));
@@ -52,7 +62,13 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor) {
     let Some(mut state) = ctx.data(|data| data.get_temp::<MathEditor>(window_id())) else {
         return;
     };
+    let cancel = tool_window::close_requested(ctx, area_id());
     if editor.document.node(state.node).is_none() {
+        ctx.data_mut(|data| data.remove::<MathEditor>(window_id()));
+        return;
+    }
+    if cancel {
+        set_expression(editor, state.node, &state.old_expression);
         ctx.data_mut(|data| data.remove::<MathEditor>(window_id()));
         return;
     }
@@ -74,7 +90,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor) {
     window = window.order(egui::Order::Foreground);
     window = window.frame(egui::Frame::window(&ctx.global_style()).fill(theme::WINDOW_BACKGROUND).inner_margin(tool_window::MARGIN));
     // 480 × 400 at the interface scale (the window's `UIScaler`).
-    window = tool_window::place(ctx, window, window_id().with("window"), Vec2::new(480.0, 400.0));
+    window = tool_window::place(ctx, window, area_id(), Vec2::new(480.0, 400.0));
     window.show(ctx, |ui| {
         let box_id = window_id().with("expression");
         // Tab and Enter are the `SyntaxBox`'s, taken before the box runs.
@@ -241,6 +257,36 @@ mod tests {
         editor.document.set_value(node, "Expression", Value::from(expression));
         open(context, &editor, node);
         editor
+    }
+
+    #[test]
+    fn escape_cancels_applied_math_changes_while_the_expression_has_focus() {
+        let context = context();
+        let mut editor = opened(&context, "a");
+        let mut ui_state = crate::ui::UiState::default();
+        for _ in 0..3 {
+            frame(&context, &mut editor, 0.0, Vec::new());
+        }
+        let mut state = context.data(|data| data.get_temp::<MathEditor>(window_id())).unwrap();
+        let node = state.node;
+        // Apply and Run changed the node, followed by another unsaved edit.
+        set_expression(&mut editor, node, "a + 1");
+        state.text = "a + 2".to_string();
+        context.data_mut(|data| data.insert_temp(window_id(), state));
+        context.memory_mut(|memory| memory.request_focus(window_id().with("expression")));
+        frame(&context, &mut editor, 0.0, Vec::new());
+        tool_window::note_keyboard(&context);
+        editor.building = true;
+        let input = RawInput { events: vec![key(Key::Escape)], ..Default::default() };
+        let output = context.run_ui(input, |ui| {
+            crate::ui::tool_commands::take_escape(ui.ctx(), &mut editor, &mut ui_state);
+            show(ui.ctx(), &mut editor);
+            assert!(!ui.input(|input| input.key_pressed(Key::Escape)));
+        });
+        output.drop_without_applying_deltas();
+        assert!(context.data(|data| data.get_temp::<MathEditor>(window_id())).is_none());
+        assert_eq!(editor.document.node(node).unwrap().values["Expression"], "a");
+        assert!(!editor.cancel_build);
     }
 
     /// A frame at `time` with these events. Returns the window's rect.

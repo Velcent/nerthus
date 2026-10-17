@@ -145,6 +145,10 @@ fn open_menu(response: &egui::Response, path: &Path, example: bool, commands: &m
 /// while searching, every project seen whose name has the text), Open
 /// Examples and the settings. Escape closes it.
 fn start_dialog(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState, commands: &mut Vec<Command>) {
+    if tool_window::close_requested(ctx, Id::new("start-dialog")) {
+        editor.files.start_dialog_open = false;
+        return;
+    }
     let mut memory = memory(ctx);
     if !memory.documents_read {
         memory.documents_read = true;
@@ -202,10 +206,7 @@ fn start_dialog(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState
         let mut column_ui = tool_window::part(ui, "start-column", parts.column, egui::Layout::top_down(egui::Align::Min));
         start_column(&mut column_ui, ctx, editor, &mut memory, commands);
     });
-    // Escape belongs to a window over the dialog (What's New, the Nahimic
-    // warning, a modal) while one shows.
-    let escaped = !tool_commands::modal_open(ctx, ui_state) && ctx.input(|input| input.key_pressed(Key::Escape));
-    if !open || escaped {
+    if !open {
         editor.files.start_dialog_open = false;
     }
     store(ctx, memory);
@@ -403,6 +404,10 @@ fn examples() -> Vec<PathBuf> {
 /// The examples (`ExamplesWindow`): a numbered button for each, with its
 /// picture (`<example>.jpg`, else the folder's `null.jpg`) and name.
 fn examples_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut Vec<Command>) {
+    if tool_window::close_requested(ctx, Id::new("examples-window")) {
+        editor.files.examples_open = false;
+        return;
+    }
     let mut memory = memory(ctx);
     let mut open = true;
     let mut window = egui::Window::new("Examples");
