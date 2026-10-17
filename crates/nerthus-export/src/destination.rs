@@ -244,7 +244,7 @@ mod tests {
             mutation: 3,
             resolution: 2048,
             now: Local.with_ymd_and_hms(2026, 10, 12, 9, 5, 7).unwrap(),
-            user_name: "dane".to_string(),
+            user_name: "artist".to_string(),
             domain: "studio".to_string(),
             machine: "mac".to_string(),
         }
@@ -266,7 +266,7 @@ mod tests {
         let root = std::env::temp_dir().join("nerthus-destination-tokens");
         let template = "<FileLocation>\\[Filename]\\Builds\\[Date]_[Time]\\[Mutation]-[Resolution]-[Username]@[Machine]";
         let folder = resolve_destination(&context(template, &root));
-        let expected = root.join("Projects").join("Canyon").join("Builds").join("2026-10-12_09-05-07").join("003-2048-dane@mac");
+        let expected = root.join("Projects").join("Canyon").join("Builds").join("2026-10-12_09-05-07").join("003-2048-artist@mac");
         assert_eq!(folder, expected);
     }
 

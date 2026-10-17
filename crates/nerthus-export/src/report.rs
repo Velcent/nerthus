@@ -1033,8 +1033,8 @@ mod tests {
     #[test]
     fn header_wraps_long_folders_and_shortens_paths() {
         let header = ReportHeader {
-            project_path: "/private/tmp/claude-501/-Users-danemadsen-nerthus/22df8798-8458-4e65-94e6-14307a882075/scratchpad/report/basic.terrain".to_string(),
-            folder: "/private/tmp/claude-501/-Users-danemadsen-nerthus/22df8798-8458-4e65-94e6-14307a882075/scratchpad/report/maps".to_string(),
+            project_path: "/tmp/nerthus-report-example/builds/0042-8a2c-4e2b-9f61-7f5b3a9c1d0e/scratchpad/report/basic.terrain".to_string(),
+            folder: "/tmp/nerthus-report-example/builds/0042-8a2c-4e2b-9f61-7f5b3a9c1d0e/scratchpad/report/maps".to_string(),
             build_type: "Standard".to_string(),
             resolution: 256,
             profile: None,
@@ -1050,8 +1050,8 @@ mod tests {
         assert!(lines[1].ends_with(" NERTHUS BUILD  0.1.0 ──"));
         assert_eq!(lines[3], " ".repeat(80));
         assert_eq!(lines[4], "          Filename:  │ /…/scratchpad/report/basic.terrain                       ");
-        assert_eq!(lines[5], "    Build Location:  │ /private/tmp/claude-501/-Users-danemadsen-nerthus/22df8  ");
-        assert_eq!(lines[6], "                     │ 798-8458-4e65-94e6-14307a882075/scratchpad/report/maps   ");
+        assert_eq!(lines[5], "    Build Location:  │ /tmp/nerthus-report-example/builds/0042-8a2c-4e2b-9f61-  ");
+        assert_eq!(lines[6], "                     │ 7f5b3a9c1d0e/scratchpad/report/maps                      ");
         assert_eq!(lines[8], "  Build Resolution:  │ 256 × 256                                                ");
         assert_eq!(lines[10], "             Nodes:  │ 05 to build                                              ");
         assert_eq!(lines[11], "                     │ 04 to export                                             ");
