@@ -19,6 +19,7 @@ use nerthus_export::swarm;
 
 use crate::editor::Editor;
 use crate::theme;
+use crate::ui::build_command::{CommandKind, quote_argument, quote_program, variable_argument};
 use crate::ui::file_dialogs::{DialogKind, DialogRequest, FileDialogs};
 use crate::ui::tool_window;
 use crate::ui::widgets::{selectable_value, Tooltips};
@@ -74,7 +75,11 @@ pub struct BatchWindow {
 /// `#` for `REM` outside Windows).
 fn script_header() -> String {
     let comment = if cfg!(windows) { "REM" } else { "#" };
-    format!("{comment} Nerthus Batch Build Version {}", env!("CARGO_PKG_VERSION"))
+    let mut header = format!("{comment} Nerthus Batch Build Version {}", env!("CARGO_PKG_VERSION"));
+    if cfg!(windows) {
+        header.push_str("\n@setlocal DisableDelayedExpansion");
+    }
+    header
 }
 
 /// `nerthus-build` beside the editor (where cargo builds both).
@@ -82,16 +87,6 @@ fn build_program() -> PathBuf {
     let name = if cfg!(windows) { "nerthus-build.exe" } else { "nerthus-build" };
     let current = std::env::current_exe().unwrap_or_default();
     current.with_file_name(name)
-}
-
-/// In quotes.
-fn quoted(text: &str) -> String {
-    format!("\"{text}\"")
-}
-
-/// In quotes when it holds a letter.
-fn quoted_if_text(text: &str) -> String {
-    if text.chars().any(char::is_alphabetic) { quoted(text) } else { text.to_string() }
 }
 
 impl BatchSession {
@@ -145,25 +140,29 @@ impl BatchWindow {
     fn add(&mut self, session: &mut BatchSession, editor: &Editor, profile: Option<&str>) {
         session.contents = self.text.clone();
         let file = editor.document.path.as_ref().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut line = format!("\n{} build {}", quoted(&build_program().to_string_lossy()), quoted(&file));
+        let program = build_program();
+        let program_argument = quote_program(&program.to_string_lossy(), CommandKind::Batch);
+        let file_argument = quote_argument(&file, CommandKind::Batch);
+        let mut line = format!("\n{program_argument} build {file_argument}");
         let definition = profile.and_then(|name| editor.document.build_profile(name));
         if let (Some(name), Some(_)) = (profile, &definition) {
-            line.push_str(&format!(" -p {}", quoted(name)));
+            let profile_argument = quote_argument(name, CommandKind::Batch);
+            line.push_str(&format!(" -p {profile_argument}"));
         }
         let profile_json = profile.and_then(|name| swarm::profile_json(&editor.document.project.assets[0], name));
         if let Some(portion) = profile_json.and_then(region::portion) {
-            line.push_str(&format!(" -r {}", quoted(&portion.name)));
+            let region_argument = quote_argument(&portion.name, CommandKind::Batch);
+            line.push_str(&format!(" -r {region_argument}"));
         }
         if session.seed > 0 {
             line.push_str(&format!(" --seed {}", session.seed));
         }
         // Every variable with its value.
-        let mut variables = String::new();
         for (name, variable) in &editor.document.project.assets[0].automation.variables {
-            variables.push_str(&format!("-v {name}={} ", quoted_if_text(&variable.value.to_text())));
+            let value = variable.value.to_text();
+            line.push(' ');
+            line.push_str(&variable_argument(name, &value, CommandKind::Batch));
         }
-        let variables = format!(" {variables}");
-        line.push_str(variables.trim_end());
         session.contents.push_str(&line);
         self.text = session.contents.clone();
     }
@@ -453,6 +452,38 @@ mod tests {
 
     fn close(a: Rect, b: Rect) -> bool {
         (a.min - b.min).abs().max_elem() <= 1.0 && (a.max - b.max).abs().max_elem() <= 1.0
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_builds_preserve_ranges_and_literal_text() {
+        use nerthus_engine::automation::{Variable, VariableValue};
+
+        let project = "/p/a 'quoted' $(printf expanded).terrain";
+        let mut shell = Shell::open();
+        shell.editor.document.path = Some(PathBuf::from(project));
+        let values = [
+            ("Range", VariableValue::Float2([0.0, 1.0])),
+            ("Number text", VariableValue::Text("123 456".to_string())),
+            ("Empty", VariableValue::Null),
+            ("Literal", VariableValue::Text("a'b\"c &|; $HOME `printf expanded` \\".to_string())),
+        ];
+        for (name, value) in values {
+            let json = serde_json::json!({"Name": name});
+            let mut variable = Variable::from_json(&json);
+            variable.value = value;
+            shell.editor.document.project.assets[0].automation.variables.insert(name.to_string(), variable);
+        }
+        let window = shell.window.as_mut().unwrap();
+        window.add(&mut shell.session, &shell.editor, None);
+        // Execute the generated script with an argv recorder in place
+        // of the real builder, retaining all generated arguments.
+        let program = quote_program(&build_program().to_string_lossy(), CommandKind::Batch);
+        let script = window.text.replacen(&program, "printf '%s\\0'", 1);
+        let output = std::process::Command::new("sh").arg("-c").arg(script).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let expected = format!("build\0{project}\0-v\0Range=0, 1\0-v\0Number text=123 456\0-v\0Empty=\0-v\0Literal=a'b\"c &|; $HOME `printf expanded` \\\0");
+        assert_eq!(output.stdout, expected.as_bytes());
     }
 
     #[test]

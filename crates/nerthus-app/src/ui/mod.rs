@@ -7,6 +7,8 @@ pub(crate) mod alert;
 mod artifact_explorer;
 pub mod batch_build;
 mod bound_variable;
+#[path = "build-command.rs"]
+mod build_command;
 mod build_settings;
 mod build_window;
 mod colour_button;

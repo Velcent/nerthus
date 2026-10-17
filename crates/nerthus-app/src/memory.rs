@@ -1,7 +1,7 @@
 //! The process's memory for the status bar (its working set), and the
 //! memory installed in the machine.
 
-/// Bytes the process holds as the system reports it (macOS: the physical
+/// Bytes resident in the process's working set (macOS: the physical
 /// footprint Activity Monitor shows); `None` where Nerthus cannot ask.
 pub fn process_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
@@ -18,7 +18,38 @@ pub fn process_bytes() -> Option<u64> {
         let usage = unsafe { usage.assume_init() };
         Some(usage.ri_phys_footprint)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        // `statm` reports virtual, resident, and shared memory in pages.
+        let info = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let resident_pages: u64 = info.split_whitespace().nth(1)?.parse().ok()?;
+        // SAFETY: querying the page size takes no additional arguments.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return None;
+        }
+        resident_pages.checked_mul(page_size as u64)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let counters_size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        counters.cb = counters_size;
+        // SAFETY: the pseudo-handle refers to this process and must not be
+        // closed. The counters buffer and its byte size match the API.
+        let succeeded = unsafe {
+            let process = GetCurrentProcess();
+            K32GetProcessMemoryInfo(process, &mut counters, counters_size) != 0
+        };
+        if !succeeded {
+            return None;
+        }
+        Some(counters.WorkingSetSize as u64)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         None
     }
@@ -103,6 +134,13 @@ pub fn release_unused() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn process_memory_is_known() {
+        let bytes = super::process_bytes().expect("the system reports the process's resident memory");
+        assert!(bytes > 0, "{bytes} bytes");
+    }
+
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     fn installed_memory_is_known() {

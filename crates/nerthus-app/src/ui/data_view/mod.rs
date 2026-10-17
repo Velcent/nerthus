@@ -155,16 +155,20 @@ fn tab_strip(ui: &mut Ui, strip: Rect, state: &mut DataViewState) {
     let line_y = top + BORDER / 2.0;
     let line_stroke = Stroke::new(BORDER, BORDER_COLOR);
     let mut x = strip.left();
+    let selected_tab = state.tab;
     let mut selected_outline = None;
+    let mut selected_hit_target = None;
     for (index, (tab, name)) in TABS.iter().enumerate() {
         let first = index == 0;
-        let selected = state.tab == *tab;
+        let selected = selected_tab == *tab;
         let text_color = if selected { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
         let galley = ui.painter().layout_no_wrap(name.to_string(), theme::interface(12.0), text_color);
         let width = tab_width(ui, name);
         let tab_rect = Rect::from_min_size(Pos2::new(x, top), Vec2::new(width, TAB_HEIGHT));
-        let response = ui.interact(tab_rect, ui.id().with(("data-view-tab", index)), Sense::click());
-        if response.clicked() {
+        let tab_id = ui.id().with(("data-view-tab", index));
+        if selected {
+            selected_hit_target = Some((tab_rect, tab_id));
+        } else if ui.interact(tab_rect, tab_id, Sense::click()).clicked() {
             state.tab = *tab;
         }
         if selected {
@@ -179,7 +183,14 @@ fn tab_strip(ui: &mut Ui, strip: Rect, state: &mut DataViewState) {
         ui.painter().galley(text_position, galley, text_color);
         x = tab_rect.right() - TAB_OVERLAP;
     }
-    // The chosen tab sits over its neighbours (`ZIndex 999`).
+    // The chosen tab sits over its neighbours (`ZIndex 999`) for clicks
+    // as well as drawing. egui gives overlapping widgets registered last
+    // priority, so defer the selected tab's interaction too.
+    if let Some((tab_rect, tab_id)) = selected_hit_target {
+        if ui.interact(tab_rect, tab_id, Sense::click()).clicked() {
+            state.tab = selected_tab;
+        }
+    }
     if let Some(points) = selected_outline {
         ui.painter().add(Shape::line(points, line_stroke));
     }
@@ -287,4 +298,70 @@ fn subtle_button(ui: &mut Ui, text: &str) -> egui::Response {
     let position = rect.center() - galley.size() / 2.0;
     ui.painter().galley(position, galley, theme::LABEL_DEFAULT);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab_frame(context: &egui::Context, strip: Rect, state: &mut DataViewState, events: Vec<egui::Event>) {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let output = context.run_ui(input, |ui| tab_strip(ui, strip, state));
+        output.drop_without_applying_deltas();
+    }
+
+    fn click_tab(context: &egui::Context, strip: Rect, state: &mut DataViewState, position: Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        tab_frame(context, strip, state, vec![egui::Event::PointerMoved(position)]);
+        tab_frame(context, strip, state, vec![button(true)]);
+        tab_frame(context, strip, state, vec![button(false)]);
+    }
+
+    #[test]
+    fn selected_tabs_keep_clicks_in_their_overlap() {
+        for scale in [1.0, 1.2, 1.75] {
+            let context = egui::Context::default();
+            context.set_pixels_per_point(scale);
+            theme::apply(&context);
+            let strip = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(400.0, TABS_HEIGHT));
+            let mut state = DataViewState::default();
+
+            for (index, (tab, _)) in TABS.iter().enumerate() {
+                state.tab = *tab;
+                let left = strip.left() + index as f32 * (TAB_MIN_WIDTH - TAB_OVERLAP);
+                // At label height, Terrain's drawn right edge is 60.5
+                // points from its left; the next tab starts at 55.
+                for offset in [1.0, 56.0, 58.0, 60.0] {
+                    let position = Pos2::new(left + offset, strip.center().y);
+                    click_tab(&context, strip, &mut state, position);
+                    assert_eq!(state.tab, *tab, "scale {scale}, offset {offset}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_tab_can_be_selected_after_an_overlapping_click() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let strip = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(400.0, TABS_HEIGHT));
+        let mut state = DataViewState::default();
+
+        let overlap = Pos2::new(strip.left() + 58.0, strip.center().y);
+        click_tab(&context, strip, &mut state, overlap);
+        assert_eq!(state.tab, DataTab::Terrain);
+
+        for index in [1, 2, 3, 0] {
+            let center_x = strip.left() + index as f32 * (TAB_MIN_WIDTH - TAB_OVERLAP) + TAB_MIN_WIDTH / 2.0;
+            let position = Pos2::new(center_x, strip.center().y);
+            click_tab(&context, strip, &mut state, position);
+            assert_eq!(state.tab, TABS[index].0);
+        }
+    }
 }

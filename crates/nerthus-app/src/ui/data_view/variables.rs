@@ -4,6 +4,8 @@
 //! mode, one row per variable (`UnboundVariableEditor`) that its grip
 //! drags to another place in the order.
 
+use std::collections::HashSet;
+
 use egui::{Color32, CursorIcon, Key, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
 use nerthus_engine::automation::{VarType, Variable, VariableValue};
 use serde_json::{json, Value};
@@ -70,7 +72,25 @@ pub struct VariablesState {
     design_time: bool,
     /// Delete all variables waits for Yes.
     confirm_delete_all: bool,
+    /// Expanders start open for each document, including a reopened file.
+    collapsed_groups: HashSet<VariableGroup>,
     reorder: Reorder,
+}
+
+/// Identifies groups independently of their order and displayed node names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum VariableGroup {
+    Variables,
+    Decoration(String),
+    Node(i32),
+    Others,
+    Unbound,
+}
+
+struct VariableSection<'a> {
+    group: VariableGroup,
+    title: &'a str,
+    members: Vec<&'a (String, Variable)>,
 }
 
 /// Edit mode's rows dragged by their grips to new places
@@ -264,9 +284,9 @@ fn variables_page(ui: &mut Ui, editor: &mut Editor, state: &mut VariablesState, 
         return;
     }
     if editor.document.group_variables_by_nodes() {
-        grouped_editors(ui, editor, &variables, commands);
+        grouped_editors(ui, editor, state, &variables, commands);
     } else {
-        ungrouped_editors(ui, editor, &variables, commands);
+        ungrouped_editors(ui, editor, state, &variables, commands);
     }
 }
 
@@ -360,36 +380,39 @@ fn order_of(variable: &Variable) -> i64 {
 
 /// `GenerateUngroupedControls`: in order, under "Variables" until a group
 /// decoration starts another expander; separator decorations rule a line.
-fn ungrouped_editors(ui: &mut Ui, editor: &mut Editor, variables: &[(String, Variable)], commands: &mut Vec<Command>) {
+fn ungrouped_editors(ui: &mut Ui, editor: &mut Editor, state: &mut VariablesState, variables: &[(String, Variable)], commands: &mut Vec<Command>) {
     let mut palette = Palette { flip: 0, count: 0 };
-    let mut sections: Vec<(String, Vec<&(String, Variable)>)> = Vec::new();
+    let mut sections: Vec<VariableSection<'_>> = Vec::new();
     for entry in variables {
         let variable = &entry.1;
         if variable.var_type == VarType::Decoration {
             let value = variable.value.to_text();
             if value == "StartGroup" {
-                sections.push((variable.name.clone(), Vec::new()));
+                let section = VariableSection {
+                    group: VariableGroup::Decoration(entry.0.clone()),
+                    title: &variable.name,
+                    members: Vec::new(),
+                };
+                sections.push(section);
                 continue;
             }
-            if sections.is_empty() {
-                sections.push(("Variables".to_string(), Vec::new()));
-            }
-            if let Some((_, members)) = sections.last_mut() {
-                members.push(entry);
-            }
-            continue;
         }
         if sections.is_empty() {
-            sections.push(("Variables".to_string(), Vec::new()));
+            let section = VariableSection {
+                group: VariableGroup::Variables,
+                title: "Variables",
+                members: Vec::new(),
+            };
+            sections.push(section);
         }
-        if let Some((_, members)) = sections.last_mut() {
-            members.push(entry);
+        if let Some(section) = sections.last_mut() {
+            section.members.push(entry);
         }
     }
-    for (index, (title, members)) in sections.iter().enumerate() {
+    for section in sections {
         palette.flip = (palette.flip + 1) % 3;
-        variable_expander(ui, ("variables", index), title, |ui| {
-            for (key, variable) in members {
+        variable_expander(ui, state, section.group, section.title, |ui| {
+            for (key, variable) in section.members {
                 if variable.var_type == VarType::Decoration {
                     rule(ui);
                     continue;
@@ -404,7 +427,7 @@ fn ungrouped_editors(ui: &mut Ui, editor: &mut Editor, variables: &[(String, Var
 /// `GenerateGroupedControls`: variables bound to one node under that
 /// node's name (by the node's position), then "Others" bound to several,
 /// then "Unbound".
-fn grouped_editors(ui: &mut Ui, editor: &mut Editor, variables: &[(String, Variable)], commands: &mut Vec<Command>) {
+fn grouped_editors(ui: &mut Ui, editor: &mut Editor, state: &mut VariablesState, variables: &[(String, Variable)], commands: &mut Vec<Command>) {
     let bindings = editor.document.automation().bindings.clone();
     let bound_nodes = |key: &str| -> Vec<i32> { bindings.iter().filter(|binding| binding.variable == key).map(|binding| binding.node).collect() };
     let mut single: Vec<(i32, f32, &(String, Variable))> = Vec::new();
@@ -424,7 +447,6 @@ fn grouped_editors(ui: &mut Ui, editor: &mut Editor, variables: &[(String, Varia
     single.sort_by(|left, right| left.1.total_cmp(&right.1));
 
     let mut palette = Palette { flip: 0, count: 0 };
-    let mut index = 0;
     let mut position = 0;
     while position < single.len() {
         let node = single[position].0;
@@ -432,27 +454,25 @@ fn grouped_editors(ui: &mut Ui, editor: &mut Editor, variables: &[(String, Varia
         let end = single[position..].iter().position(|(other, ..)| *other != node).map_or(single.len(), |offset| position + offset);
         let members: Vec<&(String, Variable)> = single[position..end].iter().map(|(_, _, entry)| *entry).collect();
         palette.flip = (palette.flip + 1) % 3;
-        variable_expander(ui, ("grouped", index), &name, |ui| {
+        variable_expander(ui, state, VariableGroup::Node(node), &name, |ui| {
             for (key, variable) in &members {
                 let color = palette.next_color();
                 variable_editor(ui, editor, key, variable, color, commands);
             }
         });
-        index += 1;
         position = end;
     }
-    for (title, members) in [("Others", several), ("Unbound", unbound)] {
+    for (group, title, members) in [(VariableGroup::Others, "Others", several), (VariableGroup::Unbound, "Unbound", unbound)] {
         if members.is_empty() {
             continue;
         }
         palette.flip = (palette.flip + 1) % 3;
-        variable_expander(ui, ("grouped", index), title, |ui| {
+        variable_expander(ui, state, group, title, |ui| {
             for (key, variable) in &members {
                 let color = palette.next_color();
                 variable_editor(ui, editor, key, variable, color, commands);
             }
         });
-        index += 1;
     }
 }
 
@@ -460,9 +480,8 @@ fn grouped_editors(ui: &mut Ui, editor: &mut Editor, variables: &[(String, Varia
 /// margin 8, 2: the chevron in `Expander-Header`, `Accent-Gray` under the
 /// pointer, the title semibold), open from the start; the editors in a
 /// stack with margin 0, 0, 4, 16.
-fn variable_expander(ui: &mut Ui, key: (&str, usize), title: &str, contents: impl FnOnce(&mut Ui)) {
-    let id = ui.id().with(("variable-expander", key));
-    let open: bool = ui.data(|data| data.get_temp(id)).unwrap_or(true);
+fn variable_expander(ui: &mut Ui, state: &mut VariablesState, group: VariableGroup, title: &str, contents: impl FnOnce(&mut Ui)) {
+    let open = !state.collapsed_groups.contains(&group);
     let galley = ui.painter().layout_no_wrap(title.to_string(), theme::semibold(12.0), theme::LABEL_DEFAULT);
     let height = galley.size().y.max(16.0) + 4.0;
     let width = ui.available_width();
@@ -474,7 +493,11 @@ fn variable_expander(ui: &mut Ui, key: (&str, usize), title: &str, contents: imp
     let title_position = Pos2::new(chevron_rect.right() + 4.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(title_position, galley, theme::LABEL_DEFAULT);
     if response.clicked() {
-        ui.data_mut(|data| data.insert_temp(id, !open));
+        if open {
+            state.collapsed_groups.insert(group);
+        } else {
+            state.collapsed_groups.remove(&group);
+        }
     }
     if !open {
         return;
@@ -870,6 +893,66 @@ fn confirm_delete_all(ui: &mut Ui, editor: &mut Editor, state: &mut VariablesSta
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::ui::data_view::DataViewState;
+
+    /// Draws identically named groups and records their open contents and headers.
+    fn expander_frame(context: &egui::Context, state: &mut VariablesState, groups: &[VariableGroup], events: Vec<egui::Event>) -> (Vec<bool>, Vec<Pos2>) {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 600.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut expanded = vec![false; groups.len()];
+        let mut headers = Vec::new();
+        let output = context.run_ui(input, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            for (index, group) in groups.iter().enumerate() {
+                headers.push(ui.cursor().min + Vec2::new(12.0, 8.0));
+                variable_expander(ui, state, group.clone(), "Same name", |ui| {
+                    expanded[index] = true;
+                    ui.allocate_space(Vec2::splat(10.0));
+                });
+            }
+        });
+        output.drop_without_applying_deltas();
+        (expanded, headers)
+    }
+
+    #[test]
+    fn a_document_reset_reopens_variable_groups_without_sharing_collapse_state() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut state = DataViewState::default();
+        let mut groups = vec![
+            VariableGroup::Decoration("first".to_string()),
+            VariableGroup::Decoration("second".to_string()),
+            VariableGroup::Node(1),
+            VariableGroup::Node(2),
+            VariableGroup::Others,
+            VariableGroup::Unbound,
+            VariableGroup::Variables,
+        ];
+        // Opening another document and reopening the same one both reset the
+        // panel while retaining egui's context and the same group identities.
+        for _ in 0..2 {
+            let (expanded, headers) = expander_frame(&context, &mut state.variables, &groups, Vec::new());
+            assert!(expanded.iter().all(|open| *open));
+            let at = headers[0];
+            let press = vec![moved_to(at.x, at.y), left_button(at.x, at.y, true)];
+            expander_frame(&context, &mut state.variables, &groups, press);
+            let release = vec![left_button(at.x, at.y, false)];
+            expander_frame(&context, &mut state.variables, &groups, release);
+
+            let (expanded, _) = expander_frame(&context, &mut state.variables, &groups, Vec::new());
+            assert!(!expanded[0]);
+            assert!(expanded[1..].iter().all(|open| *open));
+
+            groups.reverse();
+            let (expanded, _) = expander_frame(&context, &mut state.variables, &groups, Vec::new());
+            assert!(!expanded[groups.len() - 1]);
+            assert!(expanded[..groups.len() - 1].iter().all(|open| *open));
+            state.reset();
+        }
+        let (expanded, _) = expander_frame(&context, &mut state.variables, &groups, Vec::new());
+        assert!(expanded.iter().all(|open| *open));
+    }
 
     #[test]
     fn delete_all_confirmation_defaults_to_yes_and_tab_selects_no() {
