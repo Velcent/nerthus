@@ -634,7 +634,8 @@ fn parameters(ui: &mut Ui, editor: &mut Editor, node_id: i32, area_width: f32, c
         return;
     }
     let asset = &editor.document.project.assets[0];
-    let rules = node_ui(node, &asset.terrain.nodes, &asset.automation);
+    let mut rules = node_ui(node, &asset.terrain.nodes, &asset.automation);
+    crate::node_ui::update_file_summaries(editor, node, &mut rules);
     let values = node.values.clone();
     let (groups, last_color_flip) = parameter_groups(spec);
     // What terrain-mark sliders mark: the node's own output as last built.
@@ -699,7 +700,7 @@ fn parameters(ui: &mut Ui, editor: &mut Editor, node_id: i32, area_width: f32, c
                     edits.push((parameter.name.clone(), row.inner));
                     continue;
                 }
-                let custom_row = ui.scope(|ui| custom_editor(ui, id, parameter, &value, node, &asset.terrain.nodes));
+                let custom_row = ui.scope(|ui| custom_editor(ui, id, parameter, &value, node, &asset.terrain.nodes, &editor.watched_outputs, editor.document_serial));
                 if let Some(custom) = custom_row.inner {
                     if let Some(help) = &parameter.description {
                         custom_row.response.tooltip(help);
@@ -754,6 +755,11 @@ fn parameters(ui: &mut Ui, editor: &mut Editor, node_id: i32, area_width: f32, c
             Edit::Set(value) => {
                 editor.document.set_value(node_id, &name, value);
                 editor.parameter_changed(node_id);
+            }
+            Edit::SetValues { values, label } => {
+                if editor.document.set_values(node_id, &values, label) {
+                    editor.parameter_changed(node_id);
+                }
             }
             Edit::Reset => {
                 // `EditorMenu.ResetProperty`: the type's default value.
@@ -952,8 +958,14 @@ fn editor_row(ui: &mut Ui, enabled: bool, help: Option<&str>, bind_type: BindTyp
 /// Parameters with a `[CustomEditor]`: the SatelliteMap library list, the curve
 /// editor and Mixer's layers; `None` for the rest. Edits name the
 /// property they change.
-fn custom_editor(ui: &mut Ui, id: egui::Id, parameter: &ParameterSpec, value: &Value, node: &nerthus_engine::NodeData, nodes: &indexmap::IndexMap<i32, nerthus_engine::NodeData>) -> Option<Vec<(String, Edit)>> {
+#[allow(clippy::too_many_arguments)]
+fn custom_editor(ui: &mut Ui, id: egui::Id, parameter: &ParameterSpec, value: &Value, node: &nerthus_engine::NodeData, nodes: &indexmap::IndexMap<i32, nerthus_engine::NodeData>, watched: &std::collections::HashMap<i32, crate::worker::WatchedNode>, document_serial: u64) -> Option<Vec<(String, Edit)>> {
     let name = parameter.name.clone();
+    if parameter.kind == "GradientEditor" {
+        crate::ui::gradient_editor::track_property(ui.ctx(), id, document_serial, node.id, &name);
+        let edit = crate::ui::gradient_editor::gradient_editor(ui, id, value);
+        return Some(vec![(name, edit)]);
+    }
     // `Dictionary<string, Variable>` (Macro) gets the variable editors.
     let editor = if parameter.value_type == nerthus_engine::ValueType::Dictionary { Some("VariableEditorControl") } else { parameter.editor.as_deref() };
     match editor? {
@@ -964,7 +976,7 @@ fn custom_editor(ui: &mut Ui, id: egui::Id, parameter: &ParameterSpec, value: &V
             let edit = chosen.map_or(Edit::None, |index| Edit::Set(Value::from(index)));
             Some(vec![(name, edit)])
         }
-        "LayerEditorPanel" => Some(crate::ui::mixer_layers::show(ui, id, node, nodes, &node.values)),
+        "LayerEditorPanel" => Some(crate::ui::mixer_layers::show(ui, id, node, nodes, &node.values, watched)),
         "VariableEditorControl" => {
             let changed = editors::macro_variables(ui, id, value, theme::ACCENT_PRIMARY);
             let edit = changed.map_or(Edit::None, Edit::Set);
@@ -1317,6 +1329,7 @@ fn modifier_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, node_id: i32, comm
     let add_rect = Rect::from_min_size(groups[0].min + Vec2::splat(1.0 + GROUP_PADDING), Vec2::new(ADD_BUTTON_WIDTH, MODIFIER_BUTTON));
     let mut add_ui = ui.new_child(UiBuilder::new().max_rect(add_rect));
     let add_tint = if modifiers.is_empty() { None } else { Some(theme::ACCENT_TEAL) };
+    let is_color = crate::ui::graph_commands::is_color(editor, node_id);
     let add_response = icon_menu_sized(&mut add_ui, "square-rounded-plus-2", "Add Modifiers", add_tint, add_rect.size(), |ui| {
         let groups: [&[(&str, &str, &'static str)]; 6] = [
             &[("x-influence", "Influence", "Influence"), ("x-difference", "Difference", "Difference")],
@@ -1334,7 +1347,10 @@ fn modifier_toolbar(ui: &mut Ui, rect: Rect, editor: &Editor, node_id: i32, comm
                 let checked = present.contains(&type_name);
                 let shown_icon = if checked { Some("check") } else if icon.is_empty() { None } else { Some(icon) };
                 let accent = if checked { theme::ACCENT_TEAL } else { theme::ACCENT_MUTED_GRAY };
-                if menu_item(ui, shown_icon, Some(accent), text, "").clicked() {
+                // `PropertyArea.UpdateModifiers`: these four require a
+                // heightfield, including when a saved modifier is checked.
+                let enabled = !is_color || !matches!(type_name, "Clip" | "MatchHeight" | "Height" | "Slope");
+                if menu_item_enabled(ui, shown_icon, Some(accent), text, "", enabled).clicked() {
                     commands.push(Command::ToggleModifier(type_name));
                 }
             }
@@ -1397,6 +1413,82 @@ mod tests {
     use crate::ui::UiState;
     use bevy::prelude::Window;
     use serde_json::json;
+
+    fn modifier_menu_frame(context: &egui::Context, editor: &Editor, node: i32, events: Vec<egui::Event>) -> (Vec<Command>, Vec<egui::epaint::ClippedShape>) {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 800.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let toolbar = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(700.0, 100.0));
+        let mut commands = Vec::new();
+        let mut actions = Vec::new();
+        let output = context.run_ui(input, |ui| {
+            modifier_toolbar(ui, toolbar, editor, node, &mut commands, &mut actions);
+        });
+        let shapes = output.shapes.clone();
+        output.drop_without_applying_deltas();
+        (commands, shapes)
+    }
+
+    /// Opens the actual toolbar menu and clicks the entry's painted text.
+    fn click_modifier_entry(editor: &Editor, node: i32, entry: &str) -> Vec<Command> {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        modifier_menu_frame(&context, editor, node, Vec::new());
+        let toolbar = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(700.0, 100.0));
+        let sizes = theme::sizes(&context);
+        let stack = stack_layout(toolbar, sizes.toolbar_button, sizes.toolbar_menu_margin);
+        let add_origin = stack.groups[0].min + Vec2::splat(1.0 + GROUP_PADDING);
+        let add_center = add_origin + Vec2::new(ADD_BUTTON_WIDTH, MODIFIER_BUTTON) / 2.0;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        modifier_menu_frame(&context, editor, node, vec![egui::Event::PointerMoved(add_center)]);
+        modifier_menu_frame(&context, editor, node, vec![button(add_center, true)]);
+        modifier_menu_frame(&context, editor, node, vec![button(add_center, false)]);
+        let (_, shapes) = modifier_menu_frame(&context, editor, node, Vec::new());
+        let entries = texts(&shapes);
+        let (_, rect) = entries.iter().find(|(text, _)| text == entry).expect("modifier entry is visible");
+        let position = rect.center();
+        modifier_menu_frame(&context, editor, node, vec![egui::Event::PointerMoved(position)]);
+        modifier_menu_frame(&context, editor, node, vec![button(position, true)]);
+        modifier_menu_frame(&context, editor, node, vec![button(position, false)]).0
+    }
+
+    #[test]
+    fn colour_nodes_disable_the_four_heightfield_modifier_entries() {
+        for node_type in ["CLUTer", "Combine"] {
+            let mut document = Document::new();
+            let node = document.add_node(node_type, [26000.0, 26000.0]).unwrap();
+            // Checked modifiers are disabled too, as Gaea leaves them.
+            document.toggle_modifier(node, "Clip");
+            let mut editor = Editor::new(document);
+            if node_type == "Combine" {
+                let mut cache = crate::worker::NodeCache::default();
+                cache.port_intents.insert("Out".to_string(), nerthus_engine::RenderIntent::Color);
+                editor.node_caches.insert(node, cache);
+            }
+            for entry in ["Clip", "Match Height", "Mask by Height", "Mask by Slope"] {
+                let commands = click_modifier_entry(&editor, node, entry);
+                assert!(commands.is_empty(), "{node_type}: {entry} must be disabled");
+            }
+            let commands = click_modifier_entry(&editor, node, "Blur");
+            assert!(matches!(commands.as_slice(), [Command::ToggleModifier("Blur")]));
+        }
+    }
+
+    #[test]
+    fn heightfield_nodes_keep_the_four_modifier_entries_enabled() {
+        let mut document = Document::new();
+        let node = document.add_node("Perlin", [26000.0, 26000.0]).unwrap();
+        let editor = Editor::new(document);
+        let entries = [("Clip", "Clip"), ("Match Height", "MatchHeight"), ("Mask by Height", "Height"), ("Mask by Slope", "Slope")];
+        for (entry, expected) in entries {
+            let commands = click_modifier_entry(&editor, node, entry);
+            assert!(matches!(commands.as_slice(), [Command::ToggleModifier(name)] if *name == expected), "{entry} must stay enabled");
+        }
+    }
 
     #[test]
     fn a_modifier_close_button_asks_unless_shift_is_held() {

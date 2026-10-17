@@ -3,14 +3,17 @@
 //! room, the ground layer last, and the chosen layer's `LayerEditor`: mask
 //! source, its ranges and falloffs, warp, and how the layer blends.
 //!
-//! Layer previews show the layer's colour; thumbnails of the connected
-//! maps and drag-to-reorder are not here yet.
+//! Connected maps supply the layer and ground thumbnails. Layers can be
+//! dragged to new places without changing their input or mask ports.
 
-use egui::{Color32, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use egui::{Color32, CursorIcon, Id, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, TextureHandle, Ui, Vec2};
 use indexmap::IndexMap;
 use nerthus_engine::humanize::humanize_title;
 use nerthus_engine::json::f32_value;
-use nerthus_engine::NodeData;
+use nerthus_engine::{Map, NodeData, Resolution};
 use nerthus_nodes::random::XorShift64Star;
 use serde_json::{json, Value};
 
@@ -20,6 +23,7 @@ use crate::ui::colour_button::colour_button;
 use crate::ui::colour_picker::{linear_to_srgb, srgb_to_linear};
 use crate::ui::editors::{dropdown_box, option_list, range_slider, slider, Edit, RangeSpec, SliderSpec};
 use crate::ui::graph_canvas::elided_galley;
+use crate::worker::WatchedNode;
 
 /// `MaskSource` as the source list names it.
 const SOURCES: [(&str, &str); 5] = [("Constant", "None"), ("Height", "Height"), ("Slope", "Slope"), ("Both", "Mixed"), ("Custom", "Custom")];
@@ -42,6 +46,23 @@ struct Layer {
     key: String,
     value: Value,
     order: i64,
+}
+
+/// Gong's default Windows drag distance. Buttons inside a row keep their
+/// own pointer interactions, so only its remaining surface can drag.
+const DRAG_DISTANCE: f32 = 4.0;
+const THUMBNAIL_SIZE: usize = 64;
+
+#[derive(Clone, Default)]
+struct LayerDrag {
+    press: Option<(String, Pos2)>,
+    dragged: Option<String>,
+}
+
+#[derive(Clone)]
+struct LayerThumbnail {
+    map: Arc<Map>,
+    texture: TextureHandle,
 }
 
 fn float(value: &Value, name: &str, fallback: f64) -> f64 {
@@ -109,6 +130,51 @@ fn source_name(node: &NodeData, nodes: &IndexMap<i32, NodeData>, port: &str, fal
     source.map(|source| source.name.clone()).unwrap_or_else(|| fallback.to_string())
 }
 
+/// The map at this exact connection, including secondary source outputs.
+fn input_map(node: &NodeData, watched: &HashMap<i32, WatchedNode>, port: &str) -> Option<Arc<Map>> {
+    let record = node.port(port)?.record.as_ref()?;
+    let source = watched.get(&record.from)?;
+    source.outputs.iter().find(|(name, _)| *name == record.from_port).map(|(_, map)| map.clone())
+}
+
+/// `ToWriteableBitmap(64)`: RGB maps only, resized as Gaea's thumbnails
+/// are; changing a built map replaces the texture once.
+fn thumbnail(ui: &Ui, id: Id, map: Option<Arc<Map>>) -> Option<TextureHandle> {
+    let Some(map) = map.filter(|map| map.channel_count() >= 3 && map.width() > 0 && map.height() > 0) else {
+        ui.data_mut(|data| data.remove::<LayerThumbnail>(id));
+        return None;
+    };
+    let cached: Option<LayerThumbnail> = ui.data(|data| data.get_temp(id));
+    if let Some(cached) = cached
+        && Arc::ptr_eq(&cached.map, &map)
+    {
+        return Some(cached.texture);
+    }
+    let resolution = Resolution::square(THUMBNAIL_SIZE);
+    let scaled = nerthus_nodes::transformer::resize(&map, resolution);
+    let channels = [scaled.channel(0), scaled.channel(1), scaled.channel(2)];
+    let mut pixels = Vec::with_capacity(resolution.area());
+    for index in 0..resolution.area() {
+        let [red, green, blue] = channels.map(|channel| (channel[index].clamp(0.0, 1.0) * 255.0) as u8);
+        pixels.push(Color32::from_rgb(red, green, blue));
+    }
+    let image = egui::ColorImage::new([THUMBNAIL_SIZE, THUMBNAIL_SIZE], pixels);
+    let texture = ui.ctx().load_texture(format!("mixer-thumbnail-{id:?}"), image, egui::TextureOptions::LINEAR);
+    let cached = LayerThumbnail { map, texture: texture.clone() };
+    ui.data_mut(|data| data.insert_temp(id, cached));
+    Some(texture)
+}
+
+fn paint_preview(ui: &Ui, rect: Rect, texture: Option<&TextureHandle>, fallback: Color32) {
+    if let Some(texture) = texture {
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
+    } else {
+        ui.painter().rect_filled(rect, 0.0, fallback);
+    }
+    ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0, theme::ACCENT_MUTED_GRAY), StrokeKind::Inside);
+}
+
 /// `LayerListItem`'s height: the 32 preview, padding 4 and the border.
 const LAYER_ROW_HEIGHT: f32 = 32.0 + 8.0 + 2.0;
 
@@ -162,11 +228,13 @@ fn list_item(ui: &mut Ui, height: f32, first: bool, last: bool, selected: bool, 
 }
 
 /// Draws the panel; edits come back as (property, edit).
-pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData>, values: &IndexMap<String, Value>) -> Vec<(String, Edit)> {
+pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData>, values: &IndexMap<String, Value>, watched: &HashMap<i32, WatchedNode>) -> Vec<(String, Edit)> {
     let mut edits = Vec::new();
     let list = layers(values, node);
     let palette = layer_palette(node.id);
     let selected_id = id.with("selected-layer");
+    let drag_id = id.with("layer-drag");
+    let mut drag: LayerDrag = ui.data(|data| data.get_temp(drag_id)).unwrap_or_default();
     let mut selected: Option<String> = ui.data(|data| data.get_temp(selected_id));
     if selected.as_ref().is_none_or(|key| !list.iter().any(|layer| &layer.key == key)) {
         selected = list.first().map(|layer| layer.key.clone());
@@ -175,6 +243,7 @@ pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData
     // `ModifierListBox`: a stack 4 in.
     let mut frame = egui::Frame::new();
     frame.inner_margin = egui::Margin::same(4);
+    let mut rows = Vec::with_capacity(list.len());
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -203,12 +272,24 @@ pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData
             row_index += 1;
             let is_selected = selected.as_deref() == Some(layer.key.as_str());
             let color = own_color(&layer.value).unwrap_or(list_fallback);
-            if let Some(edit) = layer_row(ui, id, layer, label, color, first, last, is_selected, &mut selected) {
+            let map = input_map(node, watched, &layer.key);
+            let preview = thumbnail(ui, id.with(("thumbnail", &layer.key)), map);
+            let (row, edit) = layer_row(ui, id, layer, label, color, preview.as_ref(), first, last, is_selected, &mut selected, &mut drag);
+            rows.push(row);
+            if let Some(edit) = edit {
                 edits.push((layer.key.clone(), edit));
             }
         }
-        ground_layer(ui, node, nodes, row_index == 0);
+        let map = input_map(node, watched, "In");
+        let preview = thumbnail(ui, id.with("ground-thumbnail"), map);
+        ground_layer(ui, node, nodes, preview.as_ref(), row_index == 0);
     });
+
+    if let Some((from, to)) = drag_and_drop(ui, id, &mut drag, &list, &rows) {
+        let values = reordered_values(&list, from, to);
+        edits.push((String::new(), Edit::SetValues { values, label: "layers rearranged" }));
+    }
+    ui.data_mut(|data| data.insert_temp(drag_id, drag));
 
     if let Some(key) = selected.clone()
         && let Some(layer) = list.iter().find(|layer| layer.key == key) {
@@ -219,7 +300,11 @@ pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData
                 edits.push((key, Edit::Set(changed)));
             }
         }
-    ui.data_mut(|data| data.insert_temp(selected_id, selected));
+    if let Some(key) = &selected {
+        ui.data_mut(|data| data.insert_temp(selected_id, key.clone()));
+    } else {
+        ui.data_mut(|data| data.remove::<String>(selected_id));
+    }
     edits
 }
 
@@ -227,10 +312,21 @@ pub fn show(ui: &mut Ui, id: Id, node: &NodeData, nodes: &IndexMap<i32, NodeData
 /// in the layer's colour, the layer's name, the simplify eye and the
 /// colour swatch (18 wide).
 #[allow(clippy::too_many_arguments)]
-fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, first: bool, last: bool, is_selected: bool, selected: &mut Option<String>) -> Option<Edit> {
-    let (row, response) = list_item(ui, LAYER_ROW_HEIGHT, first, last, is_selected, Sense::click());
+fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, preview: Option<&TextureHandle>, first: bool, last: bool, is_selected: bool, selected: &mut Option<String>, drag: &mut LayerDrag) -> (Rect, Option<Edit>) {
+    let (row, response) = list_item(ui, LAYER_ROW_HEIGHT, first, last, is_selected, Sense::click_and_drag());
     let layout = LayerRowLayout::of(row);
     let mut edit = None;
+    if response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_pressed()) {
+        let origin = ui.input(|input| input.pointer.press_origin());
+        let on_control = |position| layout.eye.expand(8.0).contains(position) || layout.simplify.expand(8.0).contains(position) || layout.swatch.contains(position);
+        drag.press = origin.filter(|position| !on_control(*position)).map(|origin| (layer.key.clone(), origin));
+        if drag.press.is_some() {
+            *selected = Some(layer.key.clone());
+        }
+    }
+    let grip = Rect::from_min_size(Pos2::new(row.left() + 2.0, row.center().y - 7.0), Vec2::splat(14.0));
+    let grip_opacity = if response.hovered() { 1.0 } else { 0.25 };
+    icons::paint(ui, grip, "grip-vertical", theme::ICON_DEFAULT.gamma_multiply(grip_opacity));
 
     let visible = layer.value.get("IsVisible").and_then(Value::as_bool).unwrap_or(true);
     let eye = ui.interact(layout.eye.expand(8.0), id.with(("eye", &layer.key)), Sense::click());
@@ -241,9 +337,10 @@ fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, fi
         changed["IsVisible"] = json!(!visible);
         edit = Some(Edit::Set(changed));
     }
-    // The preview (32, `Accent-Muted-Gray` border): the layer's colour.
-    ui.painter().rect_filled(layout.preview, 0.0, color);
-    ui.painter().rect_stroke(layout.preview, 0.0, Stroke::new(1.0, theme::ACCENT_MUTED_GRAY), StrokeKind::Inside);
+    // The input map when built; an unconnected layer shows its actual
+    // colour, including black, rather than the label's fallback accent.
+    let fill = own_color(&layer.value).unwrap_or(Color32::BLACK);
+    paint_preview(ui, layout.preview, preview, fill);
 
     // `color`: a `ColorPicker` opening the `MinimalColorPicker`; the colour
     // picked is the layer's (`ToColor`).
@@ -286,18 +383,17 @@ fn layer_row(ui: &mut Ui, id: Id, layer: &Layer, label: &str, color: Color32, fi
     if response.clicked() {
         *selected = Some(layer.key.clone());
     }
-    edit
+    (row, edit)
 }
 
 /// The ground layer (disabled): the In map's 48 preview and "(Ground
 /// Layer)" with its note, a line each, cut off at the row's padding
 /// (laid out in a sideways `StackPanel`, they never wrap).
-fn ground_layer(ui: &mut Ui, node: &NodeData, nodes: &IndexMap<i32, NodeData>, first: bool) {
+fn ground_layer(ui: &mut Ui, node: &NodeData, nodes: &IndexMap<i32, NodeData>, texture: Option<&TextureHandle>, first: bool) {
     let (row, _) = list_item(ui, 48.0 + 16.0 + 8.0, first, true, false, Sense::hover());
     let content = row.shrink2(Vec2::new(16.0, 4.0));
     let preview = Rect::from_min_size(Pos2::new(content.left(), content.top() + 8.0), Vec2::splat(48.0));
-    ui.painter().rect_filled(preview, 0.0, theme::PANEL_BACKGROUND);
-    ui.painter().rect_stroke(preview, 0.0, Stroke::new(1.0, theme::ACCENT_MUTED_GRAY), StrokeKind::Inside);
+    paint_preview(ui, preview, texture, theme::PANEL_BACKGROUND);
     let source = source_name(node, nodes, "In", "");
     let title = ui.painter().layout_no_wrap(format!("{source} (Ground Layer)"), theme::semibold(12.0), theme::LABEL_DEFAULT);
     let note = ui.painter().layout_no_wrap("Each layer is added above this, bottom to top.".to_string(), theme::interface(10.0), theme::ICON_DEFAULT);
@@ -307,6 +403,76 @@ fn ground_layer(ui: &mut Ui, node: &NodeData, nodes: &IndexMap<i32, NodeData>, f
     let painter = ui.painter_at(content);
     painter.galley(Pos2::new(text_left, text_top), title, theme::LABEL_DEFAULT);
     painter.galley(Pos2::new(text_left, note_top), note, theme::ICON_DEFAULT);
+}
+
+/// `LayerEditorPanel.Drop`: move the row to the target's place, then
+/// number every layer from the top down. Index and input/mask connections
+/// belong to the layer and stay where they are.
+fn reordered_values(list: &[Layer], from: usize, to: usize) -> Vec<(String, Value)> {
+    let mut ordered: Vec<&Layer> = list.iter().collect();
+    let moved = ordered.remove(from);
+    ordered.insert(to, moved);
+    let count = ordered.len();
+    let mut values = Vec::with_capacity(count);
+    for (place, layer) in ordered.into_iter().enumerate() {
+        let mut value = layer.value.clone();
+        value["Order"] = Value::from(count - place);
+        values.push((layer.key.clone(), value));
+    }
+    values
+}
+
+/// Only layer rows are drop targets; Add layer and the ground stay fixed.
+fn drag_and_drop(ui: &Ui, id: Id, drag: &mut LayerDrag, list: &[Layer], rows: &[Rect]) -> Option<(usize, usize)> {
+    let (pointer, down, escaped) = ui.input(|input| (input.pointer.latest_pos(), input.pointer.primary_down(), input.key_pressed(egui::Key::Escape)));
+    if escaped {
+        *drag = LayerDrag::default();
+        return None;
+    }
+    if let Some((key, origin)) = &drag.press {
+        let moved = pointer.map(|position| (position - *origin).abs());
+        let far_enough = moved.is_some_and(|distance| distance.x >= DRAG_DISTANCE || distance.y >= DRAG_DISTANCE);
+        if !down {
+            drag.press = None;
+        } else if far_enough {
+            drag.dragged = Some(key.clone());
+            drag.press = None;
+        }
+    }
+    let key = drag.dragged.as_ref()?;
+    let Some(from) = list.iter().position(|layer| &layer.key == key) else {
+        *drag = LayerDrag::default();
+        return None;
+    };
+    let target = pointer.and_then(|pointer| rows.iter().position(|row| row.contains(pointer)));
+    let cursor = if target.is_some() { CursorIcon::Grabbing } else { CursorIcon::NoDrop };
+    ui.ctx().set_cursor_icon(cursor);
+    if let Some(to) = target.filter(|to| *to != from) {
+        insertion_line(ui, id, rows[to], to > from);
+    }
+    if down {
+        ui.ctx().request_repaint();
+        return None;
+    }
+    drag.dragged = None;
+    let to = target?;
+    (from != to).then_some((from, to))
+}
+
+/// Gong's insertion adorner: grey line and triangles pointing inward.
+fn insertion_line(ui: &Ui, id: Id, row: Rect, below: bool) {
+    let color = Color32::from_gray(0x80);
+    let y = if below { row.bottom() } else { row.top() };
+    let left = Pos2::new(row.left(), y);
+    let right = Pos2::new(row.right(), y);
+    let layer = egui::LayerId::new(egui::Order::Foreground, id.with("layer-insertion"));
+    let painter = ui.ctx().layer_painter(layer);
+    painter.line_segment([left, right], Stroke::new(2.0, color));
+    for (edge, inward) in [(left, 1.0), (right, -1.0)] {
+        let points = vec![edge + Vec2::new(5.0 * inward, 0.0), edge - Vec2::new(0.0, 5.0), edge + Vec2::new(0.0, 5.0)];
+        let triangle = Shape::convex_polygon(points, color, Stroke::NONE);
+        painter.add(triangle);
+    }
 }
 
 /// `LayerEditor` (margin 16; its stack 4 wider each side) for one layer;
@@ -460,18 +626,24 @@ mod tests {
 
     /// One frame of the panel `width` across: what it drew.
     fn frame(context: &egui::Context, document: &Document, mixer: i32, width: f32) -> Vec<ClippedShape> {
+        let watched = HashMap::new();
+        panel_frame(context, document, mixer, width, Vec::new(), &watched).0
+    }
+
+    fn panel_frame(context: &egui::Context, document: &Document, mixer: i32, width: f32, events: Vec<egui::Event>, watched: &HashMap<i32, WatchedNode>) -> (Vec<ClippedShape>, Vec<(String, Edit)>) {
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1200.0));
-        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
         let node = document.node(mixer).unwrap();
         let nodes = &document.project.assets[0].terrain.nodes;
+        let mut edits = Vec::new();
         let mut output = context.run_ui(input, |ui| {
             let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(20.0, 0.0), Vec2::new(width, 1200.0))));
             panel.spacing_mut().item_spacing = Vec2::ZERO;
-            show(&mut panel, Id::new("mixer-test"), node, nodes, &node.values);
+            edits = show(&mut panel, Id::new("mixer-test"), node, nodes, &node.values, watched);
         });
         let shapes = std::mem::take(&mut output.shapes);
         output.drop_without_applying_deltas();
-        shapes
+        (shapes, edits)
     }
 
     /// The topmost text saying `text` (in the list rather than the chosen
@@ -556,6 +728,7 @@ mod tests {
         let at = swatch.center();
         let node = document.node(mixer).unwrap();
         let nodes = &document.project.assets[0].terrain.nodes;
+        let watched = HashMap::new();
         let press = |pressed: bool| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
         for events in [vec![egui::Event::PointerMoved(at)], vec![press(true)], vec![press(false)], Vec::new()] {
             let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1200.0));
@@ -563,7 +736,7 @@ mod tests {
             let output = context.run_ui(input, |ui| {
                 let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(20.0, 0.0), Vec2::new(width, 1200.0))));
                 panel.spacing_mut().item_spacing = Vec2::ZERO;
-                show(&mut panel, Id::new("mixer-test"), node, nodes, &node.values);
+                show(&mut panel, Id::new("mixer-test"), node, nodes, &node.values, &watched);
             });
             output.drop_without_applying_deltas();
         }
@@ -596,5 +769,171 @@ mod tests {
         shuffled.sort_by_key(|color| color.to_array());
         assert_eq!(original, shuffled);
         assert_ne!(palette.to_vec(), LAYER_COLORS.map(rgb).to_vec());
+    }
+
+    fn button(position: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    fn layer_rows(shapes: &[ClippedShape]) -> Vec<Rect> {
+        shapes.iter().filter_map(|clipped| match &clipped.shape {
+            Shape::Rect(shape) if shape.rect.height() == LAYER_ROW_HEIGHT && shape.fill == theme::PANEL_CLADDING => Some(shape.rect),
+            Shape::Rect(shape) if shape.rect.height() == LAYER_ROW_HEIGHT && shape.fill == SELECTED_LAYER => Some(shape.rect),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn dragging_reorders_the_layers_in_one_undo_step_and_keeps_ports_and_settings() {
+        let context = themed_context();
+        let (mut document, mixer) = mixer(3);
+        let source = document.add_node("SatelliteMap", [25000.0, 25000.0]).unwrap();
+        document.connect(source, "Out", mixer, "Layer2");
+        let mask = document.add_node("Perlin", [25000.0, 25300.0]).unwrap();
+        document.connect(mask, "Out", mixer, "Mask2");
+        let before = document.node(mixer).unwrap().clone();
+        let watched = HashMap::new();
+        let shapes = frame(&context, &document, mixer, 420.0);
+        let rows = layer_rows(&shapes);
+        assert_eq!(rows.len(), 3);
+        let start = Pos2::new(rows[1].left() + 8.0, rows[1].center().y);
+        let target = rows[0].center();
+        panel_frame(&context, &document, mixer, 420.0, vec![egui::Event::PointerMoved(start)], &watched);
+        panel_frame(&context, &document, mixer, 420.0, vec![button(start, true)], &watched);
+        panel_frame(&context, &document, mixer, 420.0, vec![egui::Event::PointerMoved(target)], &watched);
+        let (_, edits) = panel_frame(&context, &document, mixer, 420.0, vec![button(target, false)], &watched);
+        let selected_id = Id::new("mixer-test").with("selected-layer");
+        let selected: Option<String> = context.data(|data| data.get_temp::<String>(selected_id));
+        assert_eq!(selected.as_deref(), Some("Layer2"));
+        let (values, label) = edits.into_iter().find_map(|(_, edit)| match edit {
+            Edit::SetValues { values, label } => Some((values, label)),
+            _ => None,
+        }).expect("dropping the second layer above the first edits the order");
+        let undo_count = document.undo_labels().len();
+        assert!(document.set_values(mixer, &values, label));
+        assert_eq!(document.undo_labels().len(), undo_count + 1);
+        let reordered = layers_of(&document, mixer);
+        assert_eq!(reordered.iter().map(|layer| layer.key.as_str()).collect::<Vec<_>>(), vec!["Layer2", "Layer3", "Layer1"]);
+        let after = document.node(mixer).unwrap();
+        assert_eq!(after.ports.len(), before.ports.len());
+        for (after_port, before_port) in after.ports.iter().zip(&before.ports) {
+            assert_eq!(after_port.name, before_port.name);
+            assert_eq!(after_port.port_type, before_port.port_type);
+            assert_eq!(after_port.record, before_port.record);
+        }
+        for layer in &reordered {
+            let mut value = layer.value.clone();
+            value["Order"] = before.values[&layer.key]["Order"].clone();
+            assert_eq!(value, before.values[&layer.key]);
+        }
+        assert!(document.undo());
+        assert_eq!(document.node(mixer).unwrap().values, before.values);
+    }
+
+    #[test]
+    fn drops_on_the_ground_or_outside_and_escape_leave_order_alone() {
+        let context = themed_context();
+        let (document, mixer) = mixer(3);
+        let watched = HashMap::new();
+        let rows = layer_rows(&frame(&context, &document, mixer, 420.0));
+        let start = Pos2::new(rows[0].left() + 8.0, rows[0].center().y);
+        let ground = Pos2::new(start.x, rows[2].bottom() + 20.0);
+        let outside = Pos2::new(rows[0].right() + 30.0, rows[2].center().y);
+        for target in [ground, outside] {
+            panel_frame(&context, &document, mixer, 420.0, vec![egui::Event::PointerMoved(start)], &watched);
+            panel_frame(&context, &document, mixer, 420.0, vec![button(start, true)], &watched);
+            panel_frame(&context, &document, mixer, 420.0, vec![egui::Event::PointerMoved(target)], &watched);
+            let (_, edits) = panel_frame(&context, &document, mixer, 420.0, vec![button(target, false)], &watched);
+            assert!(!edits.iter().any(|(_, edit)| matches!(edit, Edit::SetValues { .. })));
+        }
+        panel_frame(&context, &document, mixer, 420.0, vec![egui::Event::PointerMoved(start)], &watched);
+        panel_frame(&context, &document, mixer, 420.0, vec![button(start, true)], &watched);
+        let target = rows[2].center();
+        panel_frame(&context, &document, mixer, 420.0, vec![egui::Event::PointerMoved(target)], &watched);
+        let escape = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        panel_frame(&context, &document, mixer, 420.0, vec![escape], &watched);
+        let (_, edits) = panel_frame(&context, &document, mixer, 420.0, vec![button(target, false)], &watched);
+        assert!(!edits.iter().any(|(_, edit)| matches!(edit, Edit::SetValues { .. })));
+    }
+
+    #[test]
+    fn a_layer_colour_pick_edits_its_build_colour_without_dragging() {
+        let context = themed_context();
+        let (document, mixer) = mixer(1);
+        let watched = HashMap::new();
+        let row = layer_rows(&frame(&context, &document, mixer, 420.0))[0];
+        let swatch = LayerRowLayout::of(row).swatch;
+        let start = swatch.center();
+        for events in [vec![egui::Event::PointerMoved(start)], vec![button(start, true)], vec![button(start, false)], Vec::new()] {
+            panel_frame(&context, &document, mixer, 420.0, events, &watched);
+        }
+        let picker = context.memory(|memory| {
+            let layers = memory.areas().visible_layer_ids();
+            layers.into_iter().find_map(|layer| {
+                let rect = memory.area_rect(layer.id)?;
+                (layer.order == egui::Order::Foreground && (rect.width() - 200.0).abs() < 0.5).then_some(rect)
+            })
+        }).expect("the swatch opens its picker");
+        let pick = picker.min + Vec2::new(100.0, 60.0);
+        panel_frame(&context, &document, mixer, 420.0, vec![egui::Event::PointerMoved(pick)], &watched);
+        let (_, edits) = panel_frame(&context, &document, mixer, 420.0, vec![button(pick, true)], &watched);
+        let changed = edits.into_iter().find_map(|(key, edit)| match edit {
+            Edit::Set(value) if key == "Layer1" => Some(value),
+            _ => None,
+        }).expect("picking edits the chosen layer");
+        let color = &changed["Color"];
+        assert!(color["R"].as_f64().unwrap() > 0.0);
+        assert!(color["G"].as_f64().unwrap() > 0.0);
+        assert!(color["B"].as_f64().unwrap() > 0.0);
+        assert_ne!(color, &document.node(mixer).unwrap().values["Layer1"]["Color"]);
+        assert_eq!(changed["Index"], document.node(mixer).unwrap().values["Layer1"]["Index"]);
+    }
+
+    #[test]
+    fn layer_and_ground_thumbnails_read_the_connected_outputs_and_refresh() {
+        let context = themed_context();
+        let (mut document, mixer) = mixer(1);
+        let source = document.add_node("Synth", [25000.0, 25000.0]).unwrap();
+        document.connect(source, "Out", mixer, "Layer1");
+        document.connect(source, "Out", mixer, "In");
+        // Exercise an alternate output independently of the ground map.
+        let mixer_node = document.project.terrain_mut().nodes.get_mut(&mixer).unwrap();
+        let layer_port = mixer_node.ports.iter_mut().find(|port| port.name == "Layer1").unwrap();
+        let connection = layer_port.record.as_mut().unwrap();
+        connection.from_port = "Alternate".to_string();
+        let resolution = Resolution::square(2);
+        let red = Arc::new(Map::from_channels(resolution, vec![vec![1.0; 4], vec![0.0; 4], vec![0.0; 4]]));
+        let blue = Arc::new(Map::from_channels(resolution, vec![vec![0.0; 4], vec![0.0; 4], vec![1.0; 4]]));
+        let source_maps = WatchedNode {
+            node: source,
+            outputs: vec![("Out".to_string(), red.clone()), ("Alternate".to_string(), blue.clone())],
+            underlay: None,
+            custom_underlay: None,
+            custom_colours: None,
+            port_intents: Default::default(),
+        };
+        let mut watched = HashMap::from([(source, source_maps)]);
+        let (shapes, _) = panel_frame(&context, &document, mixer, 420.0, Vec::new(), &watched);
+        let images: Vec<_> = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            Shape::Mesh(mesh) if mesh.vertices.len() == 4 && mesh.indices.len() == 6 && mesh.texture_id != egui::TextureId::default() => Some(mesh.texture_id),
+            _ => None,
+        }).collect();
+        let id = Id::new("mixer-test");
+        let layer_id = id.with(("thumbnail", "Layer1"));
+        let ground_id = id.with("ground-thumbnail");
+        let layer: LayerThumbnail = context.data(|data| data.get_temp(layer_id)).unwrap();
+        let ground: LayerThumbnail = context.data(|data| data.get_temp(ground_id)).unwrap();
+        assert!(Arc::ptr_eq(&layer.map, &blue));
+        assert!(Arc::ptr_eq(&ground.map, &red));
+        assert!(images.contains(&layer.texture.id()));
+        assert!(images.contains(&ground.texture.id()));
+        panel_frame(&context, &document, mixer, 420.0, Vec::new(), &watched);
+        let unchanged: LayerThumbnail = context.data(|data| data.get_temp(layer_id)).unwrap();
+        assert_eq!(layer.texture.id(), unchanged.texture.id());
+        watched.get_mut(&source).unwrap().outputs[1].1 = red.clone();
+        panel_frame(&context, &document, mixer, 420.0, Vec::new(), &watched);
+        let refreshed: LayerThumbnail = context.data(|data| data.get_temp(layer_id)).unwrap();
+        assert!(Arc::ptr_eq(&refreshed.map, &red));
+        assert_ne!(layer.texture.id(), refreshed.texture.id());
     }
 }

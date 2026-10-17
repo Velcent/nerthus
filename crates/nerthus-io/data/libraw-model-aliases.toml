@@ -1,0 +1,538 @@
+# LibRaw 0.22.0's model alias groups (`GetNormalizedModel`, src/metadata/
+# normalize_model.cpp): the marketing names a file's model string may carry
+# besides the engine's canonical colour-table name, by maker. Samsung's
+# `strstr` rewrites come first for that maker; each `target` then replaces
+# every name in its `aliases` (a model already equal to the `name` stays).
+# Written to match normalize_model.cpp entry for entry, including one
+# missing-comma quirk that joins "DC-ZS220D" and "DC-TX2" into one literal.
+# The Canon, Sony and Kodak branches key off body ids instead of names and
+# resolve to the names their files already record, so they have no entries.
+
+[[group]]
+maker = "Fujifilm"
+
+[[group.target]]
+name = "DBP for GX680"
+aliases = ["DX-2000"]
+
+[[group.target]]
+name = "F500EXR"
+aliases = ["F505EXR"]
+
+[[group.target]]
+name = "F600EXR"
+aliases = ["F605EXR"]
+
+[[group.target]]
+name = "F770EXR"
+aliases = ["F775EXR"]
+
+[[group.target]]
+name = "HS10"
+aliases = ["HS10 HS11"]
+
+[[group.target]]
+name = "HS20EXR"
+aliases = ["HS22EXR"]
+
+[[group.target]]
+name = "HS30EXR"
+aliases = ["HS33EXR", "HS35EXR"]
+
+[[group.target]]
+name = "S5100"
+aliases = ["S5500"]
+
+[[group.target]]
+name = "S5200"
+aliases = ["S5600"]
+
+[[group.target]]
+name = "S6000fd"
+aliases = ["S6500fd"]
+
+[[group.target]]
+name = "S9000"
+aliases = ["S9500"]
+
+[[group.target]]
+name = "S9100"
+aliases = ["S9600"]
+
+[[group.target]]
+name = "S200EXR"
+aliases = ["S205EXR"]
+
+[[group.target]]
+name = "X-T1 IR"
+aliases = ["X-T1IR"]
+
+[[group.target]]
+name = "GFX 100 II"
+aliases = ["GFX100 II"]
+
+[[group.target]]
+name = "GFX 100S II"
+aliases = ["GFX100S II"]
+
+[[group.target]]
+name = "GFX 100S"
+aliases = ["GFX100S"]
+
+[[group.target]]
+name = "GFX 50S II"
+aliases = ["GFX50S II"]
+
+[[group]]
+maker = "Nikon"
+
+[[group.target]]
+name = "COOLPIX 2100"
+aliases = ["E2100"]
+
+[[group.target]]
+name = "COOLPIX 2500"
+aliases = ["E2500"]
+
+[[group.target]]
+name = "COOLPIX 3200"
+aliases = ["E3200"]
+
+[[group.target]]
+name = "COOLPIX 3700"
+aliases = ["E3700"]
+
+[[group.target]]
+name = "COOLPIX 4300"
+aliases = ["E4300"]
+
+[[group.target]]
+name = "COOLPIX 4500"
+aliases = ["E4500"]
+
+[[group.target]]
+name = "COOLPIX 5000"
+aliases = ["E5000"]
+
+[[group.target]]
+name = "COOLPIX 5400"
+aliases = ["E5400"]
+
+[[group.target]]
+name = "COOLPIX 5700"
+aliases = ["E5700"]
+
+[[group.target]]
+name = "COOLPIX 8400"
+aliases = ["E8400"]
+
+[[group.target]]
+name = "COOLPIX 8700"
+aliases = ["E8700"]
+
+[[group.target]]
+name = "COOLPIX 8800"
+aliases = ["E8800"]
+
+[[group.target]]
+name = "COOLPIX 700"
+aliases = ["E700"]
+
+[[group.target]]
+name = "COOLPIX 800"
+aliases = ["E800"]
+
+[[group.target]]
+name = "COOLPIX 880"
+aliases = ["E880"]
+
+[[group.target]]
+name = "COOLPIX 900"
+aliases = ["E900"]
+
+[[group.target]]
+name = "COOLPIX 950"
+aliases = ["E950"]
+
+[[group.target]]
+name = "COOLPIX 990"
+aliases = ["E990"]
+
+[[group.target]]
+name = "COOLPIX 995"
+aliases = ["E995"]
+
+[[group.target]]
+name = "COOLPIX P7700"
+aliases = ["COOLPIX Deneb"]
+
+[[group.target]]
+name = "COOLPIX P7800"
+aliases = ["COOLPIX Kalon"]
+
+[[group]]
+maker = "Olympus"
+
+[[group.target]]
+name = "AIR A01"
+aliases = ["AIR-A01"]
+
+[[group.target]]
+name = "C-3030Z"
+aliases = ["C3030Z"]
+
+[[group.target]]
+name = "C-5050Z"
+aliases = ["C5050Z"]
+
+[[group.target]]
+name = "C-5060WZ"
+aliases = ["C5060WZ"]
+
+[[group.target]]
+name = "C-7000Z"
+aliases = ["C7000Z", "C70Z,C7000Z", "C70Z"]
+
+[[group.target]]
+name = "C-7070WZ"
+aliases = ["C7070WZ"]
+
+[[group.target]]
+name = "C-8080WZ"
+aliases = ["C8080WZ"]
+
+[[group.target]]
+name = "C-350Z"
+aliases = ["C350Z", "X200,D560Z,C350Z", "X200", "D560Z"]
+
+[[group.target]]
+name = "C-740UZ"
+aliases = ["C740UZ"]
+
+[[group.target]]
+name = "C-770UZ"
+aliases = ["C770UZ"]
+
+[[group.target]]
+name = "E-20"
+aliases = ["E-20,E-20N,E-20P", "E-20N", "E-20P"]
+
+[[group.target]]
+name = "E-M10 Mark II"
+aliases = ["E-M10MarkII", "E-M10_M2", "piX 5oo"]
+
+[[group.target]]
+name = "E-M10 Mark III"
+aliases = ["E-M10MarkIII", "E-M10_M3"]
+
+[[group.target]]
+name = "E-M10 Mark IV"
+aliases = ["E-M10MarkIV", "E-M10_M4"]
+
+[[group.target]]
+name = "E-M1 Mark II"
+aliases = ["E-M1MarkII", "E-M1_M2"]
+
+[[group.target]]
+name = "E-M1 Mark III"
+aliases = ["E-M1MarkIII", "E-M1_M3"]
+
+[[group.target]]
+name = "E-M5 Mark II"
+aliases = ["E-M5MarkII", "E-M5_M2"]
+
+[[group.target]]
+name = "E-M5 Mark III"
+aliases = ["E-M5MarkIII", "E-M5_M3"]
+
+[[group.target]]
+name = "OM-1 Mark II"
+aliases = ["OM-1MarkII", "OM-1_M2"]
+
+[[group.target]]
+name = "SH-2"
+aliases = ["SH-3"]
+
+[[group.target]]
+name = "SP-310"
+aliases = ["SP310"]
+
+[[group.target]]
+name = "SP-320"
+aliases = ["SP320"]
+
+[[group.target]]
+name = "SP-350"
+aliases = ["SP350"]
+
+[[group.target]]
+name = "SP-500UZ"
+aliases = ["SP500UZ"]
+
+[[group.target]]
+name = "SP-510UZ"
+aliases = ["SP510UZ"]
+
+[[group.target]]
+name = "SP-550UZ"
+aliases = ["SP550UZ"]
+
+[[group.target]]
+name = "SP-560UZ"
+aliases = ["SP560UZ"]
+
+[[group.target]]
+name = "SP-565UZ"
+aliases = ["SP565UZ"]
+
+[[group.target]]
+name = "SP-570UZ"
+aliases = ["SP570UZ"]
+
+[[group.target]]
+name = "Stylus 1"
+aliases = ["STYLUS1", "STYLUS1s", "STYLUS1,1s"]
+
+[[group]]
+maker = "Panasonic"
+
+[[group.target]]
+name = "DMC-FX150"
+aliases = ["DMC-FX180"]
+
+[[group.target]]
+name = "DC-FZ1000M2"
+aliases = ["DC-FZ10002", "V-Lux 5"]
+
+[[group.target]]
+name = "DMC-FZ1000"
+aliases = ["V-LUX (Typ 114)"]
+
+[[group.target]]
+name = "DMC-FZ2500"
+aliases = ["DMC-FZ2000", "DMC-FZH1"]
+
+[[group.target]]
+name = "DMC-FZ100"
+aliases = ["V-LUX 2"]
+
+[[group.target]]
+name = "DMC-FZ150"
+aliases = ["V-LUX 3"]
+
+[[group.target]]
+name = "DMC-FZ200"
+aliases = ["V-LUX 4"]
+
+[[group.target]]
+name = "DMC-FZ300"
+aliases = ["DMC-FZ330"]
+
+[[group.target]]
+name = "DMC-FZ35"
+aliases = ["DMC-FZ38"]
+
+[[group.target]]
+name = "DMC-FZ40"
+aliases = ["DMC-FZ42", "DMC-FZ45", "DC-FZ40", "DC-FZ42", "DC-FZ45"]
+
+[[group.target]]
+name = "DMC-FZ50"
+aliases = ["V-LUX 1", "V-LUX1"]
+
+[[group.target]]
+name = "DMC-FZ70"
+aliases = ["DMC-FZ72"]
+
+[[group.target]]
+name = "DC-FZ80"
+aliases = ["DC-FZ81", "DC-FZ82", "DC-FZ83", "DC-FZ85"]
+
+[[group.target]]
+name = "DMC-LC1"
+aliases = ["DIGILUX 2", "Digilux 2", "DIGILUX2"]
+
+[[group.target]]
+name = "DMC-LF1"
+aliases = ["C (Typ 112)"]
+
+[[group.target]]
+name = "DC-LX100M2"
+aliases = ["D-Lux 7"]
+
+[[group.target]]
+name = "DMC-LX100"
+aliases = ["D-LUX (Typ 109)", "D-Lux (Typ 109)"]
+
+[[group.target]]
+name = "DMC-LX1"
+aliases = ["D-Lux2", "D-LUX2", "D-LUX 2"]
+
+[[group.target]]
+name = "DMC-LX2"
+aliases = ["D-Lux 3", "D-LUX3"]
+
+[[group.target]]
+name = "DMC-LX3"
+aliases = ["D-LUX 4"]
+
+[[group.target]]
+name = "DMC-LX5"
+aliases = ["D-LUX 5"]
+
+[[group.target]]
+name = "DMC-LX7"
+aliases = ["D-LUX 6"]
+
+[[group.target]]
+name = "DMC-LX9"
+aliases = ["DMC-LX10", "DMC-LX15"]
+
+[[group.target]]
+name = "DMC-ZS100"
+aliases = ["DMC-ZS110", "DMC-TZ100", "DMC-TZ101", "DMC-TZ110", "DMC-TX1"]
+
+[[group.target]]
+name = "DC-ZS200"
+aliases = ["DC-ZS220", "DC-TZ200", "DC-TZ202", "DC-TZ220", "DC-TZ200D", "DC-TZ202D", "DC-TZ220D", "DC-ZS200D", "DC-ZS220DDC-TX2", "C-Lux", "CAM-DC25"]
+
+[[group.target]]
+name = "DMC-ZS40"
+aliases = ["DMC-TZ60", "DMC-TZ61"]
+
+[[group.target]]
+name = "DMC-ZS50"
+aliases = ["DMC-TZ70", "DMC-TZ71"]
+
+[[group.target]]
+name = "DMC-ZS60"
+aliases = ["DMC-TZ80", "DMC-TZ81", "DMC-TZ82", "DMC-TZ85"]
+
+[[group.target]]
+name = "DC-ZS70"
+aliases = ["DC-TZ90", "DC-TZ91", "DC-TZ92", "DC-TZ93"]
+
+[[group.target]]
+name = "DC-ZS80"
+aliases = ["DC-TZ95", "DC-TZ96", "DC-TZ97"]
+
+[[group.target]]
+name = "DC-G100"
+aliases = ["DC-G110"]
+
+[[group.target]]
+name = "DC-G99"
+aliases = ["DC-G90", "DC-G91", "DC-G95"]
+
+[[group.target]]
+name = "DMC-G7"
+aliases = ["DMC-G70"]
+
+[[group.target]]
+name = "DMC-G8"
+aliases = ["DMC-G80", "DMC-G81", "DMC-G85"]
+
+[[group.target]]
+name = "DMC-GH4"
+aliases = ["AG-GH4", "CGO4"]
+
+[[group.target]]
+name = "DC-GF10"
+aliases = ["DC-GF90", "DC-GX880"]
+
+[[group.target]]
+name = "DC-GF9"
+aliases = ["DC-GX850", "DC-GX800"]
+
+[[group.target]]
+name = "DMC-GM1"
+aliases = ["DMC-GM1S"]
+
+[[group.target]]
+name = "DMC-GX85"
+aliases = ["DMC-GX80", "DMC-GX7MK2"]
+
+[[group.target]]
+name = "DC-GX9"
+aliases = ["DC-GX7MK3"]
+
+[[group.target]]
+name = "DMC-L1"
+aliases = ["DIGILUX 3", "DIGILUX3"]
+
+[[group]]
+maker = "Pentax"
+
+[[group.target]]
+name = "*istDL2"
+aliases = ["*ist DL2", "GX-1L"]
+
+[[group.target]]
+name = "*istDS2"
+aliases = ["*ist DS2", "GX-1S"]
+
+[[group.target]]
+name = "*istDL"
+aliases = ["*ist DL"]
+
+[[group.target]]
+name = "*istDS"
+aliases = ["*ist DS"]
+
+[[group.target]]
+name = "*istD"
+aliases = ["*ist D"]
+
+[[group.target]]
+name = "K10D"
+aliases = ["GX10", "GX-10"]
+
+[[group.target]]
+name = "K20D"
+aliases = ["GX20", "GX-20"]
+
+[[group.target]]
+name = "K-m"
+aliases = ["K2000"]
+
+# Samsung's `strstr` rewrites run before the alias loop below, and one
+# model containing several needles takes the first rewrite (WB5000 itself
+# contains WB500).
+[[substring]]
+maker = "Samsung"
+name = "WB5500"
+needles = ["WB5500", "HZ50W"]
+
+[[substring]]
+maker = "Samsung"
+name = "WB5000"
+needles = ["WB5000", "HZ25W"]
+
+[[substring]]
+maker = "Samsung"
+name = "WB550"
+needles = ["WB550", "HZ15W"]
+
+[[substring]]
+maker = "Samsung"
+name = "WB500"
+needles = ["WB500", "HZ10W"]
+
+[[group]]
+maker = "Samsung"
+
+[[group.target]]
+name = "EX1"
+aliases = ["TL500"]
+
+[[group.target]]
+name = "NX U"
+aliases = ["EK-GN100", "EK-GN110", "EK-GN120", "EK-KN120", "Galaxy NX"]
+
+[[group.target]]
+name = "NX mini"
+aliases = ["NXF1"]
+
+[[group.target]]
+name = "WB2000"
+aliases = ["TL350"]

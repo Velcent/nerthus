@@ -386,6 +386,31 @@ struct TileSequence {
     naming: Option<TileNaming>,
 }
 
+impl TileSequence {
+    /// `TileInput.UpdateUI`: the source grid and original tile width,
+    /// before MergeTiles resizes the complete terrain to the build.
+    /// Gaea shows only the width: its `MergeTiles` refuses mixed tile
+    /// sizes before it records one, so the size is square by then.
+    fn info(&self, source: &Path, tile_width: i32) -> String {
+        if self.tiles.len() <= 1 {
+            return String::new();
+        }
+        let min_x = self.tiles.iter().map(|tile| tile.1).min().unwrap_or(0);
+        let max_x = self.tiles.iter().map(|tile| tile.1).max().unwrap_or(0);
+        let min_y = self.tiles.iter().map(|tile| tile.2).min().unwrap_or(0);
+        let max_y = self.tiles.iter().map(|tile| tile.2).max().unwrap_or(0);
+        let columns = max_x - min_x + 1;
+        let rows = max_y - min_y + 1;
+        let directory = source.parent().unwrap_or_else(|| Path::new(""));
+        let extension = source.extension().map(|extension| format!(".{}", extension.to_string_lossy())).unwrap_or_default();
+        format!(
+            "\n\n\nTotal tiles: {}\n\nTiles per dim: {columns} x {rows}\n\nTile Resolution: {tile_width}\n\nSource Directory: \n{} \n\nTile extension [{extension}]\n",
+            self.tiles.len(),
+            directory.display(),
+        )
+    }
+}
+
 fn same_extension(path: &Path, extension: &str) -> bool {
     let own = path.extension().map(|value| format!(".{}", value.to_string_lossy())).unwrap_or_default();
     own.eq_ignore_ascii_case(extension)
@@ -575,6 +600,9 @@ impl NodeBuilder for TileInput {
             }
         }
         let mut map = Self::merge(&loaded, sequence.udim)?;
+        let tile_width = loaded[0].0.resolution().x as i32;
+        let info = sequence.info(&path, tile_width);
+        context.update_member("TileInfo", Value::String(info));
         if map.resolution() != context.resolution {
             map = transformer::resize_with(&map, context.resolution, ResizeMethod::HighQuality);
         }
@@ -610,6 +638,11 @@ impl NodeBuilder for Export {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use indexmap::IndexMap;
+    use nerthus_engine::{BuildResult, Catalogue, Engine, NodeData, Terrain};
+
     use super::*;
 
     #[test]
@@ -625,5 +658,55 @@ mod tests {
         assert!(!is_tile_set(&[tile("land_x0_y0.png"), tile("other.png")]));
         assert!(!is_tile_set(&[tile("land_x0_y0.png")]));
         let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn tile_input_reports_the_discovered_grid_and_original_tile_resolution() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let folder = std::env::temp_dir().join(format!("nerthus-tile-info-{nanos}"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let samples = [0.0_f32, 0.25, 0.5, 1.0];
+        let bytes: Vec<u8> = samples.into_iter().flat_map(f32::to_le_bytes).collect();
+        for name in ["land_x3_y5.r32", "land_x4_y5.r32", "land_x3_y6.r32", "land_x4_y6.r32"] {
+            std::fs::write(folder.join(name), &bytes).unwrap();
+        }
+        // A different prefix and extension do not belong to this set.
+        std::fs::write(folder.join("other_x0_y0.r32"), &bytes).unwrap();
+        std::fs::write(folder.join("land_x5_y6.raw"), &bytes).unwrap();
+        let spec = Catalogue::get().node("TileInput").unwrap();
+        let mut node = NodeData::new(spec, 1, 1234);
+        let file = folder.join("land_x3_y5.r32");
+        node.values.insert("FileName".to_string(), json!(file));
+        let nodes: IndexMap<i32, NodeData> = [(node.id, node)].into_iter().collect();
+        let terrain = Terrain { id: String::new(), nodes, width: 5000.0, height: 2500.0, extra: Default::default() };
+        let mut engine = Engine::new(Arc::new(crate::registry()));
+        assert_eq!(engine.build(&terrain, 1, Resolution::square(8)), BuildResult::Succeeded);
+        assert_eq!(engine.cache.get(1, "Out").unwrap().resolution(), Resolution::square(8));
+        let updates = engine.take_member_updates();
+        let info = updates.iter().find(|(id, name, _)| *id == 1 && name == "TileInfo").unwrap().2.as_str().unwrap();
+        let expected = format!(
+            "\n\n\nTotal tiles: 4\n\nTiles per dim: 2 x 2\n\nTile Resolution: 2\n\nSource Directory: \n{} \n\nTile extension [.r32]\n",
+            folder.display(),
+        );
+        assert_eq!(info, expected);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn tile_summary_uses_udim_coordinates_and_shows_the_tile_width() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let folder = std::env::temp_dir().join(format!("nerthus-udim-info-{nanos}"));
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in ["land.1001.exr", "land.1002.exr", "land.1011.exr", "land.1012.exr", "other.1003.exr"] {
+            std::fs::write(folder.join(name), b"").unwrap();
+        }
+        let source = folder.join("land.1001.exr");
+        let sequence = find_tile_sequence(&source).unwrap();
+        let info = sequence.info(&source, 2048);
+        assert!(info.contains("Total tiles: 4\n"));
+        assert!(info.contains("Tiles per dim: 2 x 2\n"));
+        assert!(info.contains("Tile Resolution: 2048\n"));
+        assert!(info.contains("Tile extension [.exr]\n"));
+        std::fs::remove_dir_all(folder).unwrap();
     }
 }

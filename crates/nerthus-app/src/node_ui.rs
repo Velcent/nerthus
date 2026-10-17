@@ -3,16 +3,19 @@
 //! node's values and connections, and write the text some nodes display
 //! in their computed-string properties (`LODInfo`, `TopologyWarning`, …).
 //!
-//! Left out: the export file lists of TextureBaker and MeshWarp and
-//! TileInput's tile summary (they need the export and tile scanning
-//! state), and the skipped hook nodes (Unity, Unreal, HoudiniOut).
+//! TileInput's computed summary is filled by its tile discovery build;
+//! the baker file lists also read the build destination and cached inputs.
+//! The skipped hook nodes (Unity, Unreal, HoudiniOut) have no UI here.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use indexmap::IndexMap;
 use nerthus_engine::automation::Automation;
-use nerthus_engine::{Catalogue, NodeData, NodeSpec};
+use nerthus_engine::{Catalogue, NodeData, NodeSpec, NodeState};
 use serde_json::Value;
+
+use crate::editor::Editor;
 
 /// The panel state `UpdateUI` leaves for one node.
 #[derive(Default)]
@@ -53,6 +56,55 @@ impl NodeUi {
             self.enable(name, enabled);
         }
     }
+}
+
+/// The computed file list needs the same destination and overwrite mode
+/// as a build, and is empty until the Mesher input has a built map.
+pub fn update_file_summaries(editor: &Editor, node: &NodeData, ui: &mut NodeUi) {
+    if node.type_name == "TileInput" && editor.status(node.id).state == NodeState::Error {
+        ui.texts.insert("TileInfo".to_string(), String::new());
+        return;
+    }
+    if !matches!(node.type_name.as_str(), "TextureBaker" | "MeshWarp") {
+        return;
+    }
+    ui.texts.insert("LODInfo".to_string(), String::new());
+    let Some(input) = node.port("In").and_then(|port| port.record.as_ref()) else {
+        return;
+    };
+    let asset = &editor.document.project.assets[0];
+    let mesher_connected = asset.terrain.nodes.get(&input.from).is_some_and(|source| source.type_name == "Mesher");
+    if !mesher_connected || editor.status(input.from).state == NodeState::Error {
+        return;
+    }
+    let has_map = editor.node_caches.get(&input.from).is_some_and(|cache| cache.ports.iter().any(|port| port.name == input.from_port));
+    if !has_map {
+        return;
+    }
+    let mut definition = nerthus_export::BuildDefinition::from_json(asset.extra.get("BuildDefinition"));
+    let region = nerthus_export::build::set_up_region(&asset.terrain, &mut definition, None);
+    let single_image = definition.output_type == nerthus_export::build::OutputType::SingleImage;
+    let region_build = definition.build_type == nerthus_export::build::BuildType::Region;
+    if !single_image && !region_build {
+        return;
+    }
+    let preferences = editor.user.preferences.export_preferences();
+    let project_path = editor.document.path.as_deref().unwrap_or_else(|| Path::new("Untitled.terrain"));
+    let mut destination = nerthus_export::destination::DestinationContext::new(&definition.destination, project_path, definition.resolution);
+    destination.builds_root = preferences.builds_root;
+    destination.region = region.map(|region| region.name);
+    destination.mutation = editor.mutation;
+    let folder = nerthus_export::destination::resolve_destination(&destination);
+    let groups = nerthus_export::mesh_exports::texture_bake_files(&asset.terrain, node, &folder, definition.overwrite_mode);
+    let mut info = String::from("Files to be generated:\n\n");
+    for files in groups {
+        for file in files {
+            info.push_str(&file.to_string_lossy());
+            info.push('\n');
+        }
+        info.push('\n');
+    }
+    ui.texts.insert("LODInfo".to_string(), info);
 }
 
 /// A node's values and connections as `UpdateUI` reads them.
@@ -419,6 +471,11 @@ fn trees(props: &Props, ui: &mut NodeUi) {
 
 #[cfg(test)]
 mod tests {
+    use crate::document::Document;
+    use crate::worker::{CachedPort, NodeCache};
+    use nerthus_engine::RenderIntent;
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -445,5 +502,59 @@ mod tests {
         assert!(ui.visible("Slope"));
         assert!(!ui.visible("Direction"));
         assert!(!ui.enabled("Downcutting"));
+    }
+
+    #[test]
+    fn baker_file_summaries_require_a_built_mesher_input() {
+        let folder = std::env::temp_dir().join("nerthus-file-summary-preview");
+        for type_name in ["TextureBaker", "MeshWarp"] {
+            let mut document = Document::new();
+            let mesher = document.add_node("Mesher", [0.0, 0.0]).unwrap();
+            let baker = document.add_node(type_name, [100.0, 0.0]).unwrap();
+            document.connect(mesher, "Out", baker, "In");
+            document.rename(baker, "Baked");
+            document.set_value(mesher, "LevelOfDetail", json!("LOD1"));
+            document.set_member(baker, "SaveDefinition", json!({"Format": "PNG16"}), "Export format", false);
+            document.set_build_setting("Destination", json!(folder));
+            let mut editor = Editor::new(document);
+            let node = editor.document.node(baker).unwrap().clone();
+            let mut ui = NodeUi::default();
+            update_file_summaries(&editor, &node, &mut ui);
+            assert_eq!(ui.texts["LODInfo"], "");
+
+            let port = CachedPort { name: "Out".to_string(), width: 4, height: 4, channels: 1, intent: RenderIntent::Heightfield };
+            let cache = NodeCache { ports: vec![port], ..NodeCache::default() };
+            editor.node_caches.insert(mesher, cache);
+            update_file_summaries(&editor, &node, &mut ui);
+            let expected = format!(
+                "Files to be generated:\n\n{}\n{}\n\n",
+                folder.join("Baked_Normals.png").display(),
+                folder.join("Baked_Normals_LOD1.png").display(),
+            );
+            assert_eq!(ui.texts["LODInfo"], expected);
+
+            let mut disconnected = node.clone();
+            disconnected.port_mut("In").unwrap().record = None;
+            update_file_summaries(&editor, &disconnected, &mut ui);
+            assert_eq!(ui.texts["LODInfo"], "");
+
+            let source = editor.document.project.terrain_mut().nodes.get_mut(&mesher).unwrap();
+            source.type_name = "Constant".to_string();
+            update_file_summaries(&editor, &node, &mut ui);
+            assert_eq!(ui.texts["LODInfo"], "");
+        }
+    }
+
+    #[test]
+    fn failed_tile_builds_clear_the_displayed_summary() {
+        let mut document = Document::new();
+        let tile_input = document.add_node("TileInput", [0.0, 0.0]).unwrap();
+        document.apply_build_update(tile_input, "TileInfo", json!("Total tiles: 4"));
+        let mut editor = Editor::new(document);
+        editor.statuses.entry(tile_input).or_default().state = NodeState::Error;
+        let node = editor.document.node(tile_input).unwrap();
+        let mut ui = NodeUi::default();
+        update_file_summaries(&editor, node, &mut ui);
+        assert_eq!(ui.texts["TileInfo"], "");
     }
 }

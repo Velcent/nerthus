@@ -56,7 +56,11 @@ pub(super) fn process(state: &mut Raw, raw: RawData) -> Result<Output> {
         adjust_bl(image.state);
         image.subtract_black();
     }
-    image.adjust_maximum();
+    // The fixed-maximum loaders set their own colour maximum; the peak trim
+    // would only undo them.
+    if !image.state.fixed_maximum {
+        image.adjust_maximum();
+    }
     image.scale_colors();
     image.pre_interpolate();
     // Quality 3: AHD for Bayer patterns, Markesteijn's three passes for
@@ -183,12 +187,20 @@ impl Image<'_> {
         match raw {
             RawData::Bayer(raw_image) if self.state.fuji_width != 0 && !self.state.fuji_raw_rotated => {
                 let fuji_width = self.state.fuji_width as usize;
+                let sheared = self.state.fuji_layout;
                 let sensor_height = raw_height.saturating_sub(top * 2);
-                let sensor_width = (fuji_width * 2).min(raw_width.saturating_sub(left));
+                let column_bound = if sheared { fuji_width } else { fuji_width * 2 };
+                let sensor_width = column_bound.min(raw_width.saturating_sub(left));
                 for row in 0..sensor_height {
                     for column in 0..sensor_width {
-                        let target_row = fuji_width - 1 + row - (column >> 1);
-                        let target_column = row + ((column + 1) >> 1);
+                        let (target_row, target_column) = if sheared {
+                            // The wide-buffer layout: sheared the other way,
+                            // with the diagonal's left edge on the sensor's
+                            // first column.
+                            (fuji_width - 1 - column + (row >> 1), column + ((row + 1) >> 1))
+                        } else {
+                            (fuji_width - 1 + row - (column >> 1), row + ((column + 1) >> 1))
+                        };
                         if target_row >= height || target_column >= width {
                             continue;
                         }

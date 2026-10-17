@@ -492,6 +492,11 @@ impl Writer {
     }
 
     fn node_member(&mut self, spec: Option<&NodeSpec>, name: &str, value: &Value) {
+        // Computed text is an UpdateUI result, marked JsonIgnore in Gaea.
+        let computed = spec.and_then(|spec| spec.parameter(name)).is_some_and(|parameter| parameter.kind == "ComputedString");
+        if computed {
+            return;
+        }
         if is_default_member(spec, name, value) {
             return;
         }
@@ -759,5 +764,18 @@ mod tests {
         assert!(writer.text.contains(&satellite_map_type));
         assert!(!writer.text.contains("\"Range\""), "a default Float2 parameter is left out");
         assert!(writer.text.contains("\"$ref\": \"1\""), "ports point back at the node");
+    }
+
+    #[test]
+    fn computed_node_summaries_are_not_serialized() {
+        for (node_type, property) in [("TileInput", "TileInfo"), ("TextureBaker", "LODInfo"), ("MeshWarp", "LODInfo"), ("Mesher", "LODInfo")] {
+            let spec = Catalogue::get().node(node_type).unwrap();
+            let mut node = NodeData::new(spec, 1, 1234);
+            node.values.insert(property.to_string(), Value::String("Runtime summary".to_string()));
+            let mut writer = Writer::new();
+            writer.write_node(&node);
+            assert!(!writer.text.contains(property), "{node_type}.{property} is computed text");
+            assert!(!writer.text.contains("Runtime summary"));
+        }
     }
 }

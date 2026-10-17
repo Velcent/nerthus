@@ -246,7 +246,7 @@ pub(super) fn ljpeg_start(stream: &mut Stream, bits: &mut BitReader, dng_version
 }
 
 /// `ljpeg_diff`: one difference, its length coded with `table`.
-fn ljpeg_diff(stream: &mut Stream, bits: &mut BitReader, table: Option<&[u16]>, dng_version: u32) -> i32 {
+pub(super) fn ljpeg_diff(stream: &mut Stream, bits: &mut BitReader, table: Option<&[u16]>, dng_version: u32) -> i32 {
     let Some(table) = table else {
         return 0;
     };

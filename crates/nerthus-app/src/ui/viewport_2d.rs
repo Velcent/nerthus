@@ -252,12 +252,23 @@ impl Viewport2DState {
         self.gizmo.as_ref().is_some_and(GizmoState::held)
     }
 
-    /// The nodes the floating views show, and the input under a Snow
-    /// gizmo (what the builds report back).
+    /// The nodes the floating views show, the input under a Snow gizmo,
+    /// and the selected Mixer's thumbnails (what builds report back).
     fn watched_nodes(&self, editor: &Editor) -> Vec<i32> {
         let mut nodes: Vec<i32> = self.floating.iter().map(|view| view.node).collect();
         if let Some(source) = self.gizmo.as_ref().and_then(|gizmo| snow_source(editor, gizmo)) {
             nodes.push(source);
+        }
+        if let Some(mixer) = editor.active_node().and_then(|node| editor.document.node(node)).filter(|node| node.type_name == "Mixer") {
+            for port in &mixer.ports {
+                let previewed = port.name == "In" || port.name.starts_with("Layer");
+                if previewed
+                    && let Some(record) = &port.record
+                    && !nodes.contains(&record.from)
+                {
+                    nodes.push(record.from);
+                }
+            }
         }
         nodes
     }
@@ -1056,6 +1067,31 @@ fn grouped_optional(value: f64, decimals: usize, fixed_decimals: bool) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixer_thumbnails_watch_the_ground_and_layer_sources_without_masks_or_duplicates() {
+        let mut document = crate::document::Document::new();
+        let ground = document.add_node("Synth", [25000.0, 25000.0]).unwrap();
+        let layer = document.add_node("Synth", [25000.0, 25300.0]).unwrap();
+        let mask = document.add_node("Perlin", [25000.0, 25600.0]).unwrap();
+        let mixer = document.add_node("Mixer", [25300.0, 25000.0]).unwrap();
+        document.add_new_input(mixer).unwrap();
+        document.connect(ground, "Out", mixer, "In");
+        document.connect(layer, "Out", mixer, "Layer1");
+        document.connect(layer, "Out", mixer, "Layer2");
+        document.connect(mask, "Out", mixer, "Mask1");
+        document.connect(mask, "Out", mixer, "Terrain");
+        let mut editor = Editor::new(document);
+        editor.select(Some(mixer));
+        let state = Viewport2DState::default();
+        let sources = state.watched_nodes(&editor);
+        assert_eq!(sources.len(), 2);
+        assert!(sources.contains(&ground));
+        assert!(sources.contains(&layer));
+        assert!(!sources.contains(&mask));
+        editor.select(Some(layer));
+        assert!(state.watched_nodes(&editor).is_empty());
+    }
 
     #[test]
     fn escape_released_ends_picking_and_measuring_while_enter_leaves_them_on() {

@@ -7,8 +7,8 @@
 use anyhow::{bail, Result};
 
 use super::camera_raw_meta::{CameraMeta, SensorKind};
-use super::identify::Raw;
-use super::ljpeg::{BitReader, ljpeg_row, ljpeg_start};
+use super::identify::{NOT_TILED, Raw};
+use super::ljpeg::{BitReader, ljpeg_diff as ljpeg_diff_bits, ljpeg_row, ljpeg_start};
 use super::stream::{Stream, LITTLE_ENDIAN};
 use super::unpack::{fold_black_to_common, RawData};
 
@@ -36,27 +36,36 @@ pub(super) fn unpack_camera(meta: &mut CameraMeta, state: &mut Raw, data: &[u8])
 
     let mut data_error = false;
     if !(state.filters != 0 || meta.colors == 1) {
-        // The legacy path: the sRAW bodies decode into the four-channel
-        // image buffer instead of the flat raw store. The row stride is
-        // the active width's 8 bytes unless the open crop set it, and the
-        // buffer spans whichever of the two shapes is larger — calloc'd
-        // zero, since the decode may leave pixels untouched.
+        // The legacy path: the sRAW-style bodies decode into the four-channel
+        // image buffer instead of the flat raw store. The row stride is the
+        // active width's 8 bytes unless the loader keeps the raw shape's, the
+        // buffer spans whichever of the two shapes is larger — calloc'd zero,
+        // since the decode may leave pixels untouched — and the loader may
+        // still hold a flat view over the whole store.
         if meta.raw_pitch == 0 {
-            meta.raw_pitch = meta.width * 8;
+            meta.raw_pitch = if meta.loader == SensorKind::SonyArq {
+                meta.raw_width * 8
+            } else {
+                meta.width * 8
+            };
         }
         let image_width = meta.raw_width.max(meta.width) as usize;
         let image_height = meta.raw_height.max(meta.height) as usize;
         let mut image = vec![[0u16; 4]; image_width * (image_height + 8)];
         match meta.loader {
             SensorKind::CanonSraw => canon_sraw_load_raw(meta, &mut image, &mut stream)?,
+            SensorKind::NikonSraw => nikon_sraw_load_raw(meta, &mut image, &mut stream)?,
+            SensorKind::SonyArq => sony_arq_load_raw(meta, &mut image, &mut stream, &mut data_error)?,
+            SensorKind::Nikon14Bit => nikon_14bit_load_raw(meta, image.as_flattened_mut(), &mut stream)?,
             _ => bail!("the pixel loader for this camera raw is not ported yet"),
         }
         state.maximum = meta.maximum;
         // The legacy tail: crop_masked_pixels only runs for the flat raw
-        // store, so the black levels stay as the maker parse built them,
-        // and without the open crop's 256 flag the decode shape replaces
-        // the raw shape outright.
-        if meta.load_flags & 256 == 0 {
+        // store, so the black levels stay as the maker parse built them, and
+        // without the open crop's 256 flag the decode shape replaces the raw
+        // shape outright — except the pixel-shift loader, whose margins the
+        // engine keeps.
+        if meta.load_flags & 256 == 0 && meta.loader != SensorKind::SonyArq {
             meta.raw_width = meta.width;
             meta.left_margin = 0;
             meta.raw_height = meta.height;
@@ -115,6 +124,27 @@ pub(super) fn unpack_camera(meta: &mut CameraMeta, state: &mut Raw, data: &[u8])
         SensorKind::FujiCompressed => {
             fuji_compressed_load_raw(meta, &mut raw_image, &mut stream, &mut data_error)?
         }
+        SensorKind::EightBit => eight_bit_load_raw(meta, &mut raw_image, &mut stream, &mut data_error)?,
+        SensorKind::Packed => packed_load_raw(meta, &mut raw_image, &mut stream, &mut data_error)?,
+        SensorKind::Nikon14Bit => nikon_14bit_load_raw(meta, &mut raw_image, &mut stream)?,
+        SensorKind::NikonStripedPacked => nikon_striped_packed_load_raw(meta, &mut raw_image, &mut stream)?,
+        SensorKind::NikonPaddedPacked => nikon_padded_packed_load_raw(meta, &mut raw_image, &mut stream)?,
+        SensorKind::Fuji14Bit => fuji_14bit_load_raw(meta, &mut raw_image, &mut stream)?,
+        SensorKind::FujiDbp => fuji_dbp_load_raw(meta, &mut raw_image, &mut stream, &mut data_error)?,
+        SensorKind::FujiF700S20 => {
+            fuji_f700s20_load_raw(meta, &mut raw_image, &mut stream, &mut data_error)?
+        }
+        SensorKind::Samsung2 => samsung2_load_raw(meta, &mut raw_image, &mut stream, &mut data_error)?,
+        SensorKind::Samsung3 => samsung3_load_raw(meta, &mut raw_image, &mut stream)?,
+        SensorKind::PanasonicC6 => panasonic_c6_load_raw(meta, &mut raw_image, &mut stream)?,
+        SensorKind::PanasonicC7 => panasonic_c7_load_raw(meta, &mut raw_image, &mut stream)?,
+        SensorKind::SonyLjpeg => sony_ljpeg_load_raw(meta, &mut raw_image, &mut stream)?,
+        // The JPEG-XS form has no decoder in the reference engine: the unpack
+        // refuses the file before any pixels move.
+        SensorKind::NikonHe => bail!("this camera raw's compressed stream has no decoder"),
+        // The uncompressed YUV stream is rewritten to the sRAW loader before
+        // the decode; the marker never reaches the dispatcher.
+        SensorKind::NikonYuv => bail!("this camera raw's YUV loader was not rewritten by the open stage"),
         _ => bail!("the pixel loader for this camera raw is not ported yet"),
     }
     // The CRW body's maximum falls with its low-bit probe; the state the
@@ -5786,5 +5816,1067 @@ fn fuji_compressed_load_raw(
             bases,
         )?;
     }
+    Ok(())
+}
+
+/// `unpack7bytesto4x16`: seven bytes into four 14-bit samples, the layout
+/// the Fuji 14-bit bodies read after their per-word byte swap.
+fn unpack7bytesto4x16(src: &[u8], dest: &mut [u16]) {
+    dest[0] = ((u16::from(src[0]) << 6) | u16::from(src[1] >> 2)) as u16;
+    dest[1] = (((u16::from(src[1]) & 0x3) << 12) | (u16::from(src[2]) << 4) | u16::from(src[3] >> 4)) as u16;
+    dest[2] = (((u16::from(src[3]) & 0xf) << 10) | (u16::from(src[4]) << 2) | u16::from(src[5] >> 6)) as u16;
+    dest[3] = (((u16::from(src[5]) & 0x3f) << 8) | u16::from(src[6])) as u16;
+}
+
+/// `unpack28bytesto16x16ns`: twenty-eight bytes into sixteen samples
+/// written back to front, the layout the Fuji 14-bit bodies read alone.
+fn unpack28bytesto16x16ns(src: &[u8], dest: &mut [u16]) {
+    dest[0] = ((u16::from(src[3]) << 6) | u16::from(src[2] >> 2)) as u16;
+    dest[1] = (((u16::from(src[2]) & 0x3) << 12) | (u16::from(src[1]) << 4) | u16::from(src[0] >> 4)) as u16;
+    dest[2] = (((u16::from(src[0]) & 0xf) << 10) | (u16::from(src[7]) << 2) | u16::from(src[6] >> 6)) as u16;
+    dest[3] = (((u16::from(src[6]) & 0x3f) << 8) | u16::from(src[5])) as u16;
+    dest[4] = ((u16::from(src[4]) << 6) | u16::from(src[11] >> 2)) as u16;
+    dest[5] = (((u16::from(src[11]) & 0x3) << 12) | (u16::from(src[10]) << 4) | u16::from(src[9] >> 4)) as u16;
+    dest[6] = (((u16::from(src[9]) & 0xf) << 10) | (u16::from(src[8]) << 2) | u16::from(src[15] >> 6)) as u16;
+    dest[7] = (((u16::from(src[15]) & 0x3f) << 8) | u16::from(src[14])) as u16;
+    dest[8] = ((u16::from(src[13]) << 6) | u16::from(src[12] >> 2)) as u16;
+    dest[9] = (((u16::from(src[12]) & 0x3) << 12) | (u16::from(src[19]) << 4) | u16::from(src[18] >> 4)) as u16;
+    dest[10] = (((u16::from(src[18]) & 0xf) << 10) | (u16::from(src[17]) << 2) | u16::from(src[16] >> 6)) as u16;
+    dest[11] = (((u16::from(src[16]) & 0x3f) << 8) | u16::from(src[23])) as u16;
+    dest[12] = ((u16::from(src[22]) << 6) | u16::from(src[21] >> 2)) as u16;
+    dest[13] = (((u16::from(src[21]) & 0x3) << 12) | (u16::from(src[20]) << 4) | u16::from(src[27] >> 4)) as u16;
+    dest[14] = (((u16::from(src[27]) & 0xf) << 10) | (u16::from(src[26]) << 2) | u16::from(src[25] >> 6)) as u16;
+    dest[15] = (((u16::from(src[25]) & 0x3f) << 8) | u16::from(src[24])) as u16;
+}
+
+/// `unpack7bytesto4x16_nikon`: the same seven-to-four layout with the
+/// sample order reversed inside each group.
+fn unpack7bytesto4x16_nikon(src: &[u8], dest: &mut [u16]) {
+    dest[3] = ((u16::from(src[6]) << 6) | u16::from(src[5] >> 2)) as u16;
+    dest[2] = (((u16::from(src[5]) & 0x3) << 12) | (u16::from(src[4]) << 4) | u16::from(src[3] >> 4)) as u16;
+    dest[1] = (((u16::from(src[3]) & 0xf) << 10) | (u16::from(src[2]) << 2) | u16::from(src[1] >> 6)) as u16;
+    dest[0] = (((u16::from(src[1]) & 0x3f) << 8) | u16::from(src[0])) as u16;
+}
+
+/// `unpack21bytesto12x16_nikon`: twenty-one bytes into four sRAW pixels,
+/// each carrying three samples in the four-channel image buffer's own
+/// stride with the fourth left at zero.
+fn unpack21bytesto12x16_nikon(src: &[u8], dest: &mut [u16]) {
+    dest[0] = (((u16::from(src[1]) & 0x3f) << 8) | u16::from(src[0])) as u16;
+    dest[1] = (((u16::from(src[3]) & 0xf) << 10) | (u16::from(src[2]) << 2) | u16::from(src[1] >> 6)) as u16;
+    dest[2] = (((u16::from(src[5]) & 0x3) << 12) | (u16::from(src[4]) << 4) | u16::from(src[3] >> 4)) as u16;
+    dest[4] = ((u16::from(src[6]) << 6) | u16::from(src[5] >> 2)) as u16;
+    dest[5] = (((u16::from(src[8]) & 0x3f) << 8) | u16::from(src[7])) as u16;
+    dest[6] = (((u16::from(src[10]) & 0xf) << 10) | (u16::from(src[9]) << 2) | u16::from(src[8] >> 6)) as u16;
+    dest[8] = (((u16::from(src[12]) & 0x3) << 12) | (u16::from(src[11]) << 4) | u16::from(src[10] >> 4)) as u16;
+    dest[9] = ((u16::from(src[13]) << 6) | u16::from(src[12] >> 2)) as u16;
+    dest[10] = (((u16::from(src[15]) & 0x3f) << 8) | u16::from(src[14])) as u16;
+    dest[12] = (((u16::from(src[17]) & 0xf) << 10) | (u16::from(src[16]) << 2) | u16::from(src[15] >> 6)) as u16;
+    dest[13] = (((u16::from(src[19]) & 0x3) << 12) | (u16::from(src[18]) << 4) | u16::from(src[17] >> 4)) as u16;
+    dest[14] = ((u16::from(src[20]) << 6) | u16::from(src[19] >> 2)) as u16;
+}
+
+/// `eight_bit_load_raw`: byte-per-sample rows through the tone curve; the
+/// loader's own colour maximum is the curve's top entry.
+fn eight_bit_load_raw(
+    meta: &mut CameraMeta,
+    raw_image: &mut [u16],
+    stream: &mut Stream,
+    data_error: &mut bool,
+) -> Result<()> {
+    let raw_width = meta.raw_width as usize;
+    let raw_height = meta.raw_height as usize;
+    let pitch = (meta.raw_pitch / 2) as usize;
+    let curve = &meta.curve;
+    let mut pixel = vec![0u8; raw_width];
+    for row in 0..raw_height {
+        if stream.read(&mut pixel) < raw_width {
+            derror(stream, data_error)?;
+        }
+        let row_base = row * pitch;
+        for (col, &byte) in pixel.iter().enumerate() {
+            raw_image[row_base + col] = curve[byte as usize];
+        }
+    }
+    meta.maximum = u32::from(curve[0xff]);
+    Ok(())
+}
+
+/// `packed_load_raw`: the bit-packed rows shared by several makers, where
+/// the file's own row padding (`load_flags`'s upper bits) and the optional
+/// interleave seeks (its low bits) steer the walk.
+fn packed_load_raw(
+    meta: &CameraMeta,
+    raw_image: &mut [u16],
+    stream: &mut Stream,
+    data_error: &mut bool,
+) -> Result<()> {
+    let raw_width = meta.raw_width as i32;
+    let raw_height = meta.raw_height as i32;
+    let height = meta.height as i32;
+    let width = meta.width as i32;
+    let top_margin = meta.top_margin as i32;
+    let left_margin = meta.left_margin as i32;
+    let tiff_bps = meta.tiff_bps as i32;
+    let load_flags = meta.load_flags;
+    let pitch = (meta.raw_pitch / 2) as usize;
+    let column_flip = (load_flags >> 6) & 1;
+
+    let mut bitbuf: u64 = 0;
+    let mut vbits: i32 = 0;
+    let mut bwide = raw_width * tiff_bps / 8;
+    bwide += bwide & (load_flags >> 7) as i32;
+    let rbits = bwide * 8 - raw_width * tiff_bps;
+    if load_flags & 1 != 0 {
+        bwide = bwide * 16 / 15;
+    }
+    let bite = (8 + (load_flags & 24)) as i32;
+    let half = (raw_height + 1) >> 1;
+    for irow in 0..raw_height {
+        let mut row = irow;
+        if load_flags & 2 != 0 {
+            row = irow % half * 2 + irow / half;
+            if row == 1 && load_flags & 4 != 0 {
+                vbits = 0;
+                if meta.tiff_compress != 0 {
+                    // The interleave boundary lands one padded row set past
+                    // the data's start.
+                    let row_bytes = (-(half * bwide) & -2048i32) as u32;
+                    let target = (meta.data_offset as u32).wrapping_sub(row_bytes);
+                    stream.seek(u64::from(target));
+                } else {
+                    stream.seek(stream.size());
+                    stream.seek((stream.tell() >> 3) << 2);
+                }
+            }
+        }
+        if stream.eof() {
+            bail!("the raw stream ended before the image did");
+        }
+        let row_base = row as usize * pitch;
+        for col in 0..raw_width {
+            vbits -= tiff_bps;
+            while vbits < 0 {
+                vbits += bite;
+                bitbuf = bitbuf.wrapping_shl(bite as u32);
+                let mut step = 0i32;
+                while step < bite {
+                    let word: u32 = match stream.getc() {
+                        Some(byte) => u32::from(byte),
+                        // The stream's past-the-end reads give the engine's
+                        // all-ones fill.
+                        None => u32::MAX,
+                    };
+                    bitbuf |= u64::from(word.wrapping_shl(step as u32));
+                    step += 8;
+                }
+            }
+            let head = bitbuf
+                .wrapping_shl((64 - tiff_bps - vbits) as u32)
+                .wrapping_shr((64 - tiff_bps) as u32);
+            let value = (head & 0x7fff_ffff) as i32;
+            raw_image[row_base + ((col as u32) ^ column_flip) as usize] = value as u16;
+            // The packed bodies with a check bit per tenth column consume a
+            // byte there; the engine raises an error when that byte is set
+            // inside the active area.
+            if load_flags & 1 != 0
+                && col % 10 == 9
+                && stream.getc() != Some(0)
+                && row < height + top_margin
+                && col < width + left_margin
+            {
+                derror(stream, data_error)?;
+            }
+        }
+        vbits -= rbits;
+    }
+    Ok(())
+}
+
+/// `nikon_14bit_load_raw`: the plain 14-bit rows as seven-byte quarters
+/// either flat (Bayer) or as three-sample sRAW pixels (the legacy shape),
+/// both sharing the engine's own reversed unpackers.
+fn nikon_14bit_load_raw(meta: &CameraMeta, raw_image: &mut [u16], stream: &mut Stream) -> Result<()> {
+    let cps: u32 = if meta.filters == 0 && meta.colors == 3 { 3 } else { 1 };
+    let raw_width = meta.raw_width as i32;
+    // The row's byte length rounds the seven-bytes-per-four-samples line up
+    // to a multiple of 16.
+    let linelen = (raw_width * cps as i32 * 7 / 4) as f32 / 16.0f32;
+    let linelen = (linelen.ceil()) as u32 * 16;
+    let pitch = if meta.raw_pitch != 0 {
+        meta.raw_pitch / (if cps >= 3 { 8 } else { 2 })
+    } else {
+        meta.raw_width
+    };
+    let raw_height = meta.raw_height as i32;
+    let mut buf = vec![0u8; linelen as usize];
+    for row in 0..raw_height.max(0) {
+        let bytesread = stream.read(&mut buf) as u32;
+        let row_base = (pitch as usize) * row as usize;
+        if cps == 1 {
+            let mut sp = 0u32;
+            let mut dp = 0u32;
+            while dp < pitch.wrapping_sub(3)
+                && sp < linelen.wrapping_sub(6)
+                && sp < bytesread.wrapping_sub(6)
+            {
+                let dest = &mut raw_image[row_base + dp as usize..][..4];
+                unpack7bytesto4x16_nikon(&buf[sp as usize..], dest);
+                sp += 7;
+                dp += 4;
+            }
+        } else {
+            let row_pixels = row_base * 4;
+            let mut sp = 0u32;
+            let mut dp = 0u32;
+            while dp < pitch.wrapping_sub(3)
+                && sp < linelen.wrapping_sub(20)
+                && sp < bytesread.wrapping_sub(20)
+            {
+                let dest = &mut raw_image[row_pixels + dp as usize * 4..][..16];
+                unpack21bytesto12x16_nikon(&buf[sp as usize..], dest);
+                sp += 21;
+                dp += 4;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `nikon_striped_packed_load_raw`: the bit-packed rows read strip by strip
+/// through the file's own strip table; the bit reader carries the tail of a
+/// strip into the next one.
+fn nikon_striped_packed_load_raw(meta: &CameraMeta, raw_image: &mut [u16], stream: &mut Stream) -> Result<()> {
+    let load_flags: u32 = 24;
+    let tiff_bps = meta.tiff_bps as i32;
+    let raw_width = meta.raw_width as i32;
+    let Some(record) = meta
+        .strip_ifds
+        .iter()
+        .find(|record| record.offset == meta.data_offset)
+    else {
+        bail!("the camera raw's strip table has no record for the raw data");
+    };
+    if record.rows_per_strip == 0 || record.strip_offsets.is_empty() {
+        // The engine calls this "not unpacked" and leaves the pixels zero.
+        return Ok(());
+    }
+    let mut bitbuf: u64 = 0;
+    let mut vbits: i32 = 0;
+    let mut bwide = raw_width * tiff_bps / 8;
+    bwide += bwide & (load_flags >> 7) as i32;
+    let rbits = bwide * 8 - raw_width * tiff_bps;
+    let bite = (8 + (load_flags & 24)) as i32;
+    let mut stripcnt = 0usize;
+    for row in 0..meta.raw_height as i32 {
+        if row % record.rows_per_strip == 0 {
+            if stripcnt >= record.strip_offsets.len() {
+                // Running out of strips just stops the decode.
+                return Ok(());
+            }
+            stream.seek(record.strip_offsets[stripcnt].max(0) as u64);
+            stripcnt += 1;
+        }
+        let row_base = row as usize * meta.raw_width as usize;
+        for col in 0..raw_width {
+            vbits -= tiff_bps;
+            while vbits < 0 {
+                vbits += bite;
+                bitbuf = bitbuf.wrapping_shl(bite as u32);
+                let mut step = 0i32;
+                while step < bite {
+                    let word: u32 = match stream.getc() {
+                        Some(byte) => u32::from(byte),
+                        None => u32::MAX,
+                    };
+                    bitbuf |= u64::from(word.wrapping_shl(step as u32));
+                    step += 8;
+                }
+            }
+            let head = bitbuf
+                .wrapping_shl((64 - tiff_bps - vbits) as u32)
+                .wrapping_shr((64 - tiff_bps) as u32);
+            raw_image[row_base + col as usize] = (head & 0xffff) as u16;
+        }
+        vbits -= rbits;
+    }
+    Ok(())
+}
+
+/// `nikon_load_padded_packed_raw`: 12-bit samples padded into three bytes
+/// per pixel pair, each row padded out to the file's own byte count.
+fn nikon_padded_packed_load_raw(meta: &CameraMeta, raw_image: &mut [u16], stream: &mut Stream) -> Result<()> {
+    let load_flags = meta.load_flags;
+    if load_flags < 2000 || load_flags > 64000 {
+        return Ok(());
+    }
+    let raw_width = meta.raw_width as usize;
+    let mut buf = vec![0u8; load_flags as usize];
+    for row in 0..meta.raw_height as usize {
+        // A short read keeps the previous row's tail, exactly like the
+        // engine's read, and this loader raises no data error.
+        stream.read(&mut buf);
+        let row_base = row * raw_width;
+        for icol in 0..raw_width / 2 {
+            let byte_base = icol * 3;
+            let high = u16::from(buf.get(byte_base + 1).copied().unwrap_or(0));
+            let pixels = [
+                (high & 0xf) << 8 | u16::from(buf.get(byte_base).copied().unwrap_or(0)),
+                u16::from(buf.get(byte_base + 2).copied().unwrap_or(0)) << 4 | (high & 0xf0) >> 4,
+            ];
+            raw_image[row_base + icol * 2] = pixels[0];
+            raw_image[row_base + icol * 2 + 1] = pixels[1];
+        }
+    }
+    Ok(())
+}
+
+/// `fuji_14bit_load_raw`: the RAF 14-bit rows in seven-byte quarters; a row
+/// whose byte count is not a multiple of 28 first swaps every whole word of
+/// the buffer.
+fn fuji_14bit_load_raw(meta: &CameraMeta, raw_image: &mut [u16], stream: &mut Stream) -> Result<()> {
+    let raw_width = meta.raw_width as i32;
+    let linelen = (raw_width.max(0) * 7 / 4) as u32;
+    let pitch = if meta.raw_pitch != 0 { meta.raw_pitch / 2 } else { meta.raw_width };
+    let mut buf = vec![0u8; linelen as usize];
+    for row in 0..meta.raw_height as u32 {
+        let bytesread = stream.read(&mut buf) as u32;
+        let row_base = (pitch as usize) * row as usize;
+        if bytesread % 28 != 0 {
+            // The engine byte-swaps each whole u32 word in place; the
+            // trailing partial word stays as it was.
+            let word_bytes = (bytesread / 4) as usize * 4;
+            for word in buf[..word_bytes].chunks_exact_mut(4) {
+                word.swap(0, 3);
+                word.swap(1, 2);
+            }
+            let mut sp = 0u32;
+            let mut dp = 0u32;
+            while dp < pitch.wrapping_sub(3)
+                && sp < linelen.wrapping_sub(6)
+                && sp < bytesread.wrapping_sub(6)
+            {
+                let dest = &mut raw_image[row_base + dp as usize..][..4];
+                unpack7bytesto4x16(&buf[sp as usize..], dest);
+                sp += 7;
+                dp += 4;
+            }
+        } else {
+            let mut sp = 0u32;
+            let mut dp = 0u32;
+            while dp < pitch.wrapping_sub(15)
+                && sp < linelen.wrapping_sub(27)
+                && sp < bytesread.wrapping_sub(27)
+            {
+                let dest = &mut raw_image[row_base + dp as usize..][..16];
+                unpack28bytesto16x16ns(&buf[sp as usize..], dest);
+                sp += 28;
+                dp += 16;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `unpacked_load_raw_FujiDBP`: the GX680's eight tall tiles read one after
+/// the other, each scattered into the row-interleaved store.
+fn fuji_dbp_load_raw(
+    meta: &CameraMeta,
+    raw_image: &mut [u16],
+    stream: &mut Stream,
+    data_error: &mut bool,
+) -> Result<()> {
+    let raw_width = meta.raw_width as usize;
+    let raw_height = meta.raw_height as usize;
+    let tile_width = raw_width / 8;
+    let mut tile = vec![0u16; tile_width * raw_height];
+    for tile_n in 0..8usize {
+        let wanted = (tile_width * raw_height) * 2;
+        let short_read = stream.size().saturating_sub(stream.tell()) < wanted as u64;
+        stream.read_shorts(&mut tile);
+        if short_read {
+            derror(stream, data_error)?;
+        }
+        for scan_line in 0..raw_height {
+            let source = scan_line * tile_width;
+            let row_base = scan_line * raw_width + tile_n * tile_width;
+            raw_image[row_base..row_base + tile_width]
+                .copy_from_slice(&tile[source..source + tile_width]);
+        }
+    }
+    // The read back past the last tile keeps a later check from seeing the
+    // file's end.
+    stream.skip(-2);
+    Ok(())
+}
+
+/// `unpacked_load_raw_fuji_f700s20`: each row holds the sensor's two
+/// half-row buffers back to back; only the first is the real image. The
+/// engine's single-shot pass starts at the buffer head.
+fn fuji_f700s20_load_raw(
+    meta: &CameraMeta,
+    raw_image: &mut [u16],
+    stream: &mut Stream,
+    data_error: &mut bool,
+) -> Result<()> {
+    let raw_width = meta.raw_width as usize;
+    let raw_height = meta.raw_height as usize;
+    let pitch = (meta.raw_pitch / 2) as usize;
+    let mut buffer = vec![0u16; raw_width * 2];
+    for row in 0..raw_height {
+        let short_read = stream.size().saturating_sub(stream.tell()) < (raw_width * 4) as u64;
+        stream.read_shorts(&mut buffer[..raw_width * 2]);
+        if short_read {
+            derror(stream, data_error)?;
+        }
+        let row_base = row * pitch;
+        raw_image[row_base..row_base + raw_width].copy_from_slice(&buffer[..raw_width]);
+    }
+    Ok(())
+}
+
+/// `samsung2_load_raw`: the SRW's Huffman-coded differences under the
+/// top-left and left predictors, with the accumulator carrying across the
+/// row and the over-deep samples turning into data errors.
+fn samsung2_load_raw(
+    meta: &CameraMeta,
+    raw_image: &mut [u16],
+    stream: &mut Stream,
+    data_error: &mut bool,
+) -> Result<()> {
+    const TAB: [u16; 14] = [
+        0x304, 0x307, 0x206, 0x205, 0x403, 0x600, 0x709, 0x80a, 0x90b, 0xa0c, 0xa0d, 0x501, 0x408, 0x402,
+    ];
+    let mut huff = vec![0u16; 1026];
+    huff[0] = 10;
+    let mut n = 0usize;
+    for &entry in TAB.iter() {
+        let count = 1024usize >> (entry >> 8);
+        for _ in 0..count {
+            n += 1;
+            huff[n] = entry;
+        }
+    }
+    let mut bits = BitReader::default();
+    bits.restart();
+    let raw_width = meta.raw_width as usize;
+    let raw_height = meta.raw_height as usize;
+    let pitch = (meta.raw_pitch / 2) as usize;
+    let tiff_bps = meta.tiff_bps;
+    let mut vpred = [[0u16; 2]; 2];
+    let mut hpred = [0u16; 2];
+    for row in 0..raw_height {
+        for col in 0..raw_width {
+            let diff = ljpeg_diff_bits(stream, &mut bits, Some(&huff), 0);
+            if col < 2 {
+                vpred[row & 1][col] = vpred[row & 1][col].wrapping_add(diff as u16);
+                hpred[col] = vpred[row & 1][col];
+            } else {
+                hpred[col & 1] = hpred[col & 1].wrapping_add(diff as u16);
+            }
+            raw_image[row * pitch + col] = hpred[col & 1];
+            if i32::from(hpred[col & 1]).wrapping_shr(tiff_bps) != 0 {
+                derror(stream, data_error)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `samsung3_load_raw`: the NX30's clustered rows — a motion model copies
+/// sixteen-pixel blocks from the row above or two rows up, then per-colour
+/// delta lengths widen and narrow across the row; the block reader runs on
+/// little-endian words the loader forces on its own.
+fn samsung3_load_raw(meta: &CameraMeta, raw_image: &mut [u16], stream: &mut Stream) -> Result<()> {
+    let raw_width = meta.raw_width as i32;
+    let raw_height = meta.raw_height as i32;
+    if raw_height < 436 || raw_width < 646 {
+        bail!("the camera raw image is too small for its compression");
+    }
+    // The engine reads this body's whole stream little-endian regardless of
+    // the file's byte order.
+    stream.order = LITTLE_ENDIAN;
+    let maxpixidx = i64::from(meta.raw_width) * i64::from(raw_height);
+    let pitch = (meta.raw_pitch / 2) as usize;
+
+    let mut ph1 = Ph1Bits::default();
+    ph1.reset();
+    ph1.bits(stream, 16);
+    ph1.bits(stream, 4);
+    let bit_depth = ph1.bits(stream, 4) + 1;
+    let datamax = (1i32.wrapping_shl(bit_depth)) - 1;
+    ph1.bits(stream, 8);
+    ph1.bits(stream, 16);
+    ph1.bits(stream, 16);
+    ph1.bits(stream, 16);
+    ph1.bits(stream, 4);
+    let optflags = ph1.bits(stream, 4);
+    ph1.bits(stream, 16);
+    ph1.bits(stream, 8);
+    ph1.bits(stream, 2);
+    let init_val = ph1.bits(stream, 14) as u16;
+
+    for row in 0..raw_height {
+        // Each row restarts at the next block boundary past the data's
+        // start; the remainder is always zero to fifteen bytes forward.
+        let gap = (meta.data_offset - stream.tell() as i64) & 15;
+        stream.skip(gap);
+        ph1.reset();
+
+        let rowstart = i64::from(row) * i64::from(meta.raw_width);
+        let mut motion = 7u32;
+        let mut scale = 0i32;
+        let mut diff_bits_mode = [[7u32; 2]; 3];
+        if row >= 2 {
+            for entry in diff_bits_mode.iter_mut() {
+                entry[0] = 4;
+                entry[1] = 4;
+            }
+        }
+
+        let mut col = 0i32;
+        while col < raw_width - 15 {
+            if optflags & 4 == 0 && col & 63 == 0 {
+                let scalevals = [0i32, -2, 2];
+                let pick = ph1.bits(stream, 2);
+                if pick < 3 {
+                    scale += scalevals[pick as usize];
+                } else {
+                    scale = ph1.bits(stream, 12) as i32;
+                }
+            }
+
+            if optflags & 2 != 0 {
+                motion = if ph1.bits(stream, 1) != 0 { 3 } else { 7 };
+            } else if ph1.bits(stream, 1) == 0 {
+                motion = ph1.bits(stream, 3);
+            }
+
+            if motion == 7 {
+                let row_base = row as usize * pitch;
+                for i in 0..16i32 {
+                    let value = if col == 0 { init_val } else { raw_image[row_base + (col + i - 2) as usize] };
+                    raw_image[row_base + (col + i) as usize] = value;
+                }
+            } else {
+                if row < 2 {
+                    bail!("the camera raw's motion copy runs before the image starts");
+                }
+                let motion_offset = [-4i32, -2, -2, 0, 0, 2, 4];
+                let motion_average = [0u32, 0, 1, 0, 1, 0, 0];
+                let row_base = row as usize * pitch;
+                for i in 0..16i32 {
+                    let even = (row + i) & 1 != 0;
+                    let refrow = if even { row - 2 } else { row - 1 };
+                    let refcol = col + i + motion_offset[motion as usize] + (i32::from(!even)) * (1 - 2 * (i & 1));
+                    if i64::from(refrow) * i64::from(meta.raw_width) + i64::from(refcol) < 0 {
+                        bail!("the camera raw's motion copy references a row before the image starts");
+                    }
+                    // The reference cells sit one or two rows up, so the row
+                    // bounds already cover them; a store whose pitch runs
+                    // past its width, which no file sets, reads as zero.
+                    let ref_flat = (refrow as i64 * pitch as i64) + i64::from(refcol);
+                    let reference = raw_image.get(ref_flat as usize).copied().unwrap_or(0);
+                    let value = if motion_average[motion as usize] != 0 {
+                        let neighbour = raw_image.get((ref_flat + 2) as usize).copied().unwrap_or(0);
+                        (i32::from(reference) + i32::from(neighbour) + 1) >> 1
+                    } else {
+                        i32::from(reference)
+                    };
+                    raw_image[row_base + (col + i) as usize] = value as u16;
+                }
+            }
+
+            let mut diff_bits = [0u32; 4];
+            if optflags & 1 != 0 || ph1.bits(stream, 1) == 0 {
+                let mut flags = [0u32; 4];
+                for flag in flags.iter_mut() {
+                    *flag = ph1.bits(stream, 2);
+                }
+                for i in 0..4u32 {
+                    let colornum = if row % 2 != 0 {
+                        i >> 1
+                    } else {
+                        ((i >> 1) + 2) % 3
+                    };
+                    diff_bits[i as usize] = match flags[i as usize] {
+                        0 => diff_bits_mode[colornum as usize][0],
+                        1 => diff_bits_mode[colornum as usize][0].wrapping_add(1),
+                        2 => diff_bits_mode[colornum as usize][0].wrapping_sub(1),
+                        // The engine's mask makes a length of zero read as 31.
+                        _ => ph1.bits(stream, 4),
+                    };
+                    diff_bits_mode[colornum as usize][0] = diff_bits_mode[colornum as usize][1];
+                    diff_bits_mode[colornum as usize][1] = diff_bits[i as usize];
+                    if diff_bits[i as usize] > bit_depth + 1 {
+                        bail!("the camera raw's delta length exceeds its depth");
+                    }
+                }
+            }
+
+            for i in 0..16i32 {
+                let len = diff_bits[(i >> 2) as usize];
+                // The engine's masks turn a length of zero into the sign
+                // bit's own value.
+                let sign_mask = 1i32.wrapping_shl(len.wrapping_sub(1));
+                let raw = ph1.bits(stream, len as i32);
+                let signed = sign_mask as u32;
+                let diff = (raw ^ signed)
+                    .wrapping_sub(signed)
+                    .wrapping_mul((scale * 2 + 1) as u32)
+                    .wrapping_add(scale as u32) as i32;
+                let rcol = if row % 2 != 0 {
+                    col + ((i & 0x7) << 1) + 1 - (i >> 3)
+                } else {
+                    col + ((i & 0x7) << 1) + (i >> 3)
+                };
+                let bidx = rowstart + i64::from(rcol);
+                if bidx < 0 || bidx >= maxpixidx {
+                    bail!("the camera raw's delta writes outside its sensor");
+                }
+                let cell = row as usize * pitch + rcol as usize;
+                let value = i32::from(raw_image[cell]) + diff;
+                raw_image[cell] = if value < 0 {
+                    0
+                } else if value > datamax {
+                    datamax as u16
+                } else {
+                    value as u16
+                };
+            }
+            col += 16;
+        }
+    }
+    Ok(())
+}
+
+/// `pana_cs6_page_decoder`: one 16-byte page's pixel fields, refilled per
+/// block; the walker reads past the page's fields as explicit zeros.
+struct PanaCs6Page<'a> {
+    pixelbuffer: [u32; 18],
+    lastoffset: u32,
+    maxoffset: u32,
+    current: usize,
+    buffer: &'a [u8],
+}
+
+impl<'a> PanaCs6Page<'a> {
+    fn new(buffer: &'a [u8], size: u32) -> PanaCs6Page<'a> {
+        PanaCs6Page {
+            pixelbuffer: [0; 18],
+            lastoffset: 0,
+            maxoffset: size,
+            current: 0,
+            buffer,
+        }
+    }
+
+    fn nextpixel(&mut self) -> u32 {
+        if self.current < 14 {
+            self.current += 1;
+            self.pixelbuffer[self.current - 1]
+        } else {
+            0
+        }
+    }
+
+    fn nextpixel12(&mut self) -> u32 {
+        if self.current < 18 {
+            self.current += 1;
+            self.pixelbuffer[self.current - 1]
+        } else {
+            0
+        }
+    }
+
+    /// `read_page`: the 14-bit fields, read back to front out of the page.
+    fn read_page(&mut self) -> Result<()> {
+        if self.maxoffset.saturating_sub(self.lastoffset) < 16 {
+            bail!("the camera raw's block header ran out of data");
+        }
+        let buffer = self.buffer;
+        let base = self.lastoffset as usize;
+        let pixel = &mut self.pixelbuffer;
+        let wb = |i: usize| u32::from(buffer[base + 15 - i]);
+        pixel[0] = (wb(0) << 6) | (wb(1) >> 2);
+        pixel[1] = (((wb(1) & 0x3) << 12) | (wb(2) << 4) | (wb(3) >> 4)) & 0x3fff;
+        pixel[2] = (wb(3) >> 2) & 0x3;
+        pixel[3] = ((wb(3) & 0x3) << 8) | wb(4);
+        pixel[4] = (wb(5) << 2) | (wb(6) >> 6);
+        pixel[5] = ((wb(6) & 0x3f) << 4) | (wb(7) >> 4);
+        pixel[6] = (wb(7) >> 2) & 0x3;
+        pixel[7] = ((wb(7) & 0x3) << 8) | wb(8);
+        pixel[8] = ((wb(9) << 2) & 0x3fc) | (wb(10) >> 6);
+        pixel[9] = ((wb(10) << 4) | (wb(11) >> 4)) & 0x3ff;
+        pixel[10] = (wb(11) >> 2) & 0x3;
+        pixel[11] = ((wb(11) & 0x3) << 8) | wb(12);
+        pixel[12] = (((wb(13) << 2) & 0x3fc) | (wb(14) >> 6)) & 0x3ff;
+        pixel[13] = ((wb(14) << 4) | (wb(15) >> 4)) & 0x3ff;
+        self.current = 0;
+        self.lastoffset += 16;
+        Ok(())
+    }
+
+    /// `read_page12`: the 12-bit fields.
+    fn read_page12(&mut self) -> Result<()> {
+        if self.maxoffset.saturating_sub(self.lastoffset) < 16 {
+            bail!("the camera raw's block header ran out of data");
+        }
+        let buffer = self.buffer;
+        let base = self.lastoffset as usize;
+        let pixel = &mut self.pixelbuffer;
+        let wb = |i: usize| u32::from(buffer[base + 15 - i]);
+        pixel[0] = (wb(0) << 4) | (wb(1) >> 4);
+        pixel[1] = (((wb(1) & 0xf) << 8) | wb(2)) & 0xfff;
+        pixel[2] = (wb(3) >> 6) & 0x3;
+        pixel[3] = ((wb(3) & 0x3f) << 2) | (wb(4) >> 6);
+        pixel[4] = ((wb(4) & 0x3f) << 2) | (wb(5) >> 6);
+        pixel[5] = ((wb(5) & 0x3f) << 2) | (wb(6) >> 6);
+        pixel[6] = (wb(6) >> 4) & 0x3;
+        pixel[7] = ((wb(6) & 0xf) << 4) | (wb(7) >> 4);
+        pixel[8] = ((wb(7) & 0xf) << 4) | (wb(8) >> 4);
+        pixel[9] = ((wb(8) & 0xf) << 4) | (wb(9) >> 4);
+        pixel[10] = (wb(9) >> 2) & 0x3;
+        pixel[11] = ((wb(9) & 0x3) << 6) | (wb(10) >> 2);
+        pixel[12] = ((wb(10) & 0x3) << 6) | (wb(11) >> 2);
+        pixel[13] = ((wb(11) & 0x3) << 6) | (wb(12) >> 2);
+        pixel[14] = wb(12) & 0x3;
+        pixel[15] = wb(13);
+        pixel[16] = wb(14);
+        pixel[17] = wb(15);
+        self.current = 0;
+        self.lastoffset += 16;
+        Ok(())
+    }
+}
+
+/// `panasonicC6_load_raw`: sixteen-row blocks of per-block split fields
+/// under the Panasonic's own base/multiplier walk; every pixel writes
+/// through the wrap-around pedestal the block's base fields choose.
+fn panasonic_c6_load_raw(meta: &CameraMeta, raw_image: &mut [u16], stream: &mut Stream) -> Result<()> {
+    let rowstep = 16i32;
+    let pana_bits_12 = meta.panasonic.bits == 12;
+    let pixperblock = if pana_bits_12 { 14usize } else { 11usize };
+    let blocksperrow = meta.raw_width as i32 / pixperblock as i32;
+    let rowbytes = (blocksperrow * 16) as usize;
+    let pixelbase0: u32 = if pana_bits_12 { 0x80 } else { 0x200 };
+    let pixelbase_compare: u32 = if pana_bits_12 { 0x800 } else { 0x2000 };
+    let spix_compare: u32 = if pana_bits_12 { 0x3fff } else { 0xffff };
+    let pixel_mask: u32 = if pana_bits_12 { 0xfff } else { 0x3fff };
+
+    let mut iobuf = vec![0u8; rowbytes * rowstep as usize];
+    let mut row = 0i32;
+    while row < meta.raw_height as i32 - rowstep + 1 {
+        let rowstoread = rowstep.min(meta.raw_height as i32 - row);
+        let wanted = rowbytes * rowstoread as usize;
+        if stream.read(&mut iobuf[..wanted]) != wanted {
+            bail!("the camera raw's block stream ended early");
+        }
+        let mut page = PanaCs6Page::new(&iobuf, wanted as u32);
+        let mut crow = 0i32;
+        while crow < rowstoread {
+            let row_base = ((row + crow) as u64 * u64::from(meta.raw_pitch) / 2) as usize;
+            let mut col = 0usize;
+            for _ in 0..blocksperrow {
+                if pana_bits_12 {
+                    page.read_page12()?;
+                } else {
+                    page.read_page()?;
+                }
+                let mut oddeven = [0u32; 2];
+                let mut nonzero = [0u32; 2];
+                let mut pmul = 0u32;
+                let mut pixel_base = 0u32;
+                for pix in 0..pixperblock {
+                    if pix % 3 == 2 {
+                        let mut base = if pana_bits_12 { page.nextpixel12() } else { page.nextpixel() };
+                        if base > 3 {
+                            bail!("the camera raw's block header is corrupt");
+                        }
+                        if base == 3 {
+                            base = 4;
+                        }
+                        pixel_base = pixelbase0 << base;
+                        pmul = 1 << base;
+                    }
+                    let mut epixel = if pana_bits_12 { page.nextpixel12() } else { page.nextpixel() };
+                    if oddeven[pix % 2] != 0 {
+                        epixel = epixel.wrapping_mul(pmul);
+                        if pixel_base < pixelbase_compare && nonzero[pix % 2] > pixel_base {
+                            epixel = epixel.wrapping_add(nonzero[pix % 2] - pixel_base);
+                        }
+                        nonzero[pix % 2] = epixel;
+                    } else {
+                        oddeven[pix % 2] = epixel;
+                        if epixel != 0 {
+                            nonzero[pix % 2] = epixel;
+                        } else {
+                            epixel = nonzero[pix % 2];
+                        }
+                    }
+                    let spix = epixel.wrapping_sub(0xf);
+                    if spix <= spix_compare {
+                        raw_image[row_base + col] = (spix & spix_compare) as u16;
+                    } else {
+                        let shifted = (epixel.wrapping_add(0x7fff_fff1)) as i32 >> 31;
+                        raw_image[row_base + col] = ((shifted as u32) & pixel_mask) as u16;
+                    }
+                    col += 1;
+                }
+            }
+            crow += 1;
+        }
+        row += rowstep;
+    }
+    Ok(())
+}
+
+/// `panasonicC7_load_raw`: the same sixteen-row block shape with whole
+/// nine- or ten-pixel groups read straight out of each block's first bytes;
+/// the byte cursor runs on across the block's rows.
+fn panasonic_c7_load_raw(meta: &CameraMeta, raw_image: &mut [u16], stream: &mut Stream) -> Result<()> {
+    let rowstep = 16i32;
+    let pana_bits = meta.panasonic.bits;
+    let pixperblock = if pana_bits == 14 { 9usize } else { 10usize };
+    let rowbytes = (meta.raw_width as i32 / pixperblock as i32 * 16) as usize;
+    let raw_width = meta.raw_width as usize;
+
+    let mut iobuf = vec![0u8; rowbytes * rowstep as usize];
+    let mut row = 0i32;
+    while row < meta.raw_height as i32 - rowstep + 1 {
+        let rowstoread = rowstep.min(meta.raw_height as i32 - row);
+        let wanted = rowbytes * rowstoread as usize;
+        if stream.read(&mut iobuf[..wanted]) != wanted {
+            bail!("the camera raw's block stream ended early");
+        }
+        let mut cursor = 0usize;
+        let mut crow = 0i32;
+        while crow < rowstoread {
+            let row_base = ((row + crow) as u64 * u64::from(meta.raw_pitch) / 2) as usize;
+            let mut col = 0usize;
+            while col < raw_width.saturating_sub(pixperblock - 1) {
+                let bytes = &iobuf[cursor..cursor + 16];
+                if pana_bits == 14 {
+                    let pixels = [
+                        bytes[0] as u16 + ((bytes[1] as u16 & 0x3F) << 8),
+                        (bytes[1] as u16 >> 6) + 4 * bytes[2] as u16 + ((bytes[3] as u16 & 0xF) << 10),
+                        (bytes[3] as u16 >> 4) + 16 * bytes[4] as u16 + ((bytes[5] as u16 & 3) << 12),
+                        ((bytes[5] as u16 & 0xFC) >> 2) + ((bytes[6] as u16) << 6),
+                        bytes[7] as u16 + ((bytes[8] as u16 & 0x3F) << 8),
+                        (bytes[8] as u16 >> 6) + 4 * bytes[9] as u16 + ((bytes[10] as u16 & 0xF) << 10),
+                        (bytes[10] as u16 >> 4) + 16 * bytes[11] as u16 + ((bytes[12] as u16 & 3) << 12),
+                        ((bytes[12] as u16 & 0xFC) >> 2) + ((bytes[13] as u16) << 6),
+                        bytes[14] as u16 + ((bytes[15] as u16 & 0x3F) << 8),
+                    ];
+                    for (offset, value) in pixels.iter().enumerate() {
+                        raw_image[row_base + col + offset] = *value;
+                    }
+                } else if pana_bits == 12 {
+                    let pixels = [
+                        ((bytes[1] as u16 & 0xF) << 8) + bytes[0] as u16,
+                        16 * bytes[2] as u16 + (bytes[1] as u16 >> 4),
+                        ((bytes[4] as u16 & 0xF) << 8) + bytes[3] as u16,
+                        16 * bytes[5] as u16 + (bytes[4] as u16 >> 4),
+                        ((bytes[7] as u16 & 0xF) << 8) + bytes[6] as u16,
+                        16 * bytes[8] as u16 + (bytes[7] as u16 >> 4),
+                        ((bytes[10] as u16 & 0xF) << 8) + bytes[9] as u16,
+                        16 * bytes[11] as u16 + (bytes[10] as u16 >> 4),
+                        ((bytes[13] as u16 & 0xF) << 8) + bytes[12] as u16,
+                        16 * bytes[14] as u16 + (bytes[13] as u16 >> 4),
+                    ];
+                    for (offset, value) in pixels.iter().enumerate() {
+                        raw_image[row_base + col + offset] = *value;
+                    }
+                }
+                col += pixperblock;
+                cursor += 16;
+            }
+            crow += 1;
+        }
+        row += rowstep;
+    }
+    Ok(())
+}
+
+/// `sony_ljpeg_load_raw`: the tiled lossless-JPEG decode, each tile's
+/// header read from the file's own tile-offset list; the tiles walk left to
+/// right and wrap after each full raw width.
+fn sony_ljpeg_load_raw(meta: &CameraMeta, raw_image: &mut [u16], stream: &mut Stream) -> Result<()> {
+    let raw_width = meta.raw_width as u32;
+    let raw_height = meta.raw_height as u32;
+    let pitch = (meta.raw_pitch / 2) as usize;
+    let mut bits = BitReader::default();
+    let mut trow = 0u32;
+    let mut tcol = 0u32;
+    while trow < raw_height {
+        let save = stream.tell();
+        if meta.tile_length < NOT_TILED {
+            let tile_offset = stream.get4();
+            stream.seek(u64::from(tile_offset));
+        }
+        let Some(mut head) = ljpeg_start(stream, &mut bits, 0, false) else {
+            // A tile whose header fails stops the whole decode.
+            break;
+        };
+        let mut jrow = 0u32;
+        let mut row = 0u32;
+        while jrow < head.high as u32 && trow.wrapping_add(row) < raw_height.wrapping_sub(1) {
+            let row_start = ljpeg_row(stream, &mut bits, &mut head, jrow as i32, 0);
+            let mut jcol = 0u32;
+            let mut col = 0u32;
+            while jcol < head.wide as u32 && tcol.wrapping_add(col) < raw_width.wrapping_sub(1) {
+                // The engine's row pointer strides by the fixed four-channel
+                // width, whatever the tile's own component count.
+                let sample = |c: usize| head.rows.get(row_start + (jcol as usize) * 4 + c).copied().unwrap_or(0);
+                let row_a = (trow + row) as usize * pitch;
+                let row_b = (trow + row) as usize * pitch + pitch;
+                raw_image[row_a + (tcol + col) as usize] = sample(0);
+                raw_image[row_a + (tcol + col) as usize + 1] = sample(1);
+                raw_image[row_b + (tcol + col) as usize] = sample(2);
+                raw_image[row_b + (tcol + col) as usize + 1] = sample(3);
+                jcol += 1;
+                col += 2;
+            }
+            jrow += 1;
+            row += 2;
+        }
+        stream.seek(save + 4);
+        tcol = tcol.wrapping_add(meta.tile_width);
+        if tcol >= raw_width {
+            trow = trow.wrapping_add(meta.tile_length);
+            tcol = 0;
+        }
+    }
+    Ok(())
+}
+
+/// `sony_arq_load_raw`: the four-plane ARW stores, each pixel's third and
+/// fourth plane swapped in place before the over-peak scan.
+fn sony_arq_load_raw(
+    meta: &CameraMeta,
+    image: &mut [[u16; 4]],
+    stream: &mut Stream,
+    data_error: &mut bool,
+) -> Result<()> {
+    if meta.colors < 3 {
+        bail!("the camera raw's four-plane store is corrupt");
+    }
+    let raw_width = meta.raw_width as usize;
+    let raw_height = meta.raw_height as usize;
+    let count = raw_width * raw_height * 4;
+    let short_read = stream.size().saturating_sub(stream.tell()) < (count * 2) as u64;
+    stream.read_shorts(&mut image.as_flattened_mut()[..count]);
+    if short_read {
+        derror(stream, data_error)?;
+    }
+    stream.skip(-2);
+    for row in 0..raw_height {
+        let row_start = row * raw_width;
+        for pixel_index in row_start..row_start + raw_width {
+            image[pixel_index].swap(2, 3);
+            let in_active = ((row as i32 - meta.top_margin as i32) as u32) < meta.height
+                && (((pixel_index - row_start) as i32 - meta.left_margin as i32) as u32) < meta.width;
+            if in_active {
+                let cell = image[pixel_index];
+                let peak = cell[0].max(cell[1]).max(cell[2]).max(cell[3]);
+                if peak > meta.maximum as u16 {
+                    derror(stream, data_error)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `nikon_load_sraw`: the sRGB NEF rows as pairs of 12-bit samples split
+/// out of three bytes each, the chroma average spread over the pair, then
+/// the YCbCr pass through the tone curve the open stage rebuilt.
+fn nikon_sraw_load_raw(meta: &mut CameraMeta, image: &mut [[u16; 4]], stream: &mut Stream) -> Result<()> {
+    let raw_width = meta.raw_width as i32;
+    let raw_height = meta.raw_height as usize;
+    // One shared row reader; a short row keeps its predecessor's tail, as
+    // the engine's read does, and the buffer's slack bytes stay zero.
+    let mut row_buffer = vec![0u8; (3 * (raw_width.max(0) + 2)) as usize];
+    let read_len = (3 * raw_width.max(0)) as usize;
+    for row in 0..raw_height {
+        stream.read(&mut row_buffer[..read_len]);
+        let row_base = row * raw_width.max(0) as usize;
+        let mut col = 0i32;
+        while col < raw_width - 1 {
+            let bi = (col * 3) as usize;
+            let bits1 = (u16::from(row_buffer[bi + 1] & 0xf) << 8) | u16::from(row_buffer[bi]);
+            let bits2 = (u16::from(row_buffer[bi + 2]) << 4) | u16::from((row_buffer[bi + 1] >> 4) & 0xf);
+            let bits3 = (u16::from(row_buffer[bi + 4] & 0xf) << 8) | u16::from(row_buffer[bi + 3]);
+            let bits4 = (u16::from(row_buffer[bi + 5]) << 4) | u16::from((row_buffer[bi + 4] >> 4) & 0xf);
+            let pixel = row_base + col as usize;
+            image[pixel][0] = bits1;
+            image[pixel][1] = bits3;
+            image[pixel][2] = bits4;
+            image[pixel + 1][0] = bits2;
+            image[pixel + 1][1] = 2048;
+            image[pixel + 1][2] = 2048;
+            col += 2;
+        }
+    }
+
+    // The chroma average spreads each pair's even pixel's samples over the
+    // odd one; the engine casts the sum to a sample before halving.
+    for row in 0..raw_height {
+        let row_base = row * raw_width.max(0) as usize;
+        let mut col = 0i32;
+        while col < raw_width {
+            let col2 = if col < raw_width - 2 { col + 2 } else { col };
+            for channel in 1..3usize {
+                let even = row_base + col as usize;
+                let pair = row_base + col2 as usize;
+                let summed = i32::from(image[even][channel]) + i32::from(image[pair][channel]);
+                image[row_base + col as usize + 1][channel] = (summed / 2) as u16;
+            }
+            col += 2;
+        }
+    }
+
+    // The YCbCr pass folds the chroma into luma with the camera's weights
+    // and reads every channel back through the tone curve.
+    let curve = &meta.curve;
+    for row in 0..raw_height {
+        let row_base = row * raw_width.max(0) as usize;
+        for col in 0..raw_width.max(0) as usize {
+            let pixel = &mut image[row_base + col];
+            let y = f32::from(pixel[0]) / 2549.0f32;
+            let chroma_a = ((i32::from(pixel[1]) - 1280) as f32) / 1536.0f32;
+            let chroma_b = ((i32::from(pixel[2]) - 1280) as f32) / 1536.0f32;
+            let mut luma = y;
+            if luma > 1.0f32 {
+                luma = 1.0f32;
+            }
+            let (chroma_a, chroma_b) = if luma > 0.803f32 { (0.5f32, 0.5f32) } else { (chroma_a, chroma_b) };
+            let mut red = luma + 1.402f32 * (chroma_b - 0.5f32);
+            if red < 0.0f32 {
+                red = 0.0f32;
+            }
+            if red > 1.0f32 {
+                red = 1.0f32;
+            }
+            let mut green = luma - 0.34414f32 * (chroma_a - 0.5f32) - 0.71414f32 * (chroma_b - 0.5f32);
+            if green > 1.0f32 {
+                green = 1.0f32;
+            }
+            if green < 0.0f32 {
+                green = 0.0f32;
+            }
+            let mut blue = luma + 1.772f32 * (chroma_a - 0.5f32);
+            if blue > 1.0f32 {
+                blue = 1.0f32;
+            }
+            if blue < 0.0f32 {
+                blue = 0.0f32;
+            }
+            pixel[0] = curve[(red * 3072.0f32) as i32 as usize];
+            pixel[1] = curve[(green * 3072.0f32) as i32 as usize];
+            pixel[2] = curve[(blue * 3072.0f32) as i32 as usize];
+        }
+    }
+    meta.maximum = 16383;
     Ok(())
 }

@@ -52,12 +52,18 @@ pub(super) enum SensorKind {
     EightBit,
     /// The engine's `nikon_load_raw`: the 12-bit compressed NEF fallback.
     NikonPlain,
+    /// `nikon_14bit_load_raw`: the Z-mount and D6 bodies' 14-bit packed rows.
+    Nikon14Bit,
     /// `nikon_load_striped_packed_raw`: multi-strip packed 12-bit NEFs.
     NikonStripedPacked,
     /// `nikon_load_padded_packed_raw`, with `load_flags` = bytes per row.
     NikonPaddedPacked,
-    /// `nikon_yuv_load_raw`, later rewritten to `nikon_load_sraw`.
+    /// The uncompressed YUV stream, kept only to name the loader the open
+    /// stage rewrites; it never decodes pixels itself.
     NikonYuv,
+    /// `nikon_load_sraw`: the uncompressed YUV bodies after the open stage's
+    /// rewrite, with its own curve and the CC interpolation.
+    NikonSraw,
     /// `nikon_he_load_raw`: the JPEG-XS container the Z 8/9 bodies write.
     NikonHe,
     /// `sony_arw2_load_raw`: ARW v2's LZ77-style 12-bit stream, ARW 2.0+.
@@ -65,6 +71,10 @@ pub(super) enum SensorKind {
     /// `sony_arw_load_raw`: the packed 12-bit layout of the earliest ARWs,
     /// with the extra eight rows the metadata stage adds to `raw_height`.
     SonyArw,
+    /// `sony_ljpeg_load_raw`: the tiled lossless-JPEG ARW stream.
+    SonyLjpeg,
+    /// `sony_arq_load_raw`: the four-sample pixel-shift composites.
+    SonyArq,
     /// `fuji_compressed_load_raw`: the block-compressed RAF rows.
     FujiCompressed,
     /// `fuji_14bit_load_raw`: the packed fourteen-bit RAF rows.
@@ -78,6 +88,10 @@ pub(super) enum SensorKind {
     /// selected by the 0x0118 offset tag or the file-size rule in the maker's
     /// arm.
     Panasonic,
+    /// `panasonicC6_load_raw`: encoding 6's per-block 14/12-bit rows.
+    PanasonicC6,
+    /// `panasonicC7_load_raw`: encoding 7's plain 14/12-bit packed rows.
+    PanasonicC7,
     /// `pentax_load_raw`: the PEF Huffman stream, seeded by the huff table
     /// the 0x0220 record points at.
     Pentax,
@@ -88,6 +102,9 @@ pub(super) enum SensorKind {
     Samsung2,
     /// `samsung3_load_raw`: the third SRW generation's rows.
     Samsung3,
+    /// `unpacked_load_raw_fuji_f700s20`: the oldest SuperCCD bodies' rows,
+    /// read past their half-width record.
+    FujiF700S20,
 }
 
 /// The white-balance index values Canon and Fuji records use, spelled out
@@ -662,6 +679,9 @@ struct PanaState {
     encoding: u32,
     /// `pana_black`, the Black{Red,Green,Blue}Level records.
     black: [u32; 3],
+    /// `linear_max`, the LinearityLimit{Red,Green,Blue} records, with the
+    /// engine's clipping: 16383 loses 64 and 4095 loses 16.
+    linear_max: [u32; 4],
 }
 
 /// `pana`, the sensor records keyed to a body's exact raw size. A row match
@@ -727,6 +747,16 @@ const PENTAX_ID_K_3_III_MONO: u64 = 0x132d6;
 /// shorts. Their defaults keep their names, the loader naming each after
 /// its tag.
 #[derive(Debug, Clone, Default)]
+/// The fields the striped loader reads off the directory it matches by its
+/// raw-data offset, one record per directory the walker walked.
+pub(super) struct StripIfdFacts {
+    pub offset: i64,
+    pub rows_per_strip: i32,
+    pub strip_offsets: Vec<i64>,
+}
+
+/// The Olympus compression plan, consumed by the maker's pixel loader.
+#[derive(Debug, Clone)]
 pub(super) struct OlympusState {
     pub valid_bits: u32,
     pub tag_x640: u32,
@@ -856,6 +886,12 @@ pub(super) struct CameraMeta {
     pub crx: CameraCrxHeader,
     /// The Fuji compressed-stream facts, consumed by the RAF pixel loader.
     pub fuji: FujiComprState,
+    /// Every directory's strip facts in walk order, for the striped loader's
+    /// own directory search by raw-data offset.
+    pub strip_ifds: Vec<StripIfdFacts>,
+    /// The open-stage refusal reason: when set, the file may not decode at
+    /// all — the reference engine fails its open on such records.
+    pub refusal: Option<&'static str>,
 }
 
 /// The container walker. Holds the engine's identify-stage globals while the
@@ -935,6 +971,10 @@ struct Walker<'a> {
     /// `extrasamples` per IFD (tag 0x0152), for the RGB-alpha sample skip.
     extrasamples: Vec<u32>,
     loader: Option<SensorKind>,
+    /// The open-stage refusal: the engine fails the whole open when the
+    /// record's size contradicts its layout; neither engine nor rawler may
+    /// decode such a file.
+    refusal: Option<&'static str>,
     load_flags: u32,
     load_flags2: u32,
     /// `raw_pitch`, the sRAW row stride in bytes.
@@ -985,6 +1025,9 @@ struct Walker<'a> {
     /// The compression record's tone curve the plain Nikon loader's read
     /// supplies at open, replacing the identity over its own entries.
     nikon_curve: Option<Vec<u16>>,
+    /// The YUV bodies' mark that the compressed arm ran its s-curve build
+    /// before the open stage's own table rebuild.
+    yuv_gamma: bool,
 }
 
 /// Sony metadata state: the SR2 private-data stash, the Minolta-private block
@@ -1121,6 +1164,7 @@ impl<'a> Walker<'a> {
             cr2_slice: [0; 3],
             extrasamples: Vec::new(),
             loader: None,
+            refusal: None,
             load_flags: 0,
             load_flags2: 0,
             canon: CanonState::default(),
@@ -1149,6 +1193,7 @@ impl<'a> Walker<'a> {
             leaked_ifd: None,
             curve_head: std::array::from_fn(|index| index as u16),
             nikon_curve: None,
+            yuv_gamma: false,
         }
     }
 
@@ -1229,6 +1274,13 @@ pub(super) fn parse_camera_meta(data: &[u8]) -> Option<CameraMeta> {
         return None;
     }
     walker.finish_open();
+    // A maker whose pixel loader this port does not run keeps rawler's
+    // decode: the metadata walker carried everything else, but the pixels
+    // must come from one engine. The open stage can also refuse the whole
+    // file instead; that refusal flows through for the decode to fail on.
+    if walker.loader.is_none() && walker.refusal.is_none() {
+        return None;
+    }
     Some(walker.into_meta())
 }
 
@@ -2106,6 +2158,22 @@ impl<'a> Walker<'a> {
                 0x001c | 0x001d | 0x001e => {
                     let value = self.stream.get2() as u32;
                     self.pana.black[(tag - 0x001c) as usize] = value;
+                }
+                0x000e | 0x000f | 0x0010 => {
+                    // LinearityLimit{Red,Green,Blue}; the clipped values then
+                    // feed the later bodies' maximum.
+                    let mut limit = self.stream.get2() as u32;
+                    if limit == 16383 {
+                        limit -= 64;
+                    }
+                    if limit == 4095 {
+                        limit -= 16;
+                    }
+                    let channel = (tag - 0x000e) as usize;
+                    self.pana.linear_max[channel] = limit;
+                    if tag == 0x000f {
+                        self.pana.linear_max[3] = self.pana.linear_max[1];
+                    }
                 }
                 0x002d => {
                     self.pana.encoding = self.stream.get2() as u32;
@@ -3166,11 +3234,12 @@ impl<'a> Walker<'a> {
                     && record.samples == 4
                     && record.bytes == pixel_count * 8
                 {
-                    // Sony ARQ is not modelled yet; its filters/desc clears
-                    // only matter for files that would return metadata.
+                    // The pixel-shift composites: four interlaced samples per
+                    // pixel, green-blue swapped on the way out.
                     self.tiff_bps = 14;
                     self.tiff_samples = 4;
                     self.filters = 0;
+                    self.loader = Some(SensorKind::SonyArq);
                 } else if starts_ignore_case(&self.make, "Nikon")
                     && (self.software.starts_with("Nikon Scan")
                         || self.nikon_transfer == 2
@@ -3200,11 +3269,15 @@ impl<'a> Walker<'a> {
                 let sony_make = self.make.eq_ignore_ascii_case("SONY");
                 if self.dng_version == 0 && self.tiff_compress == 6 && sony_make {
                     if record.phint == 6 && record.bps >= 12 && record.samples == 3 {
-                        // sony_ycbcr_load_raw is not modelled yet.
+                        // sony_ycbcr_load_raw: the R1's tiled YCC stream. Its
+                        // decompressor is not ported; the loader stays unset,
+                        // so the file keeps rawler's decode.
                         self.filters = 0;
                         self.colors = 3;
                     } else {
-                        // sony_ljpeg_load_raw is not modelled yet.
+                        // The single-sample comp-6 files decode through the
+                        // shared lossless-JPEG loader with Sony's tile walk.
+                        self.loader = Some(SensorKind::SonyLjpeg);
                     }
                 } else if self.dng_version == 0
                     && self.tiff_compress == 7
@@ -3215,7 +3288,7 @@ impl<'a> Walker<'a> {
                     && self.tiff_bps == 14
                     && self.tiff_samples == 1
                 {
-                    // sony_ljpeg_load_raw is not modelled yet.
+                    self.loader = Some(SensorKind::SonyLjpeg);
                 } else {
                     self.loader = Some(SensorKind::CanonLosslessJpeg);
                 }
@@ -3242,9 +3315,10 @@ impl<'a> Walker<'a> {
                     }
                 } else if bytes_yuv {
                     self.loader = Some(SensorKind::NikonYuv);
-                    // Gamma curve build and the cblack/filters clears are
-                    // mirrored; the curve table itself is rebuilt by the
-                    // processing phase when the file actually reaches it.
+                    // The s-curve build the compressed arm makes here runs
+                    // before the open stage rebuilds the whole table for the
+                    // YUV bodies; keep its marker for the hand-off.
+                    self.yuv_gamma = true;
                     self.cblack.fill(0);
                     self.filters = 0;
                 } else if bytes_pair {
@@ -3730,6 +3804,59 @@ impl<'a> Walker<'a> {
                     self.cam_mul[2] = self.stream.getrealf(parsed.kind);
                     self.cam_mul[1] = self.stream.getrealf(parsed.kind);
                     self.cam_mul[3] = self.stream.getrealf(parsed.kind);
+                }
+                // Flash exposure compensation: recorded state the colour
+                // pipeline never reads.
+                0x0012 => {}
+                // The Coolpix balance block: the E-name bodies set the
+                // camera multipliers, and the NRW bodies set the P-series
+                // levels. The balance rows behind them fill `icWBC`, which
+                // nothing in this pipeline reads.
+                0x0014 if parsed.kind == TYPE_UNDEFINED => {
+                    if parsed.len == 2560 {
+                        // E5400, E8400, E8700, E8800: the camera pair sits
+                        // past a short block, read big-endian.
+                        self.stream.skip(0x4e0);
+                        self.stream.order = BIG_ENDIAN;
+                        self.cam_mul[0] = f32::from(self.stream.get2()) / 256.0;
+                        self.cam_mul[2] = f32::from(self.stream.get2()) / 256.0;
+                        self.cam_mul[1] = 1.0;
+                        self.cam_mul[3] = 1.0;
+                    } else if parsed.len == 1280 {
+                        // E5000, E5700: no balance block, neutral levels.
+                        self.cam_mul = [1.0, 1.0, 1.0, 1.0];
+                    } else {
+                        // The NRW-signed bodies: P6000, P7000, P7100, B700,
+                        // P1000, COOLPIX A1000.
+                        let mut sign = [0u8; 10];
+                        self.stream.read(&mut sign);
+                        sign[9] = 0;
+                        if &sign[..4] == b"NRW " {
+                            if &sign[4..9] == b"0100\x00" {
+                                // P6000.
+                                self.stream.skip(0x13de);
+                                self.cam_mul[0] = self.stream.get4().wrapping_shl(1) as f32;
+                                self.cam_mul[1] = self.stream.get4() as f32;
+                                self.cam_mul[3] = self.stream.get4() as f32;
+                                self.cam_mul[2] = self.stream.get4().wrapping_shl(1) as f32;
+                            } else {
+                                // P7000, P7100, B700, P1000.
+                                self.stream.skip(0x16);
+                                self.black = u32::from(self.stream.get2());
+                                if self.cam_mul[0] < 0.1 {
+                                    self.stream.skip(0x16);
+                                    self.cam_mul[0] =
+                                        self.stream.get4().wrapping_shl(1) as f32;
+                                    self.cam_mul[1] = self.stream.get4() as f32;
+                                    self.cam_mul[3] = self.stream.get4() as f32;
+                                    self.cam_mul[2] =
+                                        self.stream.get4().wrapping_shl(1) as f32;
+                                } else {
+                                    self.stream.skip(0x26);
+                                }
+                            }
+                        }
+                    }
                 }
                 // The thumbnail's own directory; its compression tag can set
                 // raw_color, so the nested parse is kept.
@@ -5288,15 +5415,38 @@ const SONY_ID_ILME_FX2: u64 = 0x196;
 const SONY_ID_ILCE_6700: u64 = 0x18a;
 const SONY_ID_ZV_E10M2: u64 = 0x18f;
 const SONY_ID_ILME_FX30: u64 = 0x187;
+const SONY_ID_SLT_A99: u64 = 0x126;
+
+/// The Nikon sRAW s-curve the open stage builds over the gamma table's
+/// head: 3073 beta-polynomial entries replace the tone curve's head and
+/// the rest keep the gamma they were built with.
+fn rebuild_nikon_sraw_curve(curve: &mut [u16]) {
+    const BETA1: f64 = -5.79342238397656E-02;
+    const BETA2: f64 = 3.28163551282665;
+    const BETA3: f64 = -8.43136004842678;
+    const BETA4: f64 = 1.03533181861023E+01;
+    for i in 0..=3072i32 {
+        let x = i as f64 / 3072.0;
+        let shaping =
+            -BETA1 * x - BETA2 * x * x - BETA3 * x * x * x - BETA4 * x * x * x * x;
+        let y = 1.0 - shaping.exp();
+        let y = if y < 0.0 { 0.0 } else { y };
+        curve[i as usize] = (y * 16383.0f64) as u16;
+    }
+}
 
 impl<'a> Walker<'a> {
     /// `adobe_coeff`: fill the levels and, through `cam_xyz_coeff`, the colour
     /// matrix from the camera table. `internal_only` is the engine's third
     /// argument: it keeps `rgb_cam` untouched.
     fn apply_adobe_coeff(&mut self, internal_only: bool) {
+        // The engine looks its table up with the alias-resolved model, not
+        // the one the file records (the E-name Coolpix bodies, for one).
+        let adobe_model =
+            super::camera_colors::get_normalized_model(&self.make, self.model.trim_end());
         let row = super::camera_colors::find_meta_color_row(
             &self.make,
-            self.model.trim_end(),
+            &adobe_model,
             self.black,
             &self.cblack,
             self.maximum,
@@ -7443,6 +7593,28 @@ impl<'a> Walker<'a> {
     /// balance touch fields the metadata output does not carry, so they stay
     /// engine-only.
     fn finish_open(&mut self) {
+        // The Z-mount and D6 bodies record 14-bit rows in the packed two-in-
+        // three-bytes layout, and their data size is the record: the plain
+        // form keeps the Bayer layout, the three-colour one clears it. The
+        // size's half-bytes-per-row division runs in the engine's int, then
+        // the ceiling in float; the three-colour compare runs in float too.
+        if self.make == "Nikon"
+            && (self.model.starts_with('Z') || self.model.eq_ignore_ascii_case("D6"))
+        {
+            let packed_cells = (self.raw_width as i64 * 7 / 4) as f32 / 16.0;
+            let packed_size = (packed_cells.ceil() as u32)
+                .wrapping_mul(16)
+                .wrapping_mul(self.raw_height as u32) as i64;
+            if packed_size == self.data_size {
+                self.loader = Some(SensorKind::Nikon14Bit);
+            }
+            let colour_cells = (self.raw_width as i64 * 21 / 4) as f32 / 16.0;
+            let colour_size = colour_cells.ceil() * 16.0 * self.raw_height as f32;
+            if colour_size == self.data_size as f32 {
+                self.loader = Some(SensorKind::Nikon14Bit);
+                self.filters = 0; // 3-color nefx image
+            }
+        }
         // The sRAW frame is a cropped sensor view: when its ratio is not one
         // of the sRAW shapes, replace it with the sensor size and the absolute
         // crop. The engine reads the crop record even when the tag was absent,
@@ -7566,6 +7738,39 @@ impl<'a> Walker<'a> {
                 eprintln!("trace: finish_open adjust_margins {}", adjust_margins);
             }
         }
+        // Sony: the pixel-shift composites carry their crop's own margin, and
+        // the crop-mode frames of a few bodies whose sizes the directories do
+        // not record keep their estimate.
+        if self.make == "Sony" && self.dng_version == 0 {
+            if self.loader == Some(SensorKind::SonyArq) {
+                // A7RM4 16x, both APS-C and APS; A7RM3/M4 4x merge.
+                self.width = self.raw_width as i32 - if self.raw_width > 12000 { 64 } else { 32 };
+            }
+            let a99 = self.sony.body_id == SONY_ID_SLT_A99;
+            let lower = self.model.to_ascii_lowercase();
+            let crop_pair = (lower.starts_with("ilce-7rm") || self.model.eq_ignore_ascii_case("ILCA-99M2"))
+                && (self.raw_width == 5216 || self.raw_width == 6304);
+            let a7r_crop = self.model.eq_ignore_ascii_case("ILCE-7R")
+                && self.raw_width >= 4580
+                && self.raw_width < 5020;
+            let a7_crop = self.model.eq_ignore_ascii_case("ILCE-7") && self.raw_width == 3968;
+            let a7m_crop = (lower.starts_with("ilce-7m") || self.model.eq_ignore_ascii_case("ILCE-9") || a99)
+                && self.raw_width > 3750
+                && self.raw_width < 4120;
+            let a7s_crop = lower.starts_with("ilce-7s") && self.raw_width == 2816;
+            if crop_pair || a7r_crop || a7_crop || a7m_crop || a7s_crop {
+                self.width = self.raw_width as i32 - 32;
+            }
+        }
+        // The oldest SuperCCD bodies carry double-wide rows; halving the raw
+        // width moves them onto the dedicated loader.
+        if self.dng_version == 0
+            && self.make == "Fujifilm"
+            && (self.model.starts_with("S20Pro") || self.model.starts_with("F700"))
+        {
+            self.raw_width /= 2;
+            self.loader = Some(SensorKind::FujiF700S20);
+        }
         // The packed rows the D810 and D4S write need their column-boundary
         // flag when the byte counts line up with three bytes per two samples.
         if self.loader == Some(SensorKind::Packed)
@@ -7594,8 +7799,10 @@ impl<'a> Walker<'a> {
         }
         // The engine's yuv loader is the Nikon sRAW in disguise: black goes,
         // the Bayer layout goes, and the pixel phase reinterprets the record
-        // along with its s-curve table.
+        // along with the s-curve table rebuilt over the gamma's head.
         if self.loader == Some(SensorKind::NikonYuv) {
+            self.loader = Some(SensorKind::NikonSraw);
+            self.yuv_gamma = true;
             self.black = 0;
             self.cblack.fill(0);
             self.filters = 0;
@@ -7649,6 +7856,58 @@ impl<'a> Walker<'a> {
                 *level -= lowest;
             }
             self.black = lowest;
+        }
+        // The later Panasonic bodies: their encodings carry the row's own
+        // packed layout, and the recorded size must match it. The open stage
+        // takes the black levels back, loses the pattern gains and sets the
+        // maximum from the largest LinearityLimit record.
+        if self.loader == Some(SensorKind::Panasonic)
+            && matches!(self.pana.encoding, 6 | 7 | 8)
+        {
+            self.cblack[0] = self.pana.black[0];
+            self.cblack[1] = self.pana.black[1];
+            self.cblack[2] = self.pana.black[2];
+            self.cblack[3] = self.cblack[1];
+            self.cblack[4] = 0;
+            self.cblack[5] = 0;
+            self.black = 0;
+            let largest = self.pana.linear_max[0].max(self.pana.linear_max[1]).max(self.pana.linear_max[2]);
+            self.maximum = largest;
+            if self.pana.encoding == 6 {
+                // The block count picks the layout: eleven samples a block
+                // when the width divides evenly and the size matches, then
+                // fourteen, and nothing else reads.
+                let row_bytes_11 = self.raw_width / 11 * 16;
+                let row_bytes_14 = self.raw_width / 14 * 16;
+                let mut data_size = self.data_size;
+                if data_size == 0 {
+                    data_size = self.fsize() - self.data_offset;
+                }
+                let block_11 = self.raw_width % 11 == 0
+                    && self.raw_height as i64 * row_bytes_11 as i64 == data_size;
+                let block_14 = self.raw_width % 14 == 0
+                    && self.raw_height as i64 * row_bytes_14 as i64 == data_size;
+                if block_11 || block_14 {
+                    self.loader = Some(SensorKind::PanasonicC6);
+                } else {
+                    self.refusal = Some("the camera raw data size does not match its recorded layout");
+                }
+            } else if self.pana.encoding == 7 {
+                let pixels_per_block = if self.pana.bits == 14 { 9 } else { 10 };
+                let row_bytes = self.raw_width / pixels_per_block * 16;
+                if self.raw_width % pixels_per_block == 0
+                    && self.raw_height as i64 * row_bytes as i64 == self.data_size
+                {
+                    self.loader = Some(SensorKind::PanasonicC7);
+                } else {
+                    self.refusal = Some("the camera raw data size does not match its recorded layout");
+                }
+            } else if self.pana.encoding == 8 {
+                // The encoding-8 stream's stripe decoder is not ported; the
+                // file keeps rawler's decode. The engine refuses only the
+                // stripe-less corrupt forms, which rawler refuses as well.
+                self.loader = None;
+            }
         }
         // The engine reads the compression record's tone curve at open for
         // the bodies whose loader is `nikon_load_raw`; the loader's own
@@ -7714,7 +7973,7 @@ impl<'a> Walker<'a> {
     fn into_meta(self) -> CameraMeta {
         // The engine's curve is a 0x10000 identity fill; the Sony ladder
         // rewrites its head and the Nikon records rewrite a prefix.
-        let curve = match self.nikon_curve {
+        let mut curve = match self.nikon_curve {
             Some(curve) => curve,
             None => {
                 let mut curve = self.curve_head.to_vec();
@@ -7722,6 +7981,13 @@ impl<'a> Walker<'a> {
                 curve
             }
         };
+        if self.yuv_gamma {
+            // The compressed arm's table build overwrites every entry the
+            // engine's gamma call reaches; the open stage's rebuild then runs
+            // over its head (the sRAW loader reads the result back).
+            curve = super::process::gamma_curve_table(1.0 / 2.4, 12.92, 1, 4095);
+            rebuild_nikon_sraw_curve(&mut curve);
+        }
         CameraMeta {
             make: self.make.clone(),
             model: self.model.clone(),
@@ -7808,6 +8074,17 @@ impl<'a> Walker<'a> {
                 compr_raw_type: self.fuji.compr_raw_type,
                 compr_lossless: self.fuji.compr_lossless,
             },
+            strip_ifds: self
+                .ifds
+                .iter()
+                .take(self.ifd_count)
+                .map(|record| StripIfdFacts {
+                    offset: record.offset,
+                    rows_per_strip: record.rows_per_strip,
+                    strip_offsets: record.strip_offsets.clone(),
+                })
+                .collect(),
+            refusal: self.refusal,
         }
     }
 }

@@ -193,46 +193,6 @@ Its tools:
 
 These parts of Gaea 2.3.1.0 are not in Nerthus yet.
 
-### Properties
-
-- Colour properties, colour variables and the background in Options ›
-  Viewport open a different colour picker from Gaea's. Nerthus's has a
-  square of saturation and brightness beside an upright hue strip, with
-  red, green and blue sliders and a hex box. Gaea's is the square alone,
-  with a hue bar across the bottom.
-- The gradient editor of CLUTer and Synth isn't Gaea's. Gaea shows a
-  96-pixel black strip of colour stops above the same kind of picker.
-  Clicking the strip adds a stop in the colour under it, dragging a stop
-  past either end removes it, the left and right arrow keys move the chosen
-  stop by 0.01, and Delete removes it.
-- Mixer's layer list can't change a layer's colour, which a layer without
-  an input (or a simplified one) builds with. It doesn't show thumbnails of
-  the layers' inputs or the ground layer's, and it can't reorder layers by
-  dragging them.
-- The Add Modifiers menu offers Clip, Match Height, Mask by Height and Mask
-  by Slope on colour nodes. Gaea disables them there.
-- TextureBaker and MeshWarp don't list the files they will write, and
-  TileInput doesn't sum up the tiles it found (how many, how they're laid
-  out, their size, folder and extension).
-
-### Files
-
-- Camera raw files other than DNG (CR2, CR3, CRW, NEF, ARW, ORF, RAF,
-  RW2, PEF, SRW and so on) open and go through the same processing path
-  as DNG files. The port of LibRaw's format-specific path lives in
-  `crates/nerthus-io/src/coders/dng/camera-loaders.rs`,
-  `crates/nerthus-io/src/coders/dng/camera-raw-meta.rs` and
-  `crates/nerthus-io/src/coders/dng/camera-raw.rs`: the maker notes and
-  the pixel loaders are carried maker by maker and verified against the
-  reference engine's own numbers — Canon (CR2's lossless JPEG, CR3, CRW
-  and sRAW), Nikon's compressed NEF, Sony's ARW and ARW2, Fujifilm's
-  unpacked and compressed RAF streams, Olympus, Panasonic, Pentax and
-  Samsung — each byte-exact through the whole processing path. The
-  remaining loaders (the striped and padded packed NEF forms, the YUV
-  and JPEG-XS NEFs, the 14-bit and DBP RAFs, the later Samsung
-  generations and the two generic packed rows forms) still read their
-  pixels with Rawler's own decoders.
-
 ### Builds
 
 - BlobRemover with Enforce Quantization off fails ("Reduce complexity or
@@ -275,6 +235,14 @@ These parts of Gaea 2.3.1.0 are not in Nerthus yet.
   starts. Gaea opens one only when it's started with `-Console`.
 - Reading EPS, PostScript and PDF files. Gaea hands them to Ghostscript, a
   separately installed program that draws them with its own fonts.
+- Camera raw files from makers outside the eight families the port reads.
+  Nerthus's camera raw support covers Canon, Nikon, Sony, Fujifilm,
+  Olympus, Panasonic, Pentax and Samsung; Gaea also opens every other
+  maker LibRaw supports (Leica, Sigma, Kodak, Minolta, GoPro, DJI and the
+  rest). Within the eight families, three things Gaea can read stayed out
+  on purpose: Sony's R1, whose sensor data is YCC; Nikon's Coolscan film
+  scanners; and Panasonic's encoding-8 RW2 streams. DNG files from any
+  maker are unaffected.
 - Gaea's support services: Watson's support ticket form, and its upload of
   crash logs to QuadSpinner in return for a Log Receipt code.
 - Gaea's interface fonts. Nerthus uses Roboto and Roboto Mono, so text is

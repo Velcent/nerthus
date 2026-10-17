@@ -657,6 +657,7 @@ fn draw_editor(
         editor.show_preview();
     }
 
+    gradient_editor::flush_pending(ctx, editor, !pending.is_empty());
     commands::run(pending, editor, ui_state, window);
     // What the editor shows goes with the project (`TerrainState`), and
     // the preview follows the project's lock through undo and redo.

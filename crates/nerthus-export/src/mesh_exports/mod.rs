@@ -18,6 +18,7 @@ mod texture_baker;
 
 pub use mesher::{export as export_mesher_map, export_adaptive, export_grid, MeshExportOptions, TerrainSize};
 pub use point_cloud::{map_points, write_points};
+pub use texture_baker::planned_files as texture_bake_files;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

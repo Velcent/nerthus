@@ -176,6 +176,9 @@ pub(super) struct Raw {
     pub pixel_aspect: f64,
     /// SuperCCD's diagonal sensor width, before the final 45° rotation.
     pub fuji_width: u32,
+    /// The SuperCCD layout whose placement shears the other way and keeps
+    /// the buffer as wide as the sensor.
+    pub fuji_layout: bool,
     /// Rawler has already placed SuperCCD samples on the diagonal grid.
     pub fuji_raw_rotated: bool,
     pub filters: u32,
@@ -201,6 +204,9 @@ pub(super) struct Raw {
     /// `zero_is_bad`: a Panasonic body's mark to treat zero samples as
     /// dead pixels; the loaders for other bodies never set it.
     pub zero_is_bad: bool,
+    /// The decoder's fixed-colour-maximum mark: the processing pass keeps
+    /// the maximum the loader set and skips the peak trim.
+    pub fixed_maximum: bool,
     pub ifds: Vec<Ifd>,
     /// The raw IFD (`find_ifd_by_offset(data_offset)`).
     pub raw_ifd: usize,
@@ -849,6 +855,7 @@ impl Parser<'_> {
             left_margin: selected.left_margin as u32,
             pixel_aspect: self.pixel_aspect,
             fuji_width: 0,
+            fuji_layout: false,
             fuji_raw_rotated: false,
             filters: 0,
             colors: self.colors,
@@ -870,6 +877,7 @@ impl Parser<'_> {
             mask: self.mask,
             xtrans: self.xtrans,
             zero_is_bad: false,
+            fixed_maximum: false,
             ifds: Vec::new(),
             raw_ifd: raw,
         };

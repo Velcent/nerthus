@@ -17,27 +17,11 @@ use super::stream::LITTLE_ENDIAN;
 use super::unpack::RawData;
 
 pub(super) fn decode_camera_raw(bytes: &[u8]) -> Result<Output> {
-    // The engine's own pixel loaders run for the makers whose loader is
-    // ported; rawler still decodes the remainder.
-    let engine_metadata = parse_camera_meta(bytes).filter(|meta| {
-        matches!(
-            meta.loader,
-            SensorKind::Samsung
-                | SensorKind::Pentax
-                | SensorKind::Olympus
-                | SensorKind::Panasonic
-                | SensorKind::Unpacked
-                | SensorKind::NikonPlain
-                | SensorKind::CanonLosslessJpeg
-                | SensorKind::CanonCiff
-                | SensorKind::CanonSraw
-                | SensorKind::CanonCrx
-                | SensorKind::FujiCompressed
-                | SensorKind::SonyArw2
-                | SensorKind::SonyArw
-        )
-    });
+    let engine_metadata = parse_camera_meta(bytes);
     if let Some(mut meta) = engine_metadata {
+        if let Some(refusal) = meta.refusal {
+            bail!("{refusal}");
+        }
         ensure!(
             (22..=64000).contains(&meta.raw_width) && (22..=64000).contains(&meta.raw_height),
             "invalid camera raw dimensions"
@@ -71,7 +55,10 @@ fn unpacked_camera_state(meta: &CameraMeta) -> Raw {
         left_margin: meta.left_margin,
         pixel_aspect: meta.pixel_aspect,
         fuji_width: meta.fuji_width,
-        fuji_raw_rotated: meta.fuji_layout != 0,
+        // The engine's own loaders leave the samples in sensor order; the
+        // processing places the SuperCCD grid.
+        fuji_layout: meta.fuji_layout != 0,
+        fuji_raw_rotated: false,
         filters: meta.filters,
         colors: meta.colors,
         tiff_bps: meta.tiff_bps,
@@ -92,6 +79,8 @@ fn unpacked_camera_state(meta: &CameraMeta) -> Raw {
         mask: meta.mask,
         xtrans: meta.xtrans,
         zero_is_bad: meta.zero_is_bad,
+        // The sRAW-style loaders set a fixed colour maximum themselves.
+        fixed_maximum: matches!(meta.loader, SensorKind::NikonSraw | SensorKind::EightBit),
         ifds: Vec::new(),
         raw_ifd: 0,
     }
@@ -198,6 +187,7 @@ fn prepare_camera_raw(decoded: RawImage) -> Result<(Raw, RawData)> {
         top_margin: top as u32,
         pixel_aspect: 1.0,
         fuji_width: decoded.fuji_rotation_width.unwrap_or(0) as u32,
+        fuji_layout: false,
         fuji_raw_rotated: decoded.fuji_rotation_width.is_some(),
         filters,
         colors,
@@ -221,6 +211,7 @@ fn prepare_camera_raw(decoded: RawImage) -> Result<(Raw, RawData)> {
         ifds: Vec::new(),
         raw_ifd: 0,
         zero_is_bad: false,
+        fixed_maximum: false,
     };
     let make = normalized_make(&decoded.clean_make);
     let has_camera_color = apply_camera_colors(&mut state, make, &decoded.clean_model);
@@ -348,27 +339,8 @@ mod diagnostics {
                 let extension = path.extension().unwrap().to_str().unwrap().to_ascii_lowercase();
                 if !suffixes.contains(&extension.as_str()) { continue; }
                 let source_bytes = std::fs::read(&path).unwrap();
-                // Only cases the engine's own loader runs on dump; the rest
-                // stay with rawler.
-                let metadata = parse_camera_meta(&source_bytes).filter(|meta| {
-                    matches!(
-                        meta.loader,
-                        SensorKind::Samsung
-                | SensorKind::Pentax
-                | SensorKind::Olympus
-                | SensorKind::Panasonic
-                | SensorKind::Unpacked
-                | SensorKind::NikonPlain
-                | SensorKind::CanonLosslessJpeg
-                | SensorKind::CanonCiff
-                | SensorKind::CanonSraw
-                | SensorKind::CanonCrx
-                | SensorKind::FujiCompressed
-                | SensorKind::SonyArw2
-                | SensorKind::SonyArw
-                    )
-                });
-                let Some(mut meta) = metadata else { continue; };
+                let Some(mut meta) = parse_camera_meta(&source_bytes) else { continue; };
+                if meta.refusal.is_some() { continue; }
                 let mut state = unpacked_camera_state(&meta);
                 let raw_data = unpack_camera(&mut meta, &mut state, &source_bytes).unwrap();
 

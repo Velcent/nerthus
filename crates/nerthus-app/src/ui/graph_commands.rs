@@ -687,7 +687,7 @@ fn connection_middle(editor: &Editor, ui_state: &UiState, to: i32, to_port: &str
 }
 
 /// `Node.IsColor`: a colorizer, or a node whose main output is a colour.
-fn is_color(editor: &Editor, id: i32) -> bool {
+pub(super) fn is_color(editor: &Editor, id: i32) -> bool {
     let Some(node) = editor.document.node(id) else {
         return false;
     };

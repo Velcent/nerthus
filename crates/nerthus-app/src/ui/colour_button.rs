@@ -343,54 +343,96 @@ fn picker_popup(ui: &Ui, id: Id, button: Rect, state: &mut PickerState) -> Picke
     let area = egui::Area::new(id.with("picker")).fixed_pos(frame.min).constrain(false).order(egui::Order::Foreground);
     let shown = area.show(ui.ctx(), |ui| {
         let (rect, response) = ui.allocate_exact_size(frame.size(), Sense::click());
-        ui.painter().rect_filled(rect, 4.0 * scale, theme::WINDOW_DARK);
-        let inner = rect.shrink(PICKER_MARGIN * scale);
-        let strip_height = HUE_HEIGHT * scale;
-        let square_bottom = inner.bottom() - strip_height - HUE_GAP * scale;
-        let square = Rect::from_min_max(inner.min, Pos2::new(inner.right(), square_bottom));
-        let strip = Rect::from_min_max(Pos2::new(inner.left(), inner.bottom() - strip_height), inner.max);
-
-        // A press, or a move with the button down, over a canvas picks.
-        let (down, acted, pointer) = ui.input(|input| {
-            let acted = input.pointer.primary_pressed() || input.pointer.delta() != Vec2::ZERO;
-            (input.pointer.primary_down(), acted, input.pointer.latest_pos())
-        });
-        if let Some(pointer) = pointer.filter(|_| down && acted) {
-            if square.contains(pointer) {
-                // `PickColor`.
-                let at = (pointer - square.min) / square.size();
-                state.saturation = at.x.clamp(0.0, 1.0);
-                state.value = (1.0 - at.y).clamp(0.0, 1.0);
-                state.cursor = at;
-                state.update_colour();
-                picked = Some(state.colour);
-            } else if strip.contains(pointer) {
-                // `UpdateHueFromPosition`.
-                let along = (pointer.x - strip.left()) / strip.width();
-                state.hue = along.clamp(0.0, 1.0) * 360.0;
-                state.marker = along;
-                state.update_colour();
-                picked = Some(state.colour);
-            }
-        }
-
-        paint_square(ui, square, state.hue);
-        paint_hue_strip(ui, strip);
-        // The marks, cut off at their canvases' edges.
-        let cursor_centre = square.min + state.cursor * square.size();
-        let cursor_painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(square));
-        let ring_radius = (MARK_SIZE - MARK_STROKE) / 2.0 * scale;
-        cursor_painter.circle_stroke(cursor_centre, ring_radius, Stroke::new((MARK_STROKE + MARK_SHADOW) * scale, Color32::from_black_alpha(80)));
-        cursor_painter.circle_stroke(cursor_centre, ring_radius, Stroke::new(MARK_STROKE * scale, Color32::WHITE));
-        let marker_left = strip.left() + state.marker * strip.width() - MARK_SIZE / 2.0 * scale;
-        let marker = Rect::from_min_size(Pos2::new(marker_left, strip.top()), Vec2::new(MARK_SIZE * scale, strip.height()));
-        let marker_painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(strip));
-        marker_painter.rect_stroke(marker, 0.0, Stroke::new(MARK_SHADOW * scale, Color32::from_black_alpha(80)), StrokeKind::Middle);
-        marker_painter.rect_stroke(marker, 0.0, Stroke::new(MARK_STROKE * scale, Color32::WHITE), StrokeKind::Inside);
+        picked = picker_contents(ui, rect, state, scale);
         response.secondary_clicked()
     });
     let pressed_outside = ui.input(|input| input.pointer.any_pressed() && input.pointer.press_origin().is_some_and(|origin| !frame.contains(origin)));
     PickerOutcome { frame, picked, typing_asked: shown.inner, closed: pressed_outside }
+}
+
+/// The embedded `MinimalColorPicker` (`IsPopup = false`), as shown under
+/// CLUTer and Synth's stops. It shares its canvases, marks and typing box
+/// with the colour-button popup.
+pub fn minimal_colour_picker(ui: &mut Ui, id: Id, rgb: [u8; 3]) -> Option<[u8; 3]> {
+    let mut state: PickerState = ui.data(|data| data.get_temp(id)).unwrap_or_default();
+    if state.synced != Some(rgb) {
+        state.set_colour(rgb);
+        state.synced = Some(rgb);
+    }
+    let scale = slider_popups::popup_scale(ui.ctx());
+    let width = ui.available_width().max(PICKER_MIN_SIZE * scale);
+    let size = Vec2::new(width, PICKER_MIN_SIZE * scale);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let mut picked = picker_contents(ui, rect, &mut state, scale);
+    let typing_id = id.with("picker-typing");
+    if response.secondary_clicked() {
+        let text = colour_text(state.colour.map(srgb_to_linear));
+        slider_popups::open_typing(ui.ctx(), typing_id, text);
+    }
+    let width = (rect.width() + TYPING_EXTRA_WIDTH * scale).max(TYPING_MIN_WIDTH * scale);
+    let look = centred_typing(ui, rect.center(), width);
+    if let Some(typed) = slider_popups::typing_box(ui, typing_id, &look)
+        && let Some(floats) = typed_picker_colour(&typed)
+    {
+        state.set_colour(floats.map(linear_to_srgb));
+        picked = Some(state.colour);
+    }
+    if picked.is_some() {
+        state.synced = Some(state.colour);
+    }
+    ui.data_mut(|data| data.insert_temp(id, state));
+    picked
+}
+
+/// Draw and interact with the same canvases in popup and embedded modes.
+fn picker_contents(ui: &Ui, rect: Rect, state: &mut PickerState, scale: f32) -> Option<[u8; 3]> {
+    let mut picked = None;
+    ui.painter().rect_filled(rect, 4.0 * scale, theme::WINDOW_DARK);
+    let inner = rect.shrink(PICKER_MARGIN * scale);
+    let strip_height = HUE_HEIGHT * scale;
+    let square_bottom = inner.bottom() - strip_height - HUE_GAP * scale;
+    let square = Rect::from_min_max(inner.min, Pos2::new(inner.right(), square_bottom));
+    let strip = Rect::from_min_max(Pos2::new(inner.left(), inner.bottom() - strip_height), inner.max);
+
+    // A press, or a move with the button down, over a canvas picks.
+    let (down, acted, pointer) = ui.input(|input| {
+        let acted = input.pointer.primary_pressed() || input.pointer.delta() != Vec2::ZERO;
+        (input.pointer.primary_down(), acted, input.pointer.latest_pos())
+    });
+    let can_pick = ui.is_enabled() && ui.rect_contains_pointer(rect) && ui.ctx().dragged_id().is_none();
+    if let Some(pointer) = pointer.filter(|_| can_pick && down && acted) {
+        if square.contains(pointer) {
+            // `PickColor`.
+            let at = (pointer - square.min) / square.size();
+            state.saturation = at.x.clamp(0.0, 1.0);
+            state.value = (1.0 - at.y).clamp(0.0, 1.0);
+            state.cursor = at;
+            state.update_colour();
+            picked = Some(state.colour);
+        } else if strip.contains(pointer) {
+            // `UpdateHueFromPosition`.
+            let along = (pointer.x - strip.left()) / strip.width();
+            state.hue = along.clamp(0.0, 1.0) * 360.0;
+            state.marker = along;
+            state.update_colour();
+            picked = Some(state.colour);
+        }
+    }
+
+    paint_square(ui, square, state.hue);
+    paint_hue_strip(ui, strip);
+    // The marks, cut off at their canvases' edges.
+    let cursor_centre = square.min + state.cursor * square.size();
+    let cursor_painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(square));
+    let ring_radius = (MARK_SIZE - MARK_STROKE) / 2.0 * scale;
+    cursor_painter.circle_stroke(cursor_centre, ring_radius, Stroke::new((MARK_STROKE + MARK_SHADOW) * scale, Color32::from_black_alpha(80)));
+    cursor_painter.circle_stroke(cursor_centre, ring_radius, Stroke::new(MARK_STROKE * scale, Color32::WHITE));
+    let marker_left = strip.left() + state.marker * strip.width() - MARK_SIZE / 2.0 * scale;
+    let marker = Rect::from_min_size(Pos2::new(marker_left, strip.top()), Vec2::new(MARK_SIZE * scale, strip.height()));
+    let marker_painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(strip));
+    marker_painter.rect_stroke(marker, 0.0, Stroke::new(MARK_SHADOW * scale, Color32::from_black_alpha(80)), StrokeKind::Middle);
+    marker_painter.rect_stroke(marker, 0.0, Stroke::new(MARK_STROKE * scale, Color32::WHITE), StrokeKind::Inside);
+    picked
 }
 
 /// The saturation and brightness square: `currentcolor` (the hue at full
@@ -646,5 +688,36 @@ mod tests {
         // 0.5 as scRGB is byte 188, through the picker 187 or 188.
         let picked = picked.expect("Enter takes the colour");
         assert!(picked.iter().all(|byte| (187..=188).contains(byte)), "{picked:?}");
+    }
+
+    #[test]
+    fn the_embedded_picker_uses_the_same_square_and_horizontal_hue_strip() {
+        let context = themed_context();
+        let id = Id::new("embedded-colour-test");
+        let rect = Rect::from_min_size(Pos2::new(20.0, 100.0), Vec2::new(280.0, PICKER_MIN_SIZE));
+        let hue_position = Pos2::new(rect.left() + PICKER_MARGIN + (rect.width() - 2.0 * PICKER_MARGIN) / 3.0, rect.bottom() - PICKER_MARGIN - HUE_HEIGHT / 2.0);
+        let mut rgb = [255, 0, 0];
+        let events = [
+            Vec::new(),
+            vec![egui::Event::PointerMoved(hue_position)],
+            vec![egui::Event::PointerButton { pos: hue_position, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }],
+            vec![egui::Event::PointerButton { pos: hue_position, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }],
+        ];
+        for events in events {
+            let input = egui::RawInput { screen_rect: Some(SCREEN), events, ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                let builder = egui::UiBuilder::new().max_rect(rect);
+                let mut child = ui.new_child(builder);
+                if let Some(picked) = minimal_colour_picker(&mut child, id, rgb) {
+                    rgb = picked;
+                }
+            });
+            let has_text_fields = output.shapes.iter().any(|shape| matches!(shape.shape, Shape::Text(_)));
+            assert!(!has_text_fields, "the minimal picker has only its two canvases");
+            output.drop_without_applying_deltas();
+        }
+        assert!(rgb[1] >= 250 && rgb[0] <= 5 && rgb[2] <= 5, "{rgb:?}");
+        let state: PickerState = context.data(|data| data.get_temp(id)).unwrap();
+        assert!(!state.open, "the embedded picker does not open a popup");
     }
 }

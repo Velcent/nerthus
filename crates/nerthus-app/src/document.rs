@@ -203,6 +203,12 @@ impl Document {
     /// Rebuilds a node (and what follows) on the next build.
     pub fn mark_stale(&mut self, node: i32) {
         self.stale.insert(node);
+        // TileInfo describes the files the last build actually loaded.
+        // A changed source must not keep the previous sequence's summary.
+        if let Some(node) = self.project.terrain_mut().nodes.get_mut(&node)
+            && node.type_name == "TileInput" {
+                node.values.shift_remove("TileInfo");
+            }
     }
 
     /// Rebuilds everything on the next build.
@@ -2158,6 +2164,19 @@ mod tests {
         let erosion = document.add_node("ErosionPro", [25400.0, 25100.0]).unwrap();
         document.connect(mountain, "Out", erosion, "In");
         (document, mountain, erosion)
+    }
+
+    #[test]
+    fn changing_a_tile_source_clears_its_previous_summary() {
+        let mut document = Document::new();
+        let tile_input = document.add_node("TileInput", [0.0, 0.0]).unwrap();
+        document.set_value(tile_input, "FileName", json!("land_x0_y0.r32"));
+        document.apply_build_update(tile_input, "TileInfo", json!("Total tiles: 4"));
+        assert!(document.node(tile_input).unwrap().values.contains_key("TileInfo"));
+        document.set_value(tile_input, "FileName", json!("other_x0_y0.r32"));
+        assert!(!document.node(tile_input).unwrap().values.contains_key("TileInfo"));
+        document.undo();
+        assert!(!document.node(tile_input).unwrap().values.contains_key("TileInfo"));
     }
 
     #[test]

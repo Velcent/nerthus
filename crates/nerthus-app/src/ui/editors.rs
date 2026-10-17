@@ -49,6 +49,8 @@ pub fn palette_color(palette: usize, index: usize) -> Color32 {
 pub enum Edit {
     None,
     Set(Value),
+    /// Several parameters changed by one interaction (Mixer layer order).
+    SetValues { values: Vec<(String, Value)>, label: &'static str },
     /// Draw a new seed (`RandomBox.NewRandomSeed`).
     NewSeed,
     /// A seed typed into the seed's popup (`EditablePopup_EditSuccess`),

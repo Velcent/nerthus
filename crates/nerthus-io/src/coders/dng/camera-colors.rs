@@ -27,6 +27,38 @@ static CAMERA_TABLE: LazyLock<CameraTable> = LazyLock::new(|| {
     toml::from_str(source).expect("the bundled LibRaw camera table is valid")
 });
 
+#[derive(Deserialize)]
+struct ModelAliasTable {
+    group: Vec<AliasGroup>,
+    #[serde(default)]
+    substring: Vec<AliasSubstring>,
+}
+
+#[derive(Deserialize)]
+struct AliasGroup {
+    maker: String,
+    target: Vec<AliasTarget>,
+}
+
+#[derive(Deserialize)]
+struct AliasTarget {
+    name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AliasSubstring {
+    maker: String,
+    name: String,
+    needles: Vec<String>,
+}
+
+static MODEL_ALIASES: LazyLock<ModelAliasTable> = LazyLock::new(|| {
+    let source = include_str!("../../../data/libraw-model-aliases.toml");
+    toml::from_str(source).expect("the bundled LibRaw model aliases are valid")
+});
+
 /// First matching model prefix, as in LibRaw. DNG black and white tags
 /// always take precedence over the camera table's levels.
 pub(super) fn apply_camera_colors(state: &mut Raw, make: &str, model: &str) -> bool {
@@ -121,6 +153,41 @@ pub(super) fn find_meta_color_row(
         row.camera_xyz = Some(camera_xyz);
     }
     row
+}
+
+/// `GetNormalizedModel`'s alias part: the colour-table name a file's model
+/// string resolves to. The engine branches by maker first, Samsung's
+/// substring rewrites run before its alias loop, and every compare is an
+/// exact one.
+pub(super) fn get_normalized_model(make: &str, model: &str) -> String {
+    let maker = normalized_make(make);
+    let Some(group) = MODEL_ALIASES
+        .group
+        .iter()
+        .find(|group| group.maker.eq_ignore_ascii_case(maker))
+    else {
+        return model.to_string();
+    };
+    if group.maker.eq_ignore_ascii_case("Samsung") {
+        for rewrite in &MODEL_ALIASES.substring {
+            if !rewrite.maker.eq_ignore_ascii_case("Samsung") {
+                continue;
+            }
+            let hit = rewrite
+                .needles
+                .iter()
+                .any(|needle| model.contains(needle.as_str()));
+            if hit {
+                return rewrite.name.clone();
+            }
+        }
+    }
+    for target in &group.target {
+        if target.name == model || target.aliases.iter().any(|alias| alias == model) {
+            return target.name.clone();
+        }
+    }
+    model.to_string()
 }
 
 fn find_camera_row(make: &str, model: &str) -> Option<&'static CameraColor> {
