@@ -176,7 +176,10 @@ pub(crate) fn run_build(request: &RunRequest, reporter: &Reporter) -> Result<Run
     }
     if let Some(folder) = &request.destination {
         std::fs::create_dir_all(folder).map_err(|error| format!("{} cannot be made: {error}", folder.display()))?;
-        let absolute = folder.canonicalize().map_err(|error| error.to_string())?;
+        // canonicalize would hand back a verbatim path (`\\?\C:\…`) on
+        // Windows, which resolve_destination reads as a template starting
+        // with a backslash and prefixes the file location onto.
+        let absolute = std::path::absolute(folder).map_err(|error| error.to_string())?;
         definition.destination = absolute.to_string_lossy().into_owned();
     }
     if request.seed > 0 {

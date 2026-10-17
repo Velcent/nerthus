@@ -483,7 +483,10 @@ pub fn run_build(file: &Path, options: &BuildOptions, environment: &Environment,
     }
     if let Some(output) = &options.output {
         fs::create_dir_all(output)?;
-        let absolute = output.canonicalize()?;
+        // canonicalize would hand back a verbatim path (`\\?\C:\…`) on
+        // Windows, which resolve_destination reads as a template starting
+        // with a backslash and prefixes the file location onto.
+        let absolute = std::path::absolute(output)?;
         definition.destination = absolute.to_string_lossy().into_owned();
     }
     // The mutation the build is.
