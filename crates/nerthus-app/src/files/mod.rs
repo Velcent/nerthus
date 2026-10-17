@@ -96,9 +96,9 @@ pub enum FileCommand {
     InstallMacro(PathBuf),
     /// A macro from the toolbox's Macro menu, by id.
     AddMacro(String),
-    /// The Start dialog and the examples: a new file with no questions
-    /// (`SetupNewFile`), the open dialog (`OpenFileDialog`), a file opened
-    /// as it is (`Shell.OpenFile`), an example opened as an untitled copy.
+    /// The Start dialog and the examples: a new file, the open dialog, a
+    /// recent or searched file, or an example opened as an untitled copy.
+    /// These use the usual save questions before replacing the project.
     StartNew,
     StartOpen,
     OpenDirect { path: PathBuf, mode: OpenMode },
@@ -131,7 +131,8 @@ pub enum OpenMode {
 pub enum FileAction {
     New,
     Open,
-    OpenPath(PathBuf),
+    OpenPath { path: PathBuf, mode: OpenMode },
+    OpenExample { path: PathBuf, mode: OpenMode },
     Repair,
     Examples,
     Exit,

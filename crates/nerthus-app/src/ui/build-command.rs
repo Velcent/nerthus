@@ -11,10 +11,21 @@ pub enum CommandKind {
     Batch,
 }
 
-/// An executable's path. Windows parses this before the native argv.
+/// An executable's path. Windows parses this before the native argv:
+/// plain quotes, as the interpreter resolves a quoted token as one path.
+/// Carets would only glue the executable itself; the words after the
+/// path's first space would reach it as literal arguments. Batch files
+/// double `%` even here, where the interpreter expands them inside
+/// quotes.
 pub fn quote_program(text: &str, kind: CommandKind) -> String {
     #[cfg(windows)]
-    return escape_cmd(text, kind);
+    {
+        let body = if matches!(kind, CommandKind::Batch) { text.replace('%', "%%") } else { text.to_string() };
+        // A path may end in a backslash, which would escape the closing
+        // quote for the native parser.
+        let doubled = if body.ends_with('\\') { format!("{body}\\") } else { body };
+        format!("\"{doubled}\"")
+    }
 
     #[cfg(not(windows))]
     quote_argument(text, kind)
@@ -95,6 +106,14 @@ mod tests {
         assert_eq!(quote_cmd_argument("0, 1", CommandKind::Prompt), "^\"0^,^ 1^\"");
         assert_eq!(quote_cmd_argument("a\\\"&b\\", CommandKind::Batch), "^\"a\\\\\\^\"^&b\\\\^\"");
         assert_eq!(quote_cmd_argument("%PATH%!", CommandKind::Batch), "^\"%%PATH%%^!^\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_program_paths_are_quoted_plainly() {
+        assert_eq!(quote_program("C:\\some folder\\prog.exe", CommandKind::Prompt), "\"C:\\some folder\\prog.exe\"");
+        assert_eq!(quote_program("C:\\50%\\prog.exe", CommandKind::Batch), "\"C:\\50%%\\prog.exe\"");
+        assert_eq!(quote_program("C:\\prog.exe", CommandKind::Batch), "\"C:\\prog.exe\"");
     }
 
     #[cfg(unix)]

@@ -313,7 +313,7 @@ fn start_column(ui: &mut Ui, ctx: &egui::Context, editor: &mut Editor, memory: &
     ui.add_space(4.0);
     if button(ui, "Open Examples...", false, Vec2::new(width, 28.0)).clicked() {
         editor.files.start_dialog_open = false;
-        editor.files.examples_open = true;
+        commands.push(Command::File(FileCommand::OpenExamples));
     }
 }
 
@@ -767,18 +767,24 @@ mod tests {
     }
 
     #[test]
-    fn new_and_open_project_are_in_reach_on_small_screens() {
+    fn start_dialog_buttons_are_in_reach_on_small_screens() {
         let folder = std::env::temp_dir().join(format!("nerthus-start-reach-{}", std::process::id()));
         for screen in START_SCREENS {
-            for (label, wanted) in [("New Project", FileCommand::StartNew), ("Open Project", FileCommand::StartOpen)] {
+            let buttons = [("New Project", FileCommand::StartNew), ("Open Project", FileCommand::StartOpen), ("Open Examples...", FileCommand::OpenExamples)];
+            for (label, wanted) in buttons {
                 let context = start_context();
                 let mut editor = start_editor(&folder, 9);
+                editor.files.start_dialog_open = true;
                 let (shapes, _) = start_settle(&context, screen, &mut editor);
                 let position = text_at(&texts(&shapes), label, label).center();
                 let press = |pressed| Event::PointerButton { pos: position, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
                 start_frame(&context, screen, &mut editor, vec![Event::PointerMoved(position)]);
                 start_frame(&context, screen, &mut editor, vec![press(true)]);
                 let (.., commands) = start_frame(&context, screen, &mut editor, vec![press(false)]);
+                if wanted == FileCommand::OpenExamples {
+                    assert!(!editor.files.start_dialog_open, "{label} at {screen:?}: Start stayed open");
+                    assert!(!editor.files.examples_open, "{label} at {screen:?}: Examples opened before the file command ran");
+                }
                 assert_eq!(commands, vec![Command::File(wanted)], "{label} at {screen:?}");
             }
         }

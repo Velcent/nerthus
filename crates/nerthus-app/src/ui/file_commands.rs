@@ -20,18 +20,23 @@ pub fn run(command: FileCommand, editor: &mut Editor, ui_state: &mut UiState) {
     match command {
         FileCommand::New => request(FileAction::New, editor, ui_state),
         FileCommand::Open => request(FileAction::Open, editor, ui_state),
-        FileCommand::OpenRecent(path) => request(FileAction::OpenPath(path), editor, ui_state),
+        FileCommand::OpenRecent(path) => {
+            let action = FileAction::OpenPath { path, mode: OpenMode::Normal };
+            request(action, editor, ui_state);
+        }
         FileCommand::OpenLatest => {
             let latest = editor.user.recent.files().first().cloned();
             if let Some(path) = latest {
-                request(FileAction::OpenPath(path), editor, ui_state);
+                let action = FileAction::OpenPath { path, mode: OpenMode::Normal };
+                request(action, editor, ui_state);
             }
         }
         // `Shell_Drop`: the save question, the file, and the Start dialog
         // closed.
         FileCommand::Dropped(path) => {
             editor.files.start_dialog_open = false;
-            request(FileAction::OpenPath(path), editor, ui_state);
+            let action = FileAction::OpenPath { path, mode: OpenMode::Normal };
+            request(action, editor, ui_state);
         }
         FileCommand::SaveIncremental => save_incremental(editor),
         FileCommand::SetAutosaveInterval(minutes) => {
@@ -96,25 +101,25 @@ pub fn run(command: FileCommand, editor: &mut Editor, ui_state: &mut UiState) {
             let tab = ui_state.graph.tab;
             files::add_macro(editor, &id, position, tab);
         }
-        // The Start dialog's New Project: `SetupNewFile` (only the
-        // building question).
+        // Start and Examples stay editable over the project, so each
+        // replacement checks for unsaved work when the action is chosen.
         FileCommand::StartNew => {
             editor.files.start_dialog_open = false;
-            let pending = Pending { action: FileAction::New, save_answered: true, building_answered: false };
-            editor.files.pending = Some(pending);
-            advance(editor, ui_state);
+            request(FileAction::New, editor, ui_state);
         }
         FileCommand::StartOpen => {
             editor.files.start_dialog_open = false;
-            editor.files.dialog = Some(FileDialog::Open { folder: None });
+            request(FileAction::Open, editor, ui_state);
         }
         FileCommand::OpenDirect { path, mode } => {
             editor.files.start_dialog_open = false;
-            if files::open_project(editor, &path) {
-                apply_open_mode(editor, mode);
-            }
+            let action = FileAction::OpenPath { path, mode };
+            request(action, editor, ui_state);
         }
-        FileCommand::OpenExample { path, mode } => open_example(editor, &path, mode),
+        FileCommand::OpenExample { path, mode } => {
+            let action = FileAction::OpenExample { path, mode };
+            request(action, editor, ui_state);
+        }
         FileCommand::ExportMacroChecked => export_macro_checked(editor),
         // `RecoverOrphans` runs before the graph is made, so a saved tab
         // that was one of the orphans' is the one shown.
@@ -212,9 +217,12 @@ fn perform(action: FileAction, editor: &mut Editor) {
         // `CloseFile`, `SetupNewFile`.
         FileAction::New => files::new_project(editor),
         FileAction::Open => editor.files.dialog = Some(FileDialog::Open { folder: None }),
-        FileAction::OpenPath(path) => {
-            files::open_project(editor, &path);
+        FileAction::OpenPath { path, mode } => {
+            if files::open_project(editor, &path) {
+                apply_open_mode(editor, mode);
+            }
         }
+        FileAction::OpenExample { path, mode } => open_example(editor, &path, mode),
         // `CloseFile`, `SetupNewFile`, then the chooser.
         FileAction::Repair => {
             files::new_project(editor);
@@ -333,6 +341,220 @@ pub fn take_requests(editor: &mut Editor, ui_state: &mut UiState, commands: &mut
 mod tests {
     use super::*;
     use crate::document::Document;
+
+    fn test_folder(name: &str) -> std::path::PathBuf {
+        let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let folder = std::env::temp_dir().join(format!("nerthus-unsaved-{name}-{}-{}", std::process::id(), elapsed.as_nanos()));
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    fn edited_project() -> Editor {
+        let mut document = Document::new();
+        document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.preview_resolution = 2048;
+        editor
+    }
+
+    fn replacement_commands(path: &Path) -> Vec<FileCommand> {
+        let mut commands = vec![FileCommand::StartNew, FileCommand::StartOpen, FileCommand::OpenExamples];
+        for mode in [OpenMode::Normal, OpenMode::LowResolution, OpenMode::SuspendEngine] {
+            commands.push(FileCommand::OpenDirect { path: path.to_path_buf(), mode });
+            commands.push(FileCommand::OpenExample { path: path.to_path_buf(), mode });
+        }
+        commands
+    }
+
+    #[test]
+    fn start_and_example_actions_ask_before_replacing_unsaved_work() {
+        let path = Path::new("unopened-project.terrain");
+        for command in replacement_commands(path) {
+            for escape in [false, true] {
+                let mut editor = edited_project();
+                let serial = editor.document_serial;
+                let mut ui_state = UiState::default();
+                run(command.clone(), &mut editor, &mut ui_state);
+                assert_eq!(ui_state.prompt.as_ref().map(|prompt| prompt.caption.as_str()), Some("Save terrain?"), "{command:?}");
+                assert!(editor.files.dialog.is_none() && !editor.files.examples_open);
+
+                // Exercise both Cancel and Escape through the actual prompt.
+                let context = egui::Context::default();
+                let keys = if escape { vec![egui::Key::Escape] } else { vec![egui::Key::Tab, egui::Key::Tab, egui::Key::Enter] };
+                let frames = std::iter::once(None).chain(keys.into_iter().map(Some));
+                let mut pending = Vec::new();
+                for key in frames {
+                    let events = key.map(|key| egui::Event::Key {
+                        key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE,
+                    }).into_iter().collect();
+                    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+                    let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                    let output = context.run_ui(input, |ui| crate::ui::prompt::show(ui.ctx(), &mut ui_state, &mut pending));
+                    output.drop_without_applying_deltas();
+                }
+                assert!(ui_state.prompt.is_none() && pending.is_empty(), "{command:?}, Escape: {escape}");
+                assert_eq!(editor.document_serial, serial);
+                assert!(editor.document.dirty && editor.document.can_undo());
+                assert_eq!(editor.document.terrain().nodes.len(), 1);
+                assert_eq!(editor.preview_resolution, 2048);
+                assert!(editor.engine_active && editor.files.dialog.is_none() && !editor.files.examples_open);
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_start_and_example_actions_keep_their_open_modes_and_copy_semantics() {
+        let folder = test_folder("open-modes");
+        let path = folder.join("Example.terrain");
+        let mut target = Document::new();
+        target.add_node("Perlin", [0.0, 0.0]).unwrap();
+        target.save(&path).unwrap();
+        let target_resolution = Editor::new(Document::open(&path).unwrap()).preview_resolution;
+        for command in replacement_commands(&path) {
+            // The same actions also work at clean startup without a question.
+            for dirty in [false, true] {
+                let mut editor = edited_project();
+                editor.document.dirty = dirty;
+                let serial = editor.document_serial;
+                let mut ui_state = UiState::default();
+                run(command.clone(), &mut editor, &mut ui_state);
+                assert_eq!(ui_state.prompt.is_some(), dirty, "{command:?}");
+                if dirty {
+                    ui_state.prompt = None;
+                    run(FileCommand::DiscardChanges, &mut editor, &mut ui_state);
+                }
+                assert!(editor.files.pending.is_none());
+                match &command {
+                    FileCommand::StartNew => {
+                        assert!(editor.document.terrain().nodes.is_empty());
+                        assert!(!editor.document.dirty);
+                        assert_eq!(editor.document_serial, serial + 1);
+                    }
+                    FileCommand::StartOpen => {
+                        assert_eq!(editor.files.dialog, Some(FileDialog::Open { folder: None }));
+                        assert_eq!(editor.document_serial, serial);
+                    }
+                    FileCommand::OpenExamples => {
+                        assert!(editor.files.examples_open);
+                        assert_eq!(editor.document_serial, serial);
+                    }
+                    FileCommand::OpenDirect { mode, .. } | FileCommand::OpenExample { mode, .. } => {
+                        assert_eq!(editor.document_serial, serial + 1);
+                        assert_eq!(editor.document.terrain().nodes.values().next().unwrap().type_name, "Perlin");
+                        assert!(!editor.document.dirty && !editor.document.can_undo());
+                        let resolution = if *mode == OpenMode::LowResolution { 512 } else { target_resolution };
+                        assert_eq!(editor.preview_resolution, resolution);
+                        assert_eq!(editor.engine_active, *mode != OpenMode::SuspendEngine);
+                        if matches!(command, FileCommand::OpenExample { .. }) {
+                            assert!(editor.document.path.is_none());
+                            assert_eq!(editor.document.untitled_name.as_deref(), Some("Example"));
+                            assert!(editor.user.recent.files().is_empty());
+                        } else {
+                            assert_eq!(editor.document.path.as_ref(), Some(&path));
+                            assert_eq!(editor.user.recent.files(), &[path.clone()]);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn an_example_card_rechecks_edits_made_after_the_browser_opened() {
+        let mut editor = Editor::new(Document::new());
+        let mut ui_state = UiState::default();
+        run(FileCommand::OpenExamples, &mut editor, &mut ui_state);
+        assert!(editor.files.examples_open && ui_state.prompt.is_none());
+        let mountain = editor.document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let serial = editor.document_serial;
+        let command = FileCommand::OpenExample { path: "unopened-example.terrain".into(), mode: OpenMode::Normal };
+        run(command, &mut editor, &mut ui_state);
+        assert_eq!(ui_state.prompt.as_ref().unwrap().caption, "Save terrain?");
+        assert!(editor.files.examples_open && editor.document.dirty);
+        assert!(editor.document.node(mountain).is_some());
+        assert_eq!(editor.document_serial, serial);
+    }
+
+    #[test]
+    fn saving_before_replacement_writes_the_current_project_first() {
+        let folder = test_folder("save-first");
+        let saved = folder.join("Current.terrain");
+        let example = folder.join("Example.terrain");
+        let mut target = Document::new();
+        target.save(&example).unwrap();
+        let mut editor = edited_project();
+        editor.document.path = Some(saved.clone());
+        let mut ui_state = UiState::default();
+        let command = FileCommand::OpenExample { path: example, mode: OpenMode::LowResolution };
+        run(command, &mut editor, &mut ui_state);
+        assert!(!saved.exists());
+        ui_state.prompt = None;
+        run(FileCommand::SaveFirst, &mut editor, &mut ui_state);
+        let original = Document::open(&saved).unwrap();
+        assert_eq!(original.terrain().nodes.values().next().unwrap().type_name, "Mountain");
+        assert!(editor.document.terrain().nodes.is_empty() && editor.document.path.is_none());
+        assert_eq!(editor.preview_resolution, 512);
+        assert!(editor.files.pending.is_none());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn an_untitled_save_keeps_the_selected_example_pending_until_saved() {
+        let folder = test_folder("save-as");
+        let saved = folder.join("Current.terrain");
+        let example = folder.join("Example.terrain");
+        let mut target = Document::new();
+        target.save(&example).unwrap();
+        let mut editor = edited_project();
+        let serial = editor.document_serial;
+        let mut ui_state = UiState::default();
+        let command = FileCommand::OpenExample { path: example.clone(), mode: OpenMode::SuspendEngine };
+        run(command, &mut editor, &mut ui_state);
+        ui_state.prompt = None;
+        run(FileCommand::SaveFirst, &mut editor, &mut ui_state);
+        assert_eq!(editor.files.dialog.take(), Some(FileDialog::SaveAsThenContinue));
+        let action = FileAction::OpenExample { path: example, mode: OpenMode::SuspendEngine };
+        assert_eq!(editor.files.pending.as_ref().unwrap().action, action);
+        assert!(editor.document.dirty && editor.engine_active);
+        assert_eq!(editor.document_serial, serial);
+        // The save dialog queues DiscardChanges only after a successful save.
+        editor.save_to(&saved);
+        run(FileCommand::DiscardChanges, &mut editor, &mut ui_state);
+        assert!(saved.is_file() && editor.document.path.is_none());
+        assert_eq!(editor.document_serial, serial + 1);
+        assert!(!editor.engine_active && editor.files.pending.is_none());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn failed_saves_and_opens_keep_the_current_project_and_open_mode() {
+        let folder = test_folder("failures");
+        for example in [false, true] {
+            for save_first in [false, true] {
+                let mut editor = edited_project();
+                let serial = editor.document_serial;
+                if save_first {
+                    editor.document.path = Some(folder.join("missing-parent").join("Current.terrain"));
+                }
+                let path = folder.join("Missing.terrain");
+                let mode = OpenMode::SuspendEngine;
+                let command = if example { FileCommand::OpenExample { path, mode } } else { FileCommand::OpenDirect { path, mode } };
+                let mut ui_state = UiState::default();
+                run(command, &mut editor, &mut ui_state);
+                ui_state.prompt = None;
+                let answer = if save_first { FileCommand::SaveFirst } else { FileCommand::DiscardChanges };
+                run(answer, &mut editor, &mut ui_state);
+                assert_eq!(editor.document_serial, serial);
+                assert!(editor.document.dirty && editor.document.can_undo());
+                assert_eq!(editor.document.terrain().nodes.len(), 1);
+                assert!(editor.engine_active && editor.files.pending.is_none());
+                assert_eq!(editor.preview_resolution, 2048);
+            }
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 
     #[test]
     fn canceled_or_displaced_restarts_do_not_arm_a_later_ordinary_exit() {
