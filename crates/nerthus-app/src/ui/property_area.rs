@@ -949,7 +949,9 @@ fn editor_row(ui: &mut Ui, enabled: bool, help: Option<&str>, bind_type: BindTyp
         ui.allocate_rect(Rect::from_min_size(top_left, Vec2::new(control_width + MENU_BUTTON_WIDTH, height)), Sense::hover());
         menu_edit.unwrap_or(control_edit)
     });
-    if let Some(help) = help {
+    if let Some(help) = help
+        && !editors::entry_tooltip_hovered(ui.ctx())
+    {
         row.response.tooltip(help);
     }
     row.inner
@@ -1786,6 +1788,48 @@ mod tests {
         frame(vec![egui::Event::PointerMoved(label.center())]);
         let shows = (0..120).any(|_| frame(Vec::new()).iter().any(|(text, _)| *text == help));
         assert!(shows, "no tooltip says {help:?}");
+    }
+
+    #[test]
+    fn an_option_entry_tooltip_takes_precedence_over_the_row_description() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let node = Catalogue::get().node("Canyon").unwrap();
+        let spec = node.parameter("Style").unwrap();
+        let current = json!("Classic");
+        let help = "Selects the canyon shaping model.";
+        let automation = nerthus_engine::automation::Automation::default();
+        let automated = Automated::of(&automation, 1, "Style");
+        let editor_context = EditorContext { color: Color32::WHITE, default: None, values: None, area_width: 370.0, terrain_range: None };
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0));
+        let mut time = 0.0;
+        let mut frame = |events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput { screen_rect: Some(screen), time: Some(time), events, ..Default::default() };
+            let mut output = context.run_ui(input, |ui| {
+                ui.set_width(370.0);
+                editor_row(ui, true, Some(help), BindType::None, &automated, |ui| editors::parameter(ui, egui::Id::new("options-tooltip"), spec, &current, &editor_context));
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            texts(&shapes)
+        };
+        let shown = frame(Vec::new());
+        let (_, entry) = shown.iter().find(|(text, _)| text == "Eroded 2").expect("the entry is drawn whole");
+        frame(vec![egui::Event::PointerMoved(entry.center())]);
+        let mut tooltip_shown = false;
+        for _ in 0..20 {
+            let shown = frame(Vec::new());
+            assert!(!shown.iter().any(|(text, _)| text == help), "the row description covers the entry");
+            tooltip_shown |= shown.iter().filter(|(text, _)| text == "Eroded 2").count() >= 2;
+        }
+        assert!(tooltip_shown, "the entry's full-name tooltip never shows");
+
+        // Moving back to the name restores the description tooltip.
+        frame(vec![egui::Event::PointerMoved(Pos2::new(35.0, 25.0))]);
+        let description_shown = (0..20).any(|_| frame(Vec::new()).iter().any(|(text, _)| text == help));
+        assert!(description_shown, "the row description is suppressed after leaving the entry");
     }
 
     #[test]

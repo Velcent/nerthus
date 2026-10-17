@@ -2598,6 +2598,7 @@ pub(crate) fn rename_popup(ui: &Ui, state: &mut GraphState, screen: Rect, width:
     }
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let look = slider_popups::TypingLook {
+        anchor: screen,
         top_left: screen.min + Vec2::splat(RENAME_OFFSET * zoom),
         width: slider_popups::BoxWidth::Fixed(width.max(RENAME_MIN_WIDTH) * popup_scale),
         font: theme::interface(RENAME_FONT_SIZE),

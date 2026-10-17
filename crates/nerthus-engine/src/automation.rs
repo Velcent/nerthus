@@ -551,6 +551,11 @@ impl Automation {
                 let Some(parameter) = spec.parameters.iter().find(|parameter| parameter.name == binding.property) else {
                     continue;
                 };
+                // Older Bind all commands included hidden data and labels.
+                // In particular, a StrokeData binding must not overwrite painting.
+                if parameter.hidden || parameter.value_type == ValueType::Byte {
+                    continue;
+                }
                 let Some(variable) = self.variables.get(&binding.variable) else {
                     return Err(format!("The given key '{}' was not present in the dictionary.", binding.variable));
                 };
@@ -624,7 +629,8 @@ impl Automation {
 pub fn variable_for_property(key: &str, parameter: &ParameterSpec, current: &Value, default: Option<&Value>, order: usize) -> Value {
     let float = |value: f64| crate::json::f32_value(value as f32);
     let min = parameter.min.unwrap_or(0.0);
-    let max = parameter.max.unwrap_or(0.0);
+    let default_max = if parameter.is_seed() { 65535.0 } else { 0.0 };
+    let max = parameter.max.unwrap_or(default_max);
     let mut variable = serde_json::Map::new();
     if order != 0 {
         variable.insert("Order".to_string(), json!(order));
@@ -728,6 +734,50 @@ mod tests {
         let parsed = Variable::from_json(&variable);
         assert_eq!(parsed.var_type, VarType::Float);
         assert_eq!(parsed.value.to_single(), Ok(0.3));
+    }
+
+    #[test]
+    fn bound_seeds_keep_the_parameter_attributes_range() {
+        let catalogue = crate::catalogue::Catalogue::get();
+        for spec in catalogue.nodes() {
+            for parameter in spec.parameters.iter().filter(|parameter| parameter.is_seed()) {
+                let current = json!(42341);
+                let default = spec.defaults.get(&parameter.name);
+                let variable = variable_for_property(&parameter.name, parameter, &current, default, 0);
+                assert_eq!(variable["Type"], json!("Int"), "{} {}", spec.key(), parameter.name);
+                assert_eq!(variable["Min"], json!(0), "{} {}", spec.key(), parameter.name);
+                assert_eq!(variable["Max"], json!(65535), "{} {}", spec.key(), parameter.name);
+                assert_eq!(variable["Value"], current);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_bindings_cannot_overwrite_hidden_data_or_information() {
+        let cases = [("Draw", "StrokeData"), ("Erosion", "Information")];
+        let context = ExpressionContext {
+            resolution: Resolution::square(512),
+            terrain_height: 2500.0,
+        };
+        for (type_name, property) in cases {
+            let spec = crate::catalogue::Catalogue::get().node(type_name).unwrap();
+            let mut node = NodeData::new(spec, 1, 1);
+            node.values.insert(property.to_string(), json!("painted strokes"));
+            let binding = VarBinding {
+                node: node.id,
+                property: property.to_string(),
+                variable: property.to_string(),
+            };
+            let mut automation = Automation::default();
+            automation.bindings.push(binding);
+            let variable_json = json!({"Name": property, "Value": "", "Type": "Undefined"});
+            automation.variables.insert(property.to_string(), Variable::from_json(&variable_json));
+
+            assert!(automation.bind(&node, spec, &context).unwrap().is_empty());
+            // Removing the unwanted variable must not make the build fail.
+            automation.variables.clear();
+            assert!(automation.bind(&node, spec, &context).unwrap().is_empty());
+        }
     }
 
     #[test]

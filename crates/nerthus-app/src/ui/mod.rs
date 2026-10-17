@@ -500,6 +500,11 @@ fn draw_editor(
     // What the floating viewport asked for last frame.
     pending.append(&mut ui_state.floating_commands);
     let floating = editor.user.options.viewport_floating();
+    // Read the events before menus and popup editors consume their keys.
+    let (starts_value_edit, finishes_value_edit) = value_edit_boundaries(ctx);
+    if starts_value_edit {
+        editor.document.finish_value_edit();
+    }
     // An open menu takes its keys first.
     menu_keys::begin(ctx);
     // Then Esc closes the tool window on top.
@@ -659,6 +664,9 @@ fn draw_editor(
 
     gradient_editor::flush_pending(ctx, editor, !pending.is_empty());
     commands::run(pending, editor, ui_state, window);
+    if finishes_value_edit {
+        editor.document.finish_value_edit();
+    }
     // What the editor shows goes with the project (`TerrainState`), and
     // the preview follows the project's lock through undo and redo.
     let selected = editor.active_node();
@@ -710,6 +718,27 @@ fn draw_editor(
     let modifiers = ctx.input(|state| state.modifiers);
     input.keys = ui_state.viewport_focused && !ctx.egui_wants_keyboard_input() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
     Ok(())
+}
+
+/// Keep the frames of a drag or held key together, and separate clicks,
+/// commits and later gestures. Idle frames leave MCP's deliberate value
+/// merging alone.
+fn value_edit_boundaries(ctx: &egui::Context) -> (bool, bool) {
+    ctx.input(|input| {
+        let pointer_down = input.pointer.any_down();
+        let mut starts = input.pointer.any_pressed();
+        let mut finishes = input.pointer.any_released();
+        for event in &input.events {
+            if let egui::Event::Key { key, pressed, repeat, .. } = event {
+                if !pointer_down {
+                    starts |= *pressed && !*repeat;
+                    finishes |= !*pressed;
+                }
+                finishes |= *pressed && matches!(key, Key::Enter | Key::Tab | Key::Escape);
+            }
+        }
+        (starts, finishes)
+    })
 }
 
 /// Record Turntable Animation's window while open, the recording it
@@ -1181,6 +1210,106 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Document;
+    use serde_json::json;
+
+    fn value_edit_frame(context: &egui::Context, document: &mut Document, events: Vec<egui::Event>, mut edit: impl FnMut(&mut Document)) {
+        let input = egui::RawInput { events, ..Default::default() };
+        let output = context.run_ui(input, |ui| {
+            let (starts, finishes) = value_edit_boundaries(ui.ctx());
+            if starts {
+                document.finish_value_edit();
+            }
+            edit(document);
+            if finishes {
+                document.finish_value_edit();
+            }
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    fn value_edit_pointer(pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: Pos2::new(100.0, 100.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn separate_seed_clicks_have_separate_undo_steps() {
+        let context = egui::Context::default();
+        let mut document = Document::new();
+        let perlin = document.add_node("Perlin", [0.0, 0.0]).unwrap();
+        let initial_seed = [("Seed".to_string(), json!(0))];
+        document.set_values_quietly(perlin, &initial_seed);
+        let before = document.undo_labels().len();
+        for seed in [100, 200, 300] {
+            let events = vec![value_edit_pointer(true), value_edit_pointer(false)];
+            value_edit_frame(&context, &mut document, events, |document| {
+                document.set_value(perlin, "Seed", json!(seed));
+            });
+        }
+        assert_eq!(document.undo_labels().len(), before + 3);
+        assert!(document.undo());
+        assert_eq!(document.node(perlin).unwrap().values["Seed"], json!(200));
+        assert!(document.redo());
+        assert_eq!(document.node(perlin).unwrap().values["Seed"], json!(300));
+    }
+
+    #[test]
+    fn slider_frames_merge_only_until_pointer_release() {
+        let context = egui::Context::default();
+        let mut document = Document::new();
+        let perlin = document.add_node("Perlin", [0.0, 0.0]).unwrap();
+        let before = document.undo_labels().len();
+        for end in [0.6, 0.8] {
+            let press = vec![value_edit_pointer(true)];
+            value_edit_frame(&context, &mut document, press, |document| {
+                document.set_value(perlin, "Scale", json!(end - 0.05));
+            });
+            value_edit_frame(&context, &mut document, Vec::new(), |document| {
+                document.set_value(perlin, "Scale", json!(end));
+            });
+            let release = vec![value_edit_pointer(false)];
+            value_edit_frame(&context, &mut document, release, |_| {});
+        }
+        assert_eq!(document.undo_labels().len(), before + 2);
+        assert!(document.undo());
+        assert_eq!(document.node(perlin).unwrap().values["Scale"], json!(0.6));
+    }
+
+    #[test]
+    fn idle_frames_preserve_deliberate_parameter_merging() {
+        let context = egui::Context::default();
+        let mut document = Document::new();
+        let perlin = document.add_node("Perlin", [0.0, 0.0]).unwrap();
+        let before = document.undo_labels().len();
+        document.set_value(perlin, "Scale", json!(0.6));
+        value_edit_frame(&context, &mut document, Vec::new(), |_| {});
+        document.set_value(perlin, "Scale", json!(0.8));
+        assert_eq!(document.undo_labels().len(), before + 1);
+    }
+
+    #[test]
+    fn keyboard_commits_start_separate_value_edits() {
+        let context = egui::Context::default();
+        let mut document = Document::new();
+        let perlin = document.add_node("Perlin", [0.0, 0.0]).unwrap();
+        let initial_seed = [("Seed".to_string(), json!(0))];
+        document.set_values_quietly(perlin, &initial_seed);
+        let before = document.undo_labels().len();
+        for seed in [100, 200] {
+            let events = vec![key(Key::Enter, Modifiers::NONE)];
+            value_edit_frame(&context, &mut document, events, |document| {
+                document.set_value(perlin, "Seed", json!(seed));
+            });
+        }
+        assert_eq!(document.undo_labels().len(), before + 2);
+        assert!(document.undo());
+        assert_eq!(document.node(perlin).unwrap().values["Seed"], json!(100));
+    }
 
     /// The commands the shortcuts give for `events`, the pointer over the
     /// graph or not, with the node keys confined or not.

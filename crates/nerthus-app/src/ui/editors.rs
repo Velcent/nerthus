@@ -607,6 +607,7 @@ pub fn slider(ui: &mut Ui, id: Id, label: &str, value: f64, spec: &SliderSpec, c
     // at least (the popup's own units).
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
+        anchor: content,
         top_left: value_rect.min - Vec2::splat(8.0 * popup_scale),
         width: BoxWidth::AtLeast(SLIDER_TYPING_MIN_WIDTH * popup_scale),
         font: slider_popups::value_font(),
@@ -868,6 +869,7 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
         moved.then_some((new_low, new_high))
     };
     let low_look = TypingLook {
+        anchor: content,
         top_left: low_rect.min + Vec2::new(-8.0, -8.0) * popup_scale,
         width: BoxWidth::Fixed(RANGE_TYPING_WIDTH),
         font: slider_popups::value_font(),
@@ -877,6 +879,7 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
         return changed(typed.0, typed.1);
     }
     let high_look = TypingLook {
+        anchor: content,
         top_left: high_rect.min + Vec2::new(38.0, -8.0) * popup_scale,
         width: BoxWidth::Fixed(RANGE_TYPING_WIDTH),
         font: slider_popups::value_font(),
@@ -911,22 +914,36 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
     }
 
     // The left button: Shift held as it goes down moves the whole range
-    // (`CenterDrag`); otherwise it takes the nearer thumb.
+    // (`CenterDrag`); otherwise it takes the nearer thumb. At equal
+    // values, the first movement chooses the end in that direction.
     let active_id = id.with("thumb");
     let moving_id = id.with("moving");
+    let tied_id = id.with("tied-thumb");
     let (pressed_now, primary_down, shift) = ui.input(|input| (input.pointer.primary_pressed(), input.pointer.primary_down(), input.modifiers.shift));
     let held = response.is_pointer_button_down_on() && primary_down;
     if !held || !enabled {
-        ui.data_mut(|data| data.remove::<f32>(moving_id));
+        ui.data_mut(|data| {
+            data.remove::<bool>(active_id);
+            data.remove::<f32>(moving_id);
+            data.remove::<f32>(tied_id);
+        });
         return None;
     }
     let pointer = response.interact_pointer_pos()?;
     if pressed_now {
+        ui.data_mut(|data| data.remove::<f32>(tied_id));
         if shift {
             ui.data_mut(|data| data.insert_temp(moving_id, pointer.x));
             return None;
         }
         ui.data_mut(|data| data.remove::<f32>(moving_id));
+        if low == high {
+            ui.data_mut(|data| {
+                data.remove::<bool>(active_id);
+                data.insert_temp(tied_id, pointer.x);
+            });
+            return None;
+        }
         let grabs_low = (pointer.x - low_left).abs() <= (pointer.x - high_left).abs();
         ui.data_mut(|data| data.insert_temp(active_id, grabs_low));
     }
@@ -944,6 +961,15 @@ pub fn styled_range_slider(ui: &mut Ui, id: Id, low: f64, high: f64, spec: &Rang
             new_high = new_high.round_ties_even();
         }
         return changed(new_low, new_high);
+    }
+    if let Some(start_x) = ui.data(|data| data.get_temp::<f32>(tied_id)) {
+        if pointer.x == start_x {
+            return None;
+        }
+        ui.data_mut(|data| {
+            data.remove::<f32>(tied_id);
+            data.insert_temp(active_id, pointer.x < start_x);
+        });
     }
     let grabs_low: bool = ui.data(|data| data.get_temp(active_id)).unwrap_or(true);
     let fraction = ((pointer.x - track.left() - THUMB_WIDTH / 2.0) / travel.max(1.0)).clamp(0.0, 1.0) as f64;
@@ -1140,6 +1166,7 @@ fn seed_box(ui: &mut Ui, id: Id, label: &str, seed: i64) -> Edit {
     let button = button.tooltip("New seed");
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
+        anchor: button.rect,
         top_left: Pos2::new(button.rect.left(), button.rect.top() - 4.0 * popup_scale),
         width: BoxWidth::Fixed(((button.rect.width() + 32.0) * popup_scale).max(64.0 * popup_scale)),
         font: slider_popups::value_font(),
@@ -1262,8 +1289,8 @@ impl OptionsStyle {
 }
 
 /// `OptionsX`: every member as a cell of one box (`ListBox-OptionsX`); the
-/// chosen one lifted (`#3f3f3f`) and bright. Narrower than 300 it wraps to
-/// two columns, narrower than 200 to one.
+/// chosen one lifted (`#3f3f3f`) and bright. The size thresholds cap the
+/// columns, and the entries' measured widths wrap them further as needed.
 fn options(ui: &mut Ui, label: &str, spec: &ParameterSpec, current: &str, style: OptionsStyle) -> Option<String> {
     let width = ui.available_width();
     let shrunk = if width < 200.0 {
@@ -1273,7 +1300,7 @@ fn options(ui: &mut Ui, label: &str, spec: &ParameterSpec, current: &str, style:
     } else {
         Shrunk::None
     };
-    let columns = match (style, shrunk) {
+    let maximum_columns = match (style, shrunk) {
         (_, Shrunk::Lot) => 1,
         (_, Shrunk::Little) => 2,
         (OptionsStyle::Grid { .. }, Shrunk::None) => 3,
@@ -1289,11 +1316,22 @@ fn options(ui: &mut Ui, label: &str, spec: &ParameterSpec, current: &str, style:
         OptionsStyle::Labelled => 80.0,
         _ => 18.0,
     };
+    let sizes = theme::sizes(ui.ctx());
+    let option_font = theme::interface(11.0);
+    let mut widest_entry = 0.0_f32;
+    for entry in &entries {
+        let galley = ui.painter().layout_no_wrap(entry.clone(), option_font.clone(), Color32::WHITE);
+        widest_entry = widest_entry.max(galley.size().x);
+    }
+    let minimum_cell_width = widest_entry + 2.0 * (sizes.option_padding[0] + sizes.option_margin);
+    // Border 1 and the grid's 2-point margin on each side.
+    let grid_width = (width - list_left - 6.0).max(0.0);
+    let fitting_columns = (grid_width / minimum_cell_width.max(1.0)).floor() as usize;
+    let columns = maximum_columns.min(fitting_columns.max(1));
     let rows = entries.len().max(1).div_ceil(columns);
     // A row: the text's line, `OptionsX.Item.Padding` and
     // `OptionsX.Item.Margin` above and below; at least
     // `OptionsX.Item.MinHeight` in all.
-    let sizes = theme::sizes(ui.ctx());
     let row_height = OPTION_LINE + 2.0 * sizes.option_padding[1] + 2.0 * sizes.option_margin;
     let list_height = (rows as f32 * row_height + 4.0).max(sizes.options_min_height);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, list_height), Sense::hover());
@@ -1354,6 +1392,11 @@ fn option_cells(ui: &mut Ui, id: Id, list: Rect, entries: &[String], selected: O
         let cell = Rect::from_min_size(cell_origin, Vec2::new(cell_width, cell_height));
         let item = cell.shrink(sizes.option_margin);
         let response = ui.interact(item, id.with(index), Sense::click());
+        if response.hovered() {
+            let pass = ui.ctx().cumulative_pass_nr();
+            ui.data_mut(|data| data.insert_temp(Id::new("property-entry-tooltip"), pass));
+        }
+        let response = response.tooltip(entry);
         let is_selected = selected == Some(index);
         let hovered = response.hovered() && enabled;
         if is_selected {
@@ -1370,6 +1413,13 @@ fn option_cells(ui: &mut Ui, id: Id, list: Rect, entries: &[String], selected: O
         }
     }
     chosen
+}
+
+/// A hovered option owns its full-name tooltip before the containing
+/// property's description. The marker expires after this paint pass.
+pub fn entry_tooltip_hovered(ctx: &egui::Context) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|data| data.get_temp::<u64>(Id::new("property-entry-tooltip"))) == Some(pass)
 }
 
 /// `DropdownX`: the name in the header column (160; 100 narrower than 300;
@@ -1715,8 +1765,10 @@ fn text_box(ui: &mut Ui, id: Id, label: &str, current: &str) -> Edit {
     ui.painter().rect_filled(field, 3.0, theme::TEXTBOX_BACKGROUND.gamma_multiply(opacity));
     ui.painter().rect_stroke(field, 3.0, Stroke::new(1.0, theme::TEXTBOX_BORDER.gamma_multiply(opacity)), StrokeKind::Inside);
     let text_color = theme::LABEL_DEFAULT.gamma_multiply(opacity);
-    let galley = ui.painter().layout_no_wrap(current.to_string(), theme::interface(12.0), text_color);
     let text_area = field.shrink(1.0 + 4.0);
+    let first_line = current.split(['\r', '\n']).next().unwrap_or_default();
+    let displayed = if current.contains(['\r', '\n']) { format!("{first_line} …") } else { current.to_string() };
+    let galley = fitted_line(ui, &displayed, theme::interface(12.0), text_color, text_area.width());
     let text_position = Pos2::new(text_area.left(), field.center().y - galley.size().y / 2.0);
     ui.painter().with_clip_rect(text_area).galley(text_position, galley, text_color);
 
@@ -1728,11 +1780,17 @@ fn text_box(ui: &mut Ui, id: Id, label: &str, current: &str) -> Edit {
     // the popup's own units.
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let typing_look = TypingLook {
+        anchor: field,
         top_left: Pos2::new(control.left() + 90.0 * popup_scale, control.top()),
         width: BoxWidth::Fixed(((control.width() - 90.0) * popup_scale).max(96.0 * popup_scale)),
         font: slider_popups::value_font(),
     };
-    match slider_popups::typing_box(ui, typing_id, &typing_look) {
+    let typed = if current.contains(['\r', '\n']) {
+        slider_popups::typing_box_multiline(ui, typing_id, &typing_look)
+    } else {
+        slider_popups::typing_box(ui, typing_id, &typing_look)
+    };
+    match typed {
         Some(text) if text != current => Edit::Set(json!(text)),
         _ => Edit::None,
     }
@@ -2204,6 +2262,42 @@ mod tests {
             });
             let field = field.expect("the box is drawn");
             assert_eq!((field.left(), field.right()), (20.0 + 90.0, width - 4.0), "{width}");
+        }
+    }
+
+    #[test]
+    fn option_bars_wrap_until_their_entry_names_fit() {
+        let cases = [("Canyon", "Style"), ("PointCloud", "Format"), ("Rivers", "RiverValleyWidth"), ("Mesher", "Topology")];
+        for (node_name, parameter_name) in cases {
+            let node = Catalogue::get().node(node_name).unwrap();
+            let spec = node.parameter(parameter_name).unwrap();
+            let entries: Vec<String> = spec.enum_names.iter().map(|name| spec.enum_display(name)).collect();
+            for width in [210.0, 299.0, 330.0, 600.0] {
+                let shapes = row_shapes(width, |ui| {
+                    options(ui, parameter_name, spec, &spec.enum_names[0], OptionsStyle::Labelled);
+                });
+                let drawn = texts_of(&shapes);
+                for entry in &entries {
+                    let (text, _) = drawn.iter().find(|(text, _)| text.galley.text() == entry).expect("every option is drawn");
+                    let glyphs: String = text.galley.rows.iter().flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr)).collect();
+                    assert_eq!(&glyphs, entry, "{node_name}.{parameter_name}, {width}: {entry}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multiline_text_fields_show_the_first_line_and_an_indication() {
+        for current in ["a\n+ b\n* 0.5", "x * 2\r\n+ 1", "\nsecond line"] {
+            let shapes = row_shapes(300.0, |ui| {
+                text_box(ui, Id::new("multiline-text"), "Expression", current);
+            });
+            let displayed = texts_of(&shapes);
+            let first_line = current.split(['\r', '\n']).next().unwrap();
+            let expected = format!("{first_line} …");
+            let (text, clip) = displayed.iter().find(|(text, _)| text.galley.text() == expected).expect("the first line is shown with an ellipsis");
+            assert_eq!(text.galley.rows.len(), 1);
+            assert!(clip.contains_rect(text.visual_bounding_rect()), "{current:?}: the line is clipped");
         }
     }
 
@@ -2686,12 +2780,53 @@ mod tests {
     }
 
     /// One frame of a text property holding `text`, with these events.
-    fn text_frame(context: &egui::Context, text: &str, events: Vec<egui::Event>) {
+    fn text_frame(context: &egui::Context, text: &str, events: Vec<egui::Event>) -> Edit {
+        let mut changed = Edit::None;
         let output = context.run_ui(frame_input(events, egui::Modifiers::NONE), |ui| {
             let mut row = ui.new_child(egui::UiBuilder::new().max_rect(TEXT_ROW));
-            text_box(&mut row, text_id(), "Variable Name", text);
+            changed = text_box(&mut row, text_id(), "Variable Name", text);
         });
         output.drop_without_applying_deltas();
+        changed
+    }
+
+    #[test]
+    fn text_popups_preserve_line_breaks_and_allow_enter_to_insert_them() {
+        let context = themed_context();
+        let current = "a\n+ b\n* 0.5";
+        let on_value = Pos2::new(170.0, 53.0);
+        let events = [egui::Event::PointerMoved(on_value), press(on_value, egui::PointerButton::Primary, true), press(on_value, egui::PointerButton::Primary, false)];
+        for event in events {
+            assert!(matches!(text_frame(&context, current, vec![event]), Edit::None));
+        }
+        text_frame(&context, current, Vec::new());
+        let typing_id = text_id().with("text-typing");
+        assert_eq!(slider_popups::typing_text(&context, typing_id).as_deref(), Some(current));
+
+        let replacement = "x * 2\n+ 1";
+        text_frame(&context, current, vec![egui::Event::Text(replacement.to_string())]);
+        assert!(matches!(text_frame(&context, current, vec![key(egui::Key::Enter)]), Edit::None));
+        assert_eq!(slider_popups::typing_text(&context, typing_id).as_deref(), Some("x * 2\n+ 1\n"));
+        text_frame(&context, current, vec![egui::Event::Text("* 0.5".to_string())]);
+
+        let apply = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        let edit = text_frame(&context, current, vec![apply]);
+        assert!(matches!(edit, Edit::Set(value) if value == json!("x * 2\n+ 1\n* 0.5")));
+        assert!(!slider_popups::typing_open(&context, typing_id));
+    }
+
+    #[test]
+    fn singleline_text_popups_still_apply_on_enter() {
+        let context = themed_context();
+        let current = "height";
+        let typing_id = text_id().with("text-typing");
+        slider_popups::open_typing(&context, typing_id, current.to_string());
+        text_frame(&context, current, Vec::new());
+        text_frame(&context, current, Vec::new());
+        text_frame(&context, current, vec![egui::Event::Text("slope".to_string())]);
+        let edit = text_frame(&context, current, vec![key(egui::Key::Enter)]);
+        assert!(matches!(edit, Edit::Set(value) if value == json!("slope")));
+        assert!(!slider_popups::typing_open(&context, typing_id));
     }
 
     #[test]
@@ -2811,6 +2946,30 @@ mod tests {
         // Default puts the whole range back.
         let (low, high) = range_nudged(Nudge::Default, 0.3, 0.4, &spec, RangeEnd::High);
         assert_eq!((low as f32, high as f32), (0.1, 0.9));
+    }
+
+    #[test]
+    fn equal_range_ends_widen_in_the_direction_of_the_drag() {
+        let spec = RangeSpec::linear(0.0, 1.0);
+        for (value, direction) in [(0.0, 1.0), (0.5, 1.0), (0.5, -1.0), (1.0, -1.0)] {
+            let context = themed_context();
+            // Slider inset 18, track margin 2, half-thumb 3, travel 272.
+            let start = Pos2::new(23.0 + value as f32 * 272.0, 53.0);
+            let range = (value, value);
+            let moved = Pos2::new(start.x + 50.0 * direction, start.y);
+            range_frame(&context, range, &spec, vec![egui::Event::PointerMoved(start)], egui::Modifiers::NONE);
+            let pressed = press(start, egui::PointerButton::Primary, true);
+            assert_eq!(range_frame(&context, range, &spec, vec![pressed], egui::Modifiers::NONE), None);
+            assert_eq!(range_frame(&context, range, &spec, Vec::new(), egui::Modifiers::NONE), None);
+
+            let changed = range_frame(&context, range, &spec, vec![egui::Event::PointerMoved(moved)], egui::Modifiers::NONE);
+            let (low, high) = changed.expect("the tied range widens");
+            if direction > 0.0 {
+                assert!(low == value && high > value, "{value}: {low}..{high}");
+            } else {
+                assert!(low < value && high == value, "{value}: {low}..{high}");
+            }
+        }
     }
 
     #[test]

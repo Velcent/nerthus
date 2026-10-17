@@ -262,6 +262,14 @@ impl Document {
         UndoMark { pushes: self.pushes, dirty: self.dirty }
     }
 
+    /// Ends a value-edit gesture. Further edits of the same parameter,
+    /// modifier or variable start a new undo step.
+    pub fn finish_value_edit(&mut self) {
+        if let Some(entry) = self.undo.last_mut() {
+            entry.merge_key = None;
+        }
+    }
+
     /// The undo entries pushed since `mark`, the edits of one command,
     /// become one named `label`: undoing it returns to the state before
     /// the first. False when nothing was pushed.
@@ -638,7 +646,7 @@ impl Document {
     }
 
     /// Sets a node property; consecutive edits of the same node's property
-    /// (a slider drag) are one undo step.
+    /// are one undo step until `finish_value_edit` ends the gesture.
     pub fn set_value(&mut self, node: i32, name: &str, value: Value) {
         let Some(current) = self.node(node) else {
             return;
@@ -768,7 +776,7 @@ impl Document {
     }
 
     /// `GraphControl.ResetNode`: all selected nodes reset together as one
-    /// undo step, preserving each node's seeds.
+    /// undo step, preserving each node's seeds and non-parameter data.
     pub fn reset_nodes(&mut self, nodes: &[i32]) {
         let mut resets = Vec::new();
         for node in nodes {
@@ -778,10 +786,12 @@ impl Document {
             let Some(spec) = Catalogue::get().node(&current.type_name) else {
                 continue;
             };
-            let mut values = spec.defaults.clone();
-            for parameter in spec.parameters.iter().filter(|parameter| parameter.is_seed()) {
-                if let Some(seed) = current.values.get(&parameter.name) {
-                    values.insert(parameter.name.clone(), seed.clone());
+            let mut values = current.values.clone();
+            for parameter in spec.parameters.iter().filter(|parameter| !parameter.is_seed()) {
+                if let Some(default) = spec.defaults.get(&parameter.name) {
+                    values.insert(parameter.name.clone(), default.clone());
+                } else {
+                    values.shift_remove(&parameter.name);
                 }
             }
             resets.push((*node, current.name.clone(), values));
@@ -1268,7 +1278,8 @@ impl Document {
     /// not bound yet gets a new variable named after it (`Name_NodeId` when
     /// the name is taken) and is bound to it, bar those with editors of
     /// their own (custom editors, gradients, commands, computed text, range
-    /// clippers). Returns how many were bound.
+    /// clippers), hidden parameters and information labels. Returns how
+    /// many were bound.
     pub fn bind_all_properties(&mut self, node: i32) -> usize {
         let Some(data) = self.node(node) else {
             return 0;
@@ -1279,6 +1290,9 @@ impl Document {
         const OWN_EDITORS: [&str; 6] = ["Custom", "GradientEditor", "Command", "CommandButton", "ComputedString", "RangeClipper"];
         let mut properties = Vec::new();
         for parameter in &spec.parameters {
+            if parameter.hidden || parameter.value_type == nerthus_engine::ValueType::Byte {
+                continue;
+            }
             let bound = self.automation().bindings.iter().any(|binding| binding.node == node && binding.property == parameter.name);
             let own_editor = OWN_EDITORS.contains(&parameter.kind.as_str()) || parameter.editor.is_some() || parameter.value_type == nerthus_engine::ValueType::Float4List;
             if !bound && !own_editor {
@@ -1303,6 +1317,9 @@ impl Document {
         let data = self.node(node)?;
         let spec = Catalogue::get().node(&data.type_name)?;
         let parameter = spec.parameter(property)?;
+        if parameter.hidden || parameter.value_type == nerthus_engine::ValueType::Byte {
+            return None;
+        }
         let current = data.values.get(property).cloned().unwrap_or(Value::Null);
         let order = self.automation().variables.len();
         let mut variable = nerthus_engine::automation::variable_for_property(key, parameter, &current, spec.defaults.get(property), order);
@@ -1443,7 +1460,7 @@ impl Document {
     }
 
     /// A variable's value from its editor; consecutive edits of the same
-    /// variable are one undo step. Every node bound to it rebuilds.
+    /// variable merge until `finish_value_edit`. Every bound node rebuilds.
     pub fn set_variable_value(&mut self, key: &str, value: Value) {
         let saved = self.automation().variables.get(key).and_then(|variable| variable.json.get("Value").cloned());
         if saved.as_ref() == Some(&value) {
@@ -2308,6 +2325,36 @@ mod tests {
     }
 
     #[test]
+    fn modifier_and_variable_gestures_end_their_undo_merge() {
+        let mut document = Document::new();
+        let perlin = document.add_node("Perlin", [0.0, 0.0]).unwrap();
+        document.toggle_modifier(perlin, "Multiplier");
+        let modifier_index = document.node(perlin).unwrap().modifiers.len() - 1;
+        let before = document.undo_labels().len();
+        document.set_modifier_value(perlin, modifier_index, "Value", json!({"X": 0.0, "Y": 0.6}));
+        document.set_modifier_value(perlin, modifier_index, "Value", json!({"X": 0.0, "Y": 0.7}));
+        document.finish_value_edit();
+        document.set_modifier_value(perlin, modifier_index, "Value", json!({"X": 0.0, "Y": 0.8}));
+        document.finish_value_edit();
+        assert_eq!(document.undo_labels().len(), before + 2);
+        assert!(document.undo());
+        let modifier = &document.node(perlin).unwrap().modifiers[modifier_index];
+        assert_eq!(modifier.values["Value"], json!({"X": 0.0, "Y": 0.7}));
+
+        document.bind_new_variable(perlin, "Seed");
+        let before = document.undo_labels().len();
+        document.set_variable_value("Seed", json!(100));
+        document.set_variable_value("Seed", json!(200));
+        document.finish_value_edit();
+        document.set_variable_value("Seed", json!(300));
+        document.finish_value_edit();
+        assert_eq!(document.undo_labels().len(), before + 2);
+        assert!(document.undo());
+        let variable = &document.automation().variables["Seed"];
+        assert_eq!(variable.json["Value"], json!(200));
+    }
+
+    #[test]
     fn history_names_parameter_values_and_keeps_the_start_of_a_drag() {
         let mut document = Document::new();
         let mountain = document.add_node("Mountain", [0.0, 0.0]).unwrap();
@@ -2418,6 +2465,97 @@ mod tests {
         assert_eq!(document.graph_tabs().len(), 1);
         assert_eq!(document.delete_graph_tab(0), 0);
         assert_eq!(document.graph_tabs().len(), 1);
+    }
+
+    #[test]
+    fn resetting_parameters_preserves_added_ports_and_structural_data() {
+        let cases = [
+            ("Combine", "Ratio", json!(0.9), "Input3"),
+            ("Mixer", "PreserveMasks", json!(true), "Layer2"),
+            ("Construction", "Quality", json!("High"), "Terrain2"),
+        ];
+        for (type_name, property, edited, input_name) in cases {
+            let mut document = Document::new();
+            let source = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+            let node = document.add_node(type_name, [200.0, 0.0]).unwrap();
+            assert!(document.add_input(node));
+            assert!(document.add_input(node));
+            document.connect(source, "Out", node, input_name);
+            document.set_value(node, property, edited.clone());
+            let spec = Catalogue::get().node(type_name).unwrap();
+            let before = document.node(node).unwrap().clone();
+
+            document.reset_nodes(&[node]);
+            let reset = document.node(node).unwrap();
+            assert_eq!(reset.values.get(property), spec.defaults.get(property), "{type_name}");
+            for (name, value) in &before.values {
+                if spec.parameter(name).is_none() {
+                    assert_eq!(reset.values.get(name), Some(value), "{type_name} {name}");
+                }
+            }
+            assert_eq!(reset.ports.len(), before.ports.len());
+            assert_eq!(reset.port(input_name).unwrap().record, before.port(input_name).unwrap().record);
+
+            document.undo();
+            assert_eq!(document.node(node).unwrap().values[property], edited);
+            document.redo();
+            assert!(document.add_input(node));
+            let expanded = document.node(node).unwrap();
+            let names: HashSet<&str> = expanded.ports.iter().map(|port| port.name.as_str()).collect();
+            assert_eq!(names.len(), expanded.ports.len(), "{type_name}");
+        }
+    }
+
+    #[test]
+    fn resetting_parameters_preserves_seeds_and_clears_defaultless_data() {
+        let mut document = Document::new();
+        let perlin = document.add_node("Perlin", [0.0, 0.0]).unwrap();
+        let draw = document.add_node("Draw", [200.0, 0.0]).unwrap();
+        document.set_value(perlin, "Seed", json!(42341));
+        document.set_value(draw, "StrokeData", json!("painted strokes"));
+        document.reset_nodes(&[perlin, draw]);
+        assert_eq!(document.node(perlin).unwrap().values["Seed"], json!(42341));
+        assert!(!document.node(draw).unwrap().values.contains_key("StrokeData"));
+        document.undo();
+        assert_eq!(document.node(draw).unwrap().values["StrokeData"], json!("painted strokes"));
+    }
+
+    #[test]
+    fn bind_all_leaves_hidden_parameters_and_information_unbound() {
+        let mut document = Document::new();
+        let erosion = document.add_node("Erosion", [0.0, 0.0]).unwrap();
+        let draw = document.add_node("Draw", [200.0, 0.0]).unwrap();
+        document.set_value(draw, "StrokeData", json!("painted strokes"));
+        assert!(document.bind_all_properties(erosion) > 0);
+        assert_eq!(document.bind_all_properties(draw), 2);
+        assert_eq!(document.bind_all_properties(draw), 0);
+        let bindings = &document.automation().bindings;
+        assert!(!bindings.iter().any(|binding| binding.property == "Information" || binding.property == "StrokeData"));
+        assert!(bindings.iter().any(|binding| binding.node == draw && binding.property == "Soften"));
+        assert!(bindings.iter().any(|binding| binding.node == draw && binding.property == "Height"));
+        assert_eq!(document.node(draw).unwrap().values["StrokeData"], json!("painted strokes"));
+        document.bind_new_variable(draw, "StrokeData");
+        document.bind_new_variable(erosion, "Information");
+        assert!(!document.automation().variables.contains_key("StrokeData"));
+        assert!(!document.automation().variables.contains_key("Information"));
+    }
+
+    #[test]
+    fn seed_bindings_have_a_usable_range_in_both_binding_paths() {
+        for bind_all in [false, true] {
+            let mut document = Document::new();
+            let node = document.add_node("Perlin", [0.0, 0.0]).unwrap();
+            document.set_value(node, "Seed", json!(42341));
+            if bind_all {
+                document.bind_all_properties(node);
+            } else {
+                document.bind_new_variable(node, "Seed");
+            }
+            let seed = &document.automation().variables["Seed"];
+            assert_eq!(seed.json["Min"], json!(0));
+            assert_eq!(seed.json["Max"], json!(65535));
+            assert_eq!(seed.value.to_int32(), Ok(42341));
+        }
     }
 
     #[test]

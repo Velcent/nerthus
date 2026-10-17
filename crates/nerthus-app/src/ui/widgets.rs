@@ -148,6 +148,10 @@ fn icon_menu_button(ui: &mut Ui, icon: &str, tint: Option<Color32>, size: Vec2, 
     button = button.corner_radius(4);
     let menu = MenuButton::from_button(button).config(menu_config());
     let scope = ui.scope(|ui| {
+        // Gaea fixes both the minimum and maximum to Toolbar.ButtonSize.
+        // The global 8px padding would make compact 28px slots 32px wide.
+        let icon_size = Vec2::splat(icons::DEFAULT_SIZE);
+        ui.spacing_mut().button_padding = ((size - icon_size) / 2.0).max(Vec2::ZERO);
         let widgets = &mut ui.visuals_mut().widgets;
         widgets.hovered.weak_bg_fill = theme::MENU_BACKGROUND_HOVER;
         widgets.hovered.bg_stroke = Stroke::NONE;
@@ -865,6 +869,30 @@ mod tests {
         let output = context.run_ui(egui::RawInput::default(), |_| {});
         output.drop_without_applying_deltas();
         context
+    }
+
+    #[test]
+    fn icon_menus_fit_their_requested_slots_in_both_size_themes() {
+        for compact in [false, true] {
+            let context = themed_context();
+            let settings = theme::InterfaceSettings { compact, ..Default::default() };
+            theme::set_settings(&context, settings);
+            let size = Vec2::splat(theme::sizes(&context).toolbar_button);
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 300.0))), ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                let menu = icon_menu(ui, "cube-sphere", "Presets", None, |_| {});
+                let node = icon_menu(ui, "menu", "Node", None, |_| {});
+                let small_size = Vec2::splat(24.0);
+                let small = icon_menu_sized(ui, "menu-deep", "Ports", None, small_size, |_| {});
+                let dropdown = icon_dropdown(ui, "chevron-down", "More", None, size, |_| {});
+                assert_eq!(menu.rect.size(), size);
+                assert_eq!(node.rect.size(), size);
+                assert_eq!(small.rect.size(), small_size);
+                assert_eq!(dropdown.rect.size(), size);
+                assert_eq!(ui.spacing().button_padding, Vec2::new(8.0, 3.0), "menu padding is local to its slot");
+            });
+            output.drop_without_applying_deltas();
+        }
     }
 
     /// One frame of a Graph-like menu (its button at `button_x`) on a

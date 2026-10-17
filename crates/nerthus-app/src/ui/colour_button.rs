@@ -234,7 +234,7 @@ pub fn colour_button(ui: &mut Ui, id: Id, rect: Rect, rgb: [u8; 3], text: &str, 
             slider_popups::open_typing(ui.ctx(), button_typing, colour_text(floats));
         }
         let width = ((rect.width() + TYPING_EXTRA_WIDTH) * scale).max(TYPING_MIN_WIDTH * scale);
-        let look = centred_typing(ui, rect.center(), width);
+        let look = centred_typing(ui, rect, rect.center(), width);
         if let Some(typed) = slider_popups::typing_box(ui, button_typing, &look) {
             // Then, as it always does (`finally`), `SetColor` with what the
             // property holds, which sets the property in turn.
@@ -262,7 +262,7 @@ pub fn colour_button(ui: &mut Ui, id: Id, rect: Rect, rgb: [u8; 3], text: &str, 
         && let Some(frame) = ui.data(|data| data.get_temp::<Rect>(id.with("picker-frame")))
     {
         let width = (frame.width() + TYPING_EXTRA_WIDTH * scale).max(TYPING_MIN_WIDTH * scale);
-        let look = centred_typing(ui, frame.center(), width);
+        let look = centred_typing(ui, rect, frame.center(), width);
         if let Some(typed) = slider_popups::typing_box(ui, picker_typing, &look)
             && let Some(floats) = typed_picker_colour(&typed)
         {
@@ -279,11 +279,11 @@ pub fn colour_button(ui: &mut Ui, id: Id, rect: Rect, rgb: [u8; 3], text: &str, 
 }
 
 /// A typing box `width` wide centred on `centre` (`PlacementMode.Center`).
-fn centred_typing(ui: &Ui, centre: Pos2, width: f32) -> TypingLook {
+fn centred_typing(ui: &Ui, anchor: Rect, centre: Pos2, width: f32) -> TypingLook {
     let font = theme::monospace(TYPING_FONT_SIZE);
     let height = slider_popups::typing_height(ui, &font);
     let top_left = centre - Vec2::new(width, height) / 2.0;
-    TypingLook { top_left, width: BoxWidth::Fixed(width), font }
+    TypingLook { anchor, top_left, width: BoxWidth::Fixed(width), font }
 }
 
 /// The button (`Button-Template`): the colour inside the theme's border
@@ -370,7 +370,7 @@ pub fn minimal_colour_picker(ui: &mut Ui, id: Id, rgb: [u8; 3]) -> Option<[u8; 3
         slider_popups::open_typing(ui.ctx(), typing_id, text);
     }
     let width = (rect.width() + TYPING_EXTRA_WIDTH * scale).max(TYPING_MIN_WIDTH * scale);
-    let look = centred_typing(ui, rect.center(), width);
+    let look = centred_typing(ui, rect, rect.center(), width);
     if let Some(typed) = slider_popups::typing_box(ui, typing_id, &look)
         && let Some(floats) = typed_picker_colour(&typed)
     {
@@ -593,6 +593,82 @@ mod tests {
 
     fn picker_frame(context: &egui::Context) -> Option<Rect> {
         context.memory(|memory| memory.area_rect(Id::new("colour-test").with("picker")))
+    }
+
+    fn key_event(key: egui::Key) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// Opens either the property's text box or the minimal picker's box,
+    /// then replaces its selected text, leaving it pending acceptance.
+    fn type_colour(context: &egui::Context, in_picker: bool, text: &str) -> Id {
+        let rgb = [0; 3];
+        let floats = Some([0.0; 3]);
+        let position = if in_picker {
+            click(context, rgb, BUTTON.center(), egui::PointerButton::Primary);
+            frame(context, rgb, floats, Vec::new());
+            picker_frame(context).expect("the picker opens").center()
+        } else {
+            BUTTON.center()
+        };
+        let pointer_button = |pressed: bool| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE };
+        let events = [vec![egui::Event::PointerMoved(position)], vec![pointer_button(true)], vec![pointer_button(false)], Vec::new()];
+        for events in events {
+            assert_eq!(frame(context, rgb, floats, events).0, None);
+        }
+        let name = if in_picker { "picker-typing" } else { "button-typing" };
+        let id = Id::new("colour-test").with(name);
+        assert!(slider_popups::typing_open(context, id));
+        let typed = egui::Event::Text(text.to_string());
+        assert_eq!(frame(context, rgb, floats, vec![typed]).0, None);
+        assert_eq!(slider_popups::typing_text(context, id).as_deref(), Some(text));
+        id
+    }
+
+    #[test]
+    fn escape_discards_hex_and_rgb_text_in_both_colour_popups() {
+        for in_picker in [false, true] {
+            for text in ["#00FF00", "200, 0, 0"] {
+                let context = themed_context();
+                let id = type_colour(&context, in_picker, text);
+                let (picked, _) = frame(&context, [0; 3], Some([0.0; 3]), vec![key_event(egui::Key::Escape)]);
+                assert_eq!(picked, None, "Escape discards {text} (picker: {in_picker})");
+                assert!(!slider_popups::typing_open(&context, id));
+                let state: PickerState = context.data(|data| data.get_temp(Id::new("colour-test"))).unwrap();
+                assert_eq!(state.colour, [0; 3]);
+            }
+        }
+    }
+
+    #[test]
+    fn enter_and_tab_accept_colour_text_in_both_colour_popups() {
+        for in_picker in [false, true] {
+            for key in [egui::Key::Enter, egui::Key::Tab] {
+                let context = themed_context();
+                let id = type_colour(&context, in_picker, "#00FF00");
+                let (picked, _) = frame(&context, [0; 3], Some([0.0; 3]), vec![key_event(key)]);
+                assert_eq!(picked, Some([0, 255, 0]), "{key:?} accepts (picker: {in_picker})");
+                assert!(!slider_popups::typing_open(&context, id));
+            }
+        }
+    }
+
+    #[test]
+    fn a_press_outside_colour_text_follows_accept_on_lost_focus() {
+        for in_picker in [false, true] {
+            for accept in [false, true] {
+                let context = themed_context();
+                let settings = theme::InterfaceSettings { accept_on_lost_focus: accept, ..Default::default() };
+                theme::set_settings(&context, settings);
+                let id = type_colour(&context, in_picker, "#00FF00");
+                let position = Pos2::new(580.0, 480.0);
+                let pressed = egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE };
+                let events = vec![egui::Event::PointerMoved(position), pressed];
+                let (picked, _) = frame(&context, [0; 3], Some([0.0; 3]), events);
+                assert_eq!(picked, accept.then_some([0, 255, 0]), "accept: {accept}, picker: {in_picker}");
+                assert!(!slider_popups::typing_open(&context, id));
+            }
+        }
     }
 
     #[test]

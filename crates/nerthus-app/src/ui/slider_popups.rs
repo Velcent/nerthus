@@ -77,6 +77,8 @@ pub enum BoxWidth {
 /// Where a typing box shows and how it looks.
 #[derive(Clone, Debug)]
 pub struct TypingLook {
+    /// The caller's control: scrolling it out of its clip closes the box.
+    pub anchor: Rect,
     pub top_left: Pos2,
     pub width: BoxWidth,
     pub font: FontId,
@@ -112,6 +114,7 @@ pub fn typing_open(ctx: &egui::Context, id: Id) -> bool {
 
 pub fn close_typing(ctx: &egui::Context, id: Id) {
     ctx.data_mut(|data| data.remove::<Typing>(id));
+    ctx.memory_mut(|memory| memory.surrender_focus(id.with("text")));
 }
 
 /// Shows the typing box `id` names while it is open (its font at 100%,
@@ -119,8 +122,19 @@ pub fn close_typing(ctx: &egui::Context, id: Id) {
 /// it closes taking it. The box stays in the window, moved back from its
 /// place as far as it needs; one wider than the window scrolls its text.
 pub fn typing_box(ui: &Ui, id: Id, look: &TypingLook) -> Option<String> {
+    show_typing_box(ui, id, look, false)
+}
+
+/// A text property's typing box: Enter adds a line; Ctrl/Cmd+Enter or
+/// Tab takes the text. Escape and focus loss follow the single-line box.
+pub fn typing_box_multiline(ui: &Ui, id: Id, look: &TypingLook) -> Option<String> {
+    show_typing_box(ui, id, look, true)
+}
+
+fn show_typing_box(ui: &Ui, id: Id, look: &TypingLook, multiline: bool) -> Option<String> {
     let mut typing: Typing = ui.data(|data| data.get_temp(id))?;
-    if went_away(ui.ctx(), typing.shown) {
+    let visible_anchor = look.anchor.intersect(ui.clip_rect());
+    if !visible_anchor.is_positive() || went_away(ui.ctx(), typing.shown) {
         close_typing(ui.ctx(), id);
         return None;
     }
@@ -144,7 +158,23 @@ pub fn typing_box(ui: &Ui, id: Id, look: &TypingLook) -> Option<String> {
         };
         width.min(screen.width())
     };
-    let size = Vec2::new(outer_width(&typing.text), line + chrome);
+    let outer_size = |text: &str| {
+        let width = outer_width(text);
+        let height = if multiline {
+            let wrap_width = (width - chrome).max(1.0);
+            let galley = ui.painter().layout(text.to_owned(), font.clone(), theme::LABEL_EMPHASIS, wrap_width);
+            galley.size().y.max(line) + chrome
+        } else {
+            line + chrome
+        };
+        Vec2::new(width, height.min(screen.height()))
+    };
+    let size = outer_size(&typing.text);
+    // Consume the apply shortcut before the multiline TextEdit can see it.
+    let applied = multiline && typing.focused && ui.input_mut(|input| {
+        input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
+            || input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter)
+    });
     // Kept in the window by hand: egui's own constraint goes by the size
     // the box had the pass before, which typing has since changed.
     let top_left = kept_in(look.top_left, size, screen);
@@ -155,14 +185,21 @@ pub fn typing_box(ui: &Ui, id: Id, look: &TypingLook) -> Option<String> {
         ui.painter().rect_stroke(rect, 3.0 * scale, Stroke::new(border, theme::TEXTBOX_FOCUSED_BORDER), egui::StrokeKind::Inside);
         let inner = rect.shrink(border + padding);
         let mut box_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-        let mut edit = egui::TextEdit::singleline(&mut typing.text);
+        box_ui.shrink_clip_rect(inner);
+        let mut edit = if multiline { egui::TextEdit::multiline(&mut typing.text) } else { egui::TextEdit::singleline(&mut typing.text) };
+        edit = edit.desired_rows(1);
         edit = edit.id(text_id);
         edit = edit.font(font.clone());
         edit = edit.text_color(theme::LABEL_EMPHASIS);
         edit = edit.desired_width(inner.width());
         edit = edit.frame(egui::Frame::NONE);
         edit = edit.margin(egui::Margin::ZERO);
-        box_ui.add(edit)
+        if multiline {
+            let scroll = egui::ScrollArea::vertical().max_height(inner.height()).min_scrolled_height(0.0);
+            scroll.show(&mut box_ui, |ui| ui.add(edit)).inner
+        } else {
+            box_ui.add(edit)
+        }
     });
     let response = shown.inner;
     if !typing.focused {
@@ -172,13 +209,19 @@ pub fn typing_box(ui: &Ui, id: Id, look: &TypingLook) -> Option<String> {
         return None;
     }
     let pressed_elsewhere = pressed_outside(ui, shown.response.rect);
-    let outcome = if pressed_elsewhere { Some(theme::settings(ui.ctx()).accept_on_lost_focus) } else { crate::ui::widgets::popup_outcome(ui, &response) };
+    let outcome = if applied {
+        Some(true)
+    } else if pressed_elsewhere {
+        Some(theme::settings(ui.ctx()).accept_on_lost_focus)
+    } else {
+        crate::ui::widgets::popup_outcome(ui, &response)
+    };
     let Some(accepted) = outcome else {
         // The box was sized before the edit took this pass's keys: one
         // that no longer fits its text would show a pass behind it (and
         // stay so until something repaints), so the pass runs again.
-        if outer_width(&typing.text) != size.x {
-            ui.ctx().request_discard("the typing box's width");
+        if outer_size(&typing.text) != size {
+                ui.ctx().request_discard("the typing box's size");
             if !ui.ctx().will_discard() {
                 ui.ctx().request_repaint();
             }
@@ -517,6 +560,52 @@ pub fn value_font() -> FontId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typing_box_closes_without_accepting_when_its_anchor_leaves_the_callers_clip() {
+        for accept in [false, true] {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            let settings = theme::InterfaceSettings { accept_on_lost_focus: accept, ..Default::default() };
+            theme::set_settings(&context, settings);
+            let clip = Rect::from_min_max(Pos2::new(40.0, 80.0), Pos2::new(350.0, 260.0));
+            let id = Id::new("scrolled-typing");
+            let anchor = Rect::from_min_size(Pos2::new(80.0, 120.0), Vec2::new(120.0, 30.0));
+            let mut look = TypingLook { anchor, top_left: anchor.min - Vec2::splat(8.0), width: BoxWidth::Fixed(150.0), font: value_font() };
+            let frame = |look: &TypingLook| {
+                let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 400.0));
+                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+                let mut taken = None;
+                let mut output = context.run_ui(input, |ui| {
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(clip));
+                    child.set_clip_rect(clip);
+                    taken = typing_box(&child, id, look);
+                });
+                let shapes = std::mem::take(&mut output.shapes);
+                output.drop_without_applying_deltas();
+                (taken, shapes)
+            };
+            open_typing(&context, id, "discarded text".to_string());
+            frame(&look);
+            frame(&look);
+            assert!(typing_open(&context, id));
+
+            // A partially visible control still owns its popup.
+            look.anchor = anchor.translate(Vec2::new(0.0, -60.0));
+            look.top_left = look.anchor.min - Vec2::splat(8.0);
+            frame(&look);
+            assert!(typing_open(&context, id));
+
+            look.anchor = anchor.translate(Vec2::new(0.0, -100.0));
+            look.top_left = look.anchor.min - Vec2::splat(8.0);
+            let (taken, shapes) = frame(&look);
+            assert_eq!(taken, None, "scrolling out cancels even when focus loss accepts");
+            assert!(!typing_open(&context, id));
+            assert!(!context.memory(|memory| memory.has_focus(id.with("text"))));
+            let text_drawn = shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == "discarded text"));
+            assert!(!text_drawn, "the detached popup must not paint over another panel");
+        }
+    }
 
     #[test]
     fn a_box_moves_back_into_the_window_only_as_far_as_it_needs() {

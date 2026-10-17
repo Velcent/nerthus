@@ -24,61 +24,85 @@ fn set_port_count(node: &mut NodeData, count: i64) {
 /// `Node.AddNewPort()`: adds the node's next input (and the ports that go
 /// with it); returns the input's name, or `None` at the type's limit.
 pub fn add_new_port(node: &mut NodeData) -> Option<String> {
-    let count = port_count(node);
+    let mut count = port_count(node);
     match node.type_name.as_str() {
         "Combine" | "Bomber" => {
-            if count >= 10 {
-                return None;
+            while count < 10 {
+                count += 1;
+                let name = format!("Input{count}");
+                if node.port(&name).is_some() {
+                    continue;
+                }
+                node.add_port(&name, "In");
+                set_port_count(node, count);
+                return Some(name);
             }
-            let name = format!("Input{}", count + 1);
-            node.add_port(&name, "In");
-            set_port_count(node, count + 1);
-            Some(name)
+            None
         }
         "Mixer" => {
-            if count >= 30 {
-                return None;
+            while count < 30 {
+                count += 2;
+                let layer = count / 2;
+                let name = format!("Layer{layer}");
+                let mask_name = format!("Mask{layer}");
+                let output_name = format!("MaskOut{layer}");
+                let occupied = [&name, &mask_name, &output_name].iter().any(|name| node.port(name).is_some());
+                if occupied {
+                    continue;
+                }
+                node.add_port(&name, "In");
+                node.add_port(&mask_name, "In");
+                node.add_port(&output_name, "Out");
+                set_port_count(node, count);
+                return Some(name);
             }
-            let layer = count / 2 + 1;
-            let name = format!("Layer{layer}");
-            node.add_port(&name, "In");
-            node.add_port(&format!("Mask{layer}"), "In");
-            node.add_port(&format!("MaskOut{layer}"), "Out");
-            set_port_count(node, count + 2);
-            Some(name)
+            None
         }
         "Layers" => {
-            if count >= 14 {
-                return None;
+            while count < 14 {
+                count += 2;
+                let layer = count / 2;
+                let name = format!("Layer{layer}");
+                let mask_name = format!("Mask{layer}");
+                if node.port(&name).is_some() || node.port(&mask_name).is_some() {
+                    continue;
+                }
+                node.add_port(&name, "In");
+                node.add_port(&mask_name, "In");
+                set_port_count(node, count);
+                return Some(name);
             }
-            let layer = count / 2 + 1;
-            let name = format!("Layer{layer}");
-            node.add_port(&name, "In");
-            node.add_port(&format!("Mask{layer}"), "In");
-            set_port_count(node, count + 2);
-            Some(name)
+            None
         }
         "Construction" => {
-            if count >= 15 {
-                return None;
+            while count < 15 {
+                count += 1;
+                let name = format!("Terrain{count}");
+                if node.port(&name).is_some() {
+                    continue;
+                }
+                node.add_port(&name, "In");
+                set_port_count(node, count);
+                add_terrain_transform(node, count - 1);
+                return Some(name);
             }
-            let number = count + 1;
-            let name = format!("Terrain{number}");
-            node.add_port(&name, "In");
-            set_port_count(node, number);
-            add_terrain_transform(node, number - 1);
-            Some(name)
+            None
         }
         "TextureBaker" | "MeshWarp" => {
-            if count >= 20 {
-                return None;
+            while count < 20 {
+                let index = count / 2;
+                count += 2;
+                let name = format!("In{index}");
+                let output_name = format!("Out{index}");
+                if node.port(&name).is_some() || node.port(&output_name).is_some() {
+                    continue;
+                }
+                node.add_port(&name, "In");
+                node.add_port(&output_name, "Out");
+                set_port_count(node, count);
+                return Some(name);
             }
-            let index = count / 2;
-            let name = format!("In{index}");
-            node.add_port(&name, "In");
-            node.add_port(&format!("Out{index}"), "Out");
-            set_port_count(node, count + 2);
-            Some(name)
+            None
         }
         _ => None,
     }
@@ -195,6 +219,47 @@ mod tests {
         let transforms = node.values["Transforms"].as_array().unwrap();
         assert_eq!(transforms.len(), 2);
         assert_eq!(transforms[1]["Index"], Value::from(1));
+    }
+
+    #[test]
+    fn added_ports_skip_names_left_by_an_old_reset() {
+        let cases = [
+            ("Combine", "Input5"),
+            ("Bomber", "Input6"),
+            ("Mixer", "Layer4"),
+            ("Layers", "Layer4"),
+            ("Construction", "Terrain4"),
+            ("TextureBaker", "In3"),
+            ("MeshWarp", "In3"),
+        ];
+        for (type_name, expected) in cases {
+            let mut node = fresh(type_name);
+            let original_count = port_count(&node);
+            assert!(add_new_port(&mut node).is_some(), "{type_name}");
+            assert!(add_new_port(&mut node).is_some(), "{type_name}");
+            set_port_count(&mut node, original_count);
+
+            assert_eq!(add_new_port(&mut node).as_deref(), Some(expected), "{type_name}");
+            let names: std::collections::HashSet<&str> = node.ports.iter().map(|port| port.name.as_str()).collect();
+            assert_eq!(names.len(), node.ports.len(), "{type_name}");
+        }
+    }
+
+    #[test]
+    fn grouped_ports_skip_an_occupied_mask_or_output() {
+        let cases = [
+            ("Mixer", "MaskOut2", "Layer3"),
+            ("Layers", "Mask2", "Layer3"),
+            ("TextureBaker", "Out1", "In2"),
+            ("MeshWarp", "Out1", "In2"),
+        ];
+        for (type_name, occupied, expected) in cases {
+            let mut node = fresh(type_name);
+            node.add_port(occupied, "Out");
+            assert_eq!(add_new_port(&mut node).as_deref(), Some(expected), "{type_name}");
+            let names: std::collections::HashSet<&str> = node.ports.iter().map(|port| port.name.as_str()).collect();
+            assert_eq!(names.len(), node.ports.len(), "{type_name}");
+        }
     }
 
     #[test]

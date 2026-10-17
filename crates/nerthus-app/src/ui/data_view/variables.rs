@@ -734,6 +734,7 @@ fn row_typing(ui: &mut Ui, typing_id: egui::Id, row: Rect) -> Option<RowTyping> 
     };
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let look = TypingLook {
+        anchor: row,
         top_left: Pos2::new(row.left() + offset * popup_scale, row.top()),
         width: BoxWidth::Fixed(width * popup_scale),
         font: slider_popups::value_font(),

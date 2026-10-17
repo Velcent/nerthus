@@ -83,6 +83,7 @@ pub fn bound_variable(ui: &mut Ui, id: Id, bound: &Bound) -> Edit {
     // In the popup's own units.
     let popup_scale = slider_popups::popup_scale(ui.ctx());
     let look = TypingLook {
+        anchor: control,
         top_left: Pos2::new(control.left() + TYPING_LEFT * popup_scale, control.top()),
         width: BoxWidth::Fixed(((control.width() - TYPING_TRIM) * popup_scale).max(32.0 * popup_scale)),
         font: slider_popups::value_font(),

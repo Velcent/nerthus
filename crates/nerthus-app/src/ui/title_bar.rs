@@ -16,7 +16,6 @@ use egui::containers::menu::MenuButton;
 use egui::{Align, Color32, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 
 use crate::editor::Editor;
-use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::{menu_keys, menus};
@@ -176,10 +175,9 @@ fn measure(ui: &Ui, editor: &Editor, update: Option<&UpdateBox>) -> Widths {
     }
 }
 
-/// An icon menu's width: `Toolbar.ButtonSize`, or the icon in the button
-/// padding when that is wider.
+/// Icon menus fit the theme's fixed `Toolbar.ButtonSize` slot.
 fn icon_menu_width(ui: &Ui) -> f32 {
-    toolbar_button(ui).max(icons::DEFAULT_SIZE + 2.0 * ui.spacing().button_padding.x)
+    toolbar_button(ui)
 }
 
 /// Each part's slot (left and right edges) in a bar from `left` to
