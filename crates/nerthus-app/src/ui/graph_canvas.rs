@@ -922,9 +922,17 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     let connections = layout_connections(editor, &layouts, &by_id, &frame, &view, origin, tab);
     let pointer = ui.input(|input| input.pointer.hover_pos());
     let pointer_on_graph = pointer.filter(|point| rect.contains(*point));
-    let hovered_connection = pointer_on_graph.filter(|_| state.drag.is_none()).and_then(|point| {
-        connections.iter().position(|connection| connection.points.windows(2).any(|segment| distance_to_segment(point, segment[0], segment[1]) < 5.0))
-    });
+    // The distance test is geometric and blind to layers, so a connection
+    // behind an open menu (the graph's own, the Lazy Menu, any popup) would
+    // highlight through it and have `handle_background` read its spot as a
+    // connection. Egui gives hover to the topmost widget only: a menu over
+    // the pointer means the background is not hovered.
+    let hovered_connection = pointer_on_graph
+        .filter(|_| state.drag.is_none())
+        .filter(|_| background.hovered())
+        .and_then(|point| {
+            connections.iter().position(|connection| connection.points.windows(2).any(|segment| distance_to_segment(point, segment[0], segment[1]) < 5.0))
+        });
     for (index, connection) in connections.iter().enumerate() {
         let selected = state.selected_connections.iter().any(|(to, port)| *to == connection.to && *port == connection.to_port);
         let hovered = hovered_connection == Some(index);
@@ -2419,8 +2427,14 @@ fn handle_background(
             state.drag = None;
         }
     }
+    // The graph's menu opens right-clicked on empty graph; right-clicking a
+    // connection opens that connection's menu above instead, so this one is
+    // not opened or moved over it. Egui drops a menu that is not shown every
+    // frame as abandoned, so an open one is re-shown even when the pointer
+    // (on the menu or off it) happens to cross a connection.
     let on_connection = hovered.is_some();
-    if !on_connection {
+    let right_click_on_connection = on_connection && background.secondary_clicked();
+    if (background.context_menu_opened() || !on_connection) && !right_click_on_connection {
         background.context_menu(|ui| {
             canvas_context_menu(ui, editor, state, commands);
         });
