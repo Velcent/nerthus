@@ -221,7 +221,9 @@ These parts of Gaea 2.3.1.0 are not in Nerthus yet.
   rows that start with high values (values near 1 at 360 pixels, lower ones
   for wider blurs), where Gaea's don't.
 
-### Left out on purpose
+## Intentional differences
+
+These features of Gaea are intentionally left out of Nerthus, or are implemented differently:
 
 - Licensing.
 - The Houdini, Unity and Unreal bridges: the HoudiniOut, Unity and Unreal
