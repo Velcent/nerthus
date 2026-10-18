@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use crate::document::ExportSettings;
 use crate::editor::Editor;
 use crate::theme;
+use crate::ui::command_line_window;
 use crate::ui::commands::Command;
 use crate::ui::input_box::{InputAnswer, InputBox};
 use crate::ui::prompt::{task_button, TaskDialog};
@@ -62,6 +63,10 @@ const ORGANIZATIONS: [(OrganizeFiles, &str); 3] = [
 /// `cboOverlapingPixels`: 0 to 16.
 const MOST_OVERLAP: usize = 16;
 
+const DESTINATION_FIELD: &str = "build-destination";
+const TILE_PATTERN_FIELD: &str = "build-tile-pattern";
+const SCRIPT_FIELD: &str = "build-post-script";
+
 /// `cboResolution`: the resolutions offered.
 const RESOLUTIONS: [(usize, &str); 18] = [
     (512, "512 x 512"),
@@ -93,15 +98,8 @@ const COLOR_SPACES: [&str; 40] = [
 #[derive(Clone, Debug)]
 pub struct BuildSettingsState {
     pub tab: SettingsTab,
-    /// The destination as typed (saved as it changes).
-    destination: Option<String>,
-    /// The tile suffix pattern as typed (saved as it changes).
-    tile_pattern: Option<String>,
     /// File names being edited, by node.
     filenames: Vec<(i32, String)>,
-    /// The subdivision, output and tile size were brought in step on
-    /// opening.
-    laid_out: bool,
     /// The Regions tab's canvas.
     pub regions: RegionsState,
     /// The Profiles tab: the profile selected (`lstProfiles`), the name
@@ -125,24 +123,21 @@ impl BuildSettingsState {
     pub fn new(tab: SettingsTab) -> Self {
         Self {
             tab,
-            destination: None,
-            tile_pattern: None,
             filenames: Vec::new(),
-            laid_out: false,
             regions: RegionsState::default(),
             profile: None,
             profile_name: None,
             profile_question: None,
         }
     }
+}
 
-    /// The build settings changed under the window (a profile loaded):
-    /// what it typed and laid out is read again.
-    fn reload(&mut self) {
-        self.destination = None;
-        self.tile_pattern = None;
-        self.laid_out = false;
-    }
+/// Typing stays one undo gesture until the build text field loses focus.
+/// The shell's per-key boundaries still apply to other value controls.
+pub fn editing_text(ctx: &egui::Context) -> bool {
+    let focused = ctx.memory(|memory| memory.focused());
+    let fields = [DESTINATION_FIELD, TILE_PATTERN_FIELD, SCRIPT_FIELD];
+    fields.iter().any(|field| focused == Some(Id::new(field)))
 }
 
 /// A section's title bar (`TextBlock` on `Panel-Border`, semibold).
@@ -186,21 +181,16 @@ fn caption(ui: &mut Ui, text: &str, color: Color32) {
 /// Command Line and Close below.
 pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSettingsState>, commands: &mut Vec<Command>) {
     if tool_window::close_requested(ctx, Id::new("build-settings")) {
+        if let Some(settings) = state.as_mut() {
+            finish_filename_edits(ctx, editor, settings);
+        }
+        editor.document.finish_value_edit();
         *state = None;
         return;
     }
     let Some(settings) = state.as_mut() else {
         return;
     };
-    // The bucket and tile sizes follow the subdivision and output; they are
-    // worked out once on opening, when the saved ones differ.
-    if !settings.laid_out {
-        settings.laid_out = true;
-        let definition = editor.document.build_definition();
-        let tiled = definition.output_type == OutputType::CroppedTiles;
-        let region = selected_region(editor, &definition);
-        apply_layout(editor, definition.resolution, definition.subdivision, tiled, definition.tile_resolution, region.as_ref());
-    }
     let mut open = true;
     let mut close = false;
     let mut window = egui::Window::new("Build Settings and Regions");
@@ -229,6 +219,8 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSe
                     let selected = settings.tab == tab;
                     let enabled = if tab == SettingsTab::Tiles { tiled } else { enabled };
                     if tab_list_item(ui, name, selected, enabled, brush).clicked() {
+                        finish_filename_edits(ctx, editor, settings);
+                        editor.document.finish_value_edit();
                         settings.tab = tab;
                     }
                 }
@@ -242,11 +234,11 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSe
                 page = page.auto_shrink([false, false]);
                 page.show(ui, |ui| match settings.tab {
                     SettingsTab::Resolution => resolution_tab(ui, editor),
-                    SettingsTab::Build => build_tab(ui, editor, settings),
+                    SettingsTab::Build => build_tab(ui, editor),
                     SettingsTab::Nodes => nodes_tab(ui, editor, settings, commands),
                     SettingsTab::Script => script_tab(ui, editor, commands),
                     SettingsTab::Terrain => terrain_tab(ui, editor),
-                    SettingsTab::Tiles => tiles_tab(ui, editor, settings),
+                    SettingsTab::Tiles => tiles_tab(ui, editor),
                     SettingsTab::Regions => regions::regions_tab(ui, editor, &mut settings.regions, commands),
                     SettingsTab::Profiles => profiles_tab(ui, editor, settings),
                 });
@@ -258,8 +250,8 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSe
                 close = true;
             }
             if ui.button("Copy Command Line").clicked() {
-                let file = editor.document.path.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
-                ui.ctx().copy_text(format!("nerthus-build build \"{file}\""));
+                let command_line = command_line_window::build_command_line(editor);
+                ui.ctx().copy_text(command_line);
                 editor.report("Copied the build command line");
             }
             if ui.button("Execute Build").clicked() {
@@ -270,7 +262,40 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSe
     });
     profile_dialogs(ctx, editor, settings);
     if close || !open {
+        finish_filename_edits(ctx, editor, settings);
+        editor.document.finish_value_edit();
         *state = None;
+    }
+}
+
+/// A tab change or external close can remove a filename field before it
+/// gets to observe focus loss. Finish only drafts still being edited,
+/// whose saved name has not changed underneath them.
+fn finish_filename_edits(ctx: &egui::Context, editor: &mut Editor, settings: &mut BuildSettingsState) {
+    let escaped = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+    for (id, typed) in &mut settings.filenames {
+        let field_id = Id::new(("build-settings-filename", *id));
+        let editing_id = field_id.with("editing");
+        let Some(original) = ctx.data_mut(|data| data.remove_temp::<String>(editing_id)) else {
+            continue;
+        };
+        ctx.memory_mut(|memory| memory.surrender_focus(field_id));
+        let Some(node) = editor.document.node(*id) else {
+            continue;
+        };
+        let Some(export) = ExportSettings::of(node) else {
+            continue;
+        };
+        if escaped || original != export.filename {
+            *typed = export.filename;
+            continue;
+        }
+        let trimmed = typed.trim();
+        let filename = if trimmed.is_empty() { node.name.clone() } else { trimmed.to_string() };
+        *typed = filename.clone();
+        if filename != export.filename {
+            editor.document.edit_export(*id, "Export filename", |settings| settings.filename = filename);
+        }
     }
 }
 
@@ -317,7 +342,6 @@ fn profiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsSt
         {
             editor.document.load_build_profile(name);
             editor.report(format!("Loaded the build profile {name}"));
-            settings.reload();
         }
         if ui.add_enabled(chosen, egui::Button::new("Save")).clicked()
             && let Some(name) = &selected
@@ -659,23 +683,32 @@ fn grouped(value: usize) -> String {
 }
 
 /// The Tiles tab (`stackTiles`): how tiles are named and laid out.
-fn tiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState) {
+fn tiles_tab(ui: &mut Ui, editor: &mut Editor) {
     section(ui, "Tiled Output Settings");
     let definition = editor.document.build_definition();
     caption(ui, "Tile Suffix Pattern", theme::LABEL_DEFAULT);
-    let typed = settings.tile_pattern.get_or_insert_with(|| definition.tile_pattern.clone());
+    // Builds fall back to a default for an empty pattern; the editor must
+    // preserve the empty string while the user replaces it.
+    let saved_definition = editor.document.project.assets[0].extra.get("BuildDefinition");
+    let saved_pattern = saved_definition.and_then(|value| value.get("TilePattern")).and_then(Value::as_str);
+    let mut typed = saved_pattern.unwrap_or(&definition.tile_pattern).to_string();
     ui.horizontal(|ui| {
-        let mut field = egui::TextEdit::singleline(typed);
+        let mut field = egui::TextEdit::singleline(&mut typed);
+        field = field.id(Id::new(TILE_PATTERN_FIELD));
         field = field.font(theme::monospace(12.0));
         field = field.text_color(theme::TEXTBOX_FILE_FOREGROUND);
         field = field.desired_width(220.0);
-        if ui.add(field).changed() {
-            editor.document.set_build_setting("TilePattern", Value::String(typed.clone()));
+        let response = ui.add(field);
+        if response.changed() {
+            editor.document.set_build_setting_edited("TilePattern", Value::String(typed.clone()));
+        }
+        if response.lost_focus() {
+            editor.document.finish_value_edit();
         }
         icon_menu(ui, "chevron-down", "Presets", None, |ui| {
             for preset in TILE_PATTERN_PRESETS {
                 if menu_item(ui, None, None, preset, "").clicked() {
-                    *typed = preset.to_string();
+                    typed = preset.to_string();
                     editor.document.set_build_setting("TilePattern", Value::String(typed.clone()));
                     ui.close();
                 }
@@ -747,25 +780,29 @@ fn tiles_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState
     }
 }
 
-fn build_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState) {
+fn build_tab(ui: &mut Ui, editor: &mut Editor) {
     section(ui, "Export Settings");
     let definition = editor.document.build_definition();
     caption(ui, "Build Destination", theme::LABEL_DEFAULT);
-    let typed = settings.destination.get_or_insert_with(|| definition.destination.clone());
+    let mut typed = definition.destination.clone();
     ui.horizontal(|ui| {
-        let mut field = egui::TextEdit::singleline(typed);
+        let mut field = egui::TextEdit::singleline(&mut typed);
+        field = field.id(Id::new(DESTINATION_FIELD));
         field = field.font(theme::semibold(12.0));
         field = field.text_color(theme::TEXTBOX_FILE_FOREGROUND);
         field = field.hint_text(nerthus_export::destination::DEFAULT_TEMPLATE);
         field = field.desired_width(ui.available_width() - 70.0);
         let response = ui.add(field);
         if response.changed() {
-            editor.document.set_build_setting("Destination", Value::String(typed.clone()));
+            editor.document.set_build_setting_edited("Destination", Value::String(typed.clone()));
+        }
+        if response.lost_focus() {
+            editor.document.finish_value_edit();
         }
         icon_menu(ui, "chevron-down", "Presets", None, |ui| {
             for preset in TEMPLATE_PRESETS {
                 if menu_item(ui, None, None, preset, "").clicked() {
-                    *typed = preset.to_string();
+                    typed = preset.to_string();
                     editor.document.set_build_setting("Destination", Value::String(typed.clone()));
                     ui.close();
                 }
@@ -929,31 +966,51 @@ fn savable(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState, 
             });
         }
 
-        // The file name, saved on Enter or Tab (empty: the node's name);
-        // Escape puts it back.
+        // The file name, saved when focus leaves (empty: the node's name);
+        // only Escape puts it back.
+        let field_id = Id::new(("build-settings-filename", id));
+        let editing_id = field_id.with("editing");
         let index = match settings.filenames.iter().position(|(node_id, _)| *node_id == id) {
             Some(index) => index,
             None => {
+                // A fresh view may reuse a node id from the old document.
+                ui.data_mut(|data| data.remove::<String>(editing_id));
                 settings.filenames.push((id, export.filename.clone()));
                 settings.filenames.len() - 1
             }
         };
+        let was_focused = ui.memory(|memory| memory.has_focus(field_id));
         let name_width = (ui.available_width() - 120.0).max(80.0);
         let mut field = egui::TextEdit::singleline(&mut settings.filenames[index].1);
+        field = field.id(field_id);
         field = field.font(theme::semibold(12.0));
         field = field.desired_width(name_width);
         let response = ui.add_enabled(export.enabled, field);
-        let committed = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Tab));
         let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        if was_focused || response.has_focus() {
+            ui.data_mut(|data| {
+                data.get_temp_mut_or_insert_with(editing_id, || export.filename.clone());
+            });
+        }
+        // egui can report the same focus loss again next frame. Finish
+        // each edit once so that an immediate undo stays undone.
+        let original = if response.lost_focus() {
+            ui.data_mut(|data| data.remove_temp::<String>(editing_id))
+        } else {
+            None
+        };
+        let committed = original.as_deref() == Some(export.filename.as_str()) && !escaped;
         if committed {
             let typed = settings.filenames[index].1.trim().to_string();
             let filename = if typed.is_empty() { node.name.clone() } else { typed };
             settings.filenames[index].1 = filename.clone();
-            editor.document.edit_export(id, "Export filename", |settings| settings.filename = filename);
+            if filename != export.filename {
+                editor.document.edit_export(id, "Export filename", |settings| settings.filename = filename);
+            }
         } else {
             // Escape, or the name changed elsewhere (undo, fixing
             // duplicates): show the saved name.
-            let cancelled = response.lost_focus() && escaped;
+            let cancelled = original.is_some() && escaped;
             let stale = !response.has_focus() && settings.filenames[index].1 != export.filename;
             if cancelled || stale {
                 settings.filenames[index].1 = export.filename.clone();
@@ -987,12 +1044,17 @@ fn script_tab(ui: &mut Ui, editor: &mut Editor, commands: &mut Vec<Command>) {
     ui.add_space(8.0);
     let mut script = editor.document.build_definition().post_build_script;
     let mut field = egui::TextEdit::multiline(&mut script);
+    field = field.id(Id::new(SCRIPT_FIELD));
     field = field.font(theme::monospace(14.0));
     field = field.text_color(theme::ACCENT_MUTED_GREEN);
     field = field.desired_rows(12);
     field = field.desired_width(f32::INFINITY);
-    if ui.add(field).changed() {
-        editor.document.set_build_setting("PostBuildScript", Value::String(script));
+    let response = ui.add(field);
+    if response.changed() {
+        editor.document.set_build_setting_edited("PostBuildScript", Value::String(script));
+    }
+    if response.lost_focus() {
+        editor.document.finish_value_edit();
     }
     // "Learn more" (`Button-Link`, no padding): the documentation on
     // post-build scripts.
@@ -1007,25 +1069,34 @@ fn terrain_tab(ui: &mut Ui, editor: &mut Editor) {
     let terrain = editor.document.terrain();
     let mut width = terrain.width;
     let mut height = terrain.height;
-    let mut changed = false;
     ui.horizontal(|ui| {
         caption(ui, "Width", theme::LABEL_DEFAULT);
         let mut value = egui::DragValue::new(&mut width);
         value = value.range(100.0..=2_400_000.0);
         value = value.suffix(" m");
-        changed |= ui.add(value).changed();
+        let response = ui.add(value);
+        if response.changed() {
+            editor.document.set_terrain_size_edited("Width", width.round(), height.round());
+            editor.changed();
+        }
+        if response.drag_stopped() || response.lost_focus() {
+            editor.document.finish_value_edit();
+        }
     });
     ui.horizontal(|ui| {
         caption(ui, "Height", theme::LABEL_DEFAULT);
         let mut value = egui::DragValue::new(&mut height);
         value = value.range(100.0..=10_000.0);
         value = value.suffix(" m");
-        changed |= ui.add(value).changed();
+        let response = ui.add(value);
+        if response.changed() {
+            editor.document.set_terrain_size_edited("Height", width.round(), height.round());
+            editor.changed();
+        }
+        if response.drag_stopped() || response.lost_focus() {
+            editor.document.finish_value_edit();
+        }
     });
-    if changed {
-        editor.document.set_terrain_size(width.round(), height.round());
-        editor.changed();
-    }
     let terrain = editor.document.terrain();
     let resolution = editor.document.build_definition().resolution;
     let meters_per_pixel = f64::from(terrain.width) / resolution as f64;
@@ -1052,7 +1123,7 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use egui::epaint::{ClippedShape, TextShape};
-    use egui::{AreaState, Event, Modifiers, MouseWheelUnit, Pos2, RawInput, Rect, Shape, TouchPhase};
+    use egui::{AreaState, Event, Key, Modifiers, MouseWheelUnit, Pos2, RawInput, Rect, Shape, TouchPhase};
     use nerthus_export::swarm::PROFILE_SEPARATOR;
 
     /// The screen, in points, of 1600 × 960 at the default 120%.
@@ -1071,7 +1142,14 @@ mod tests {
     fn frame(context: &egui::Context, screen: Vec2, editor: &mut Editor, state: &mut Option<BuildSettingsState>, events: Vec<Event>) -> (Vec<ClippedShape>, Rect) {
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
         let mut output = context.run_ui(input, |ui| {
+            let (starts, finishes) = crate::ui::value_edit_boundaries(ui.ctx());
+            if starts {
+                editor.document.finish_value_edit();
+            }
             show(ui.ctx(), editor, state, &mut Vec::new());
+            if finishes {
+                editor.document.finish_value_edit();
+            }
         });
         let shapes = std::mem::take(&mut output.shapes);
         output.drop_without_applying_deltas();
@@ -1093,6 +1171,293 @@ mod tests {
             Shape::Text(text) => Some(text),
             _ => None,
         })
+    }
+
+    fn key_event(key: Key, pressed: bool) -> Event {
+        Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    fn focus_field(context: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSettingsState>, field: &str) {
+        context.memory_mut(|memory| memory.request_focus(Id::new(field)));
+        frame(context, LARGE, editor, state, Vec::new());
+        frame(context, LARGE, editor, state, vec![key_event(Key::End, true)]);
+        frame(context, LARGE, editor, state, vec![key_event(Key::End, false)]);
+    }
+
+    fn type_character(context: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSettingsState>, key: Key, text: &str) {
+        let events = vec![key_event(key, true), Event::Text(text.to_string())];
+        frame(context, LARGE, editor, state, events);
+        frame(context, LARGE, editor, state, vec![key_event(key, false)]);
+    }
+
+    fn assert_field_text(context: &egui::Context, editor: &mut Editor, state: &mut Option<BuildSettingsState>, expected: &str) {
+        let (shapes, _) = frame(context, LARGE, editor, state, Vec::new());
+        assert!(texts(&shapes).any(|text| text.galley.text() == expected), "the field does not show {expected:?}");
+    }
+
+    #[test]
+    fn opening_and_browsing_build_settings_preserves_the_saved_project() {
+        let inconsistent = json!({
+            "Type": "Tiled",
+            "Subdivision": "Slower",
+            "Resolution": 512,
+            "TileResolution": 96,
+            "BucketResolution": 77,
+            "OutputType": "CroppedTiles",
+            "NumberOfTiles": 13,
+        });
+        for definition in [None, Some(inconsistent)] {
+            let context = context();
+            let mut document = Document::new();
+            if let Some(definition) = definition {
+                document.project.assets[0].extra.insert("BuildDefinition".to_string(), definition);
+            } else {
+                assert_eq!(document.build_definition().number_of_tiles, 3);
+            }
+            let saved_project = nerthus_engine::to_terrain_json(&document.project);
+            let mut editor = Editor::new(document);
+            let mut state = Some(BuildSettingsState::new(SettingsTab::Resolution));
+            settle(&context, LARGE, &mut editor, &mut state);
+
+            for (tab, _, _, _) in TABS {
+                state.as_mut().unwrap().tab = tab;
+                frame(&context, LARGE, &mut editor, &mut state, Vec::new());
+            }
+            tool_window::request_close(&context, Id::new("build-settings"));
+            frame(&context, LARGE, &mut editor, &mut state, Vec::new());
+            assert!(state.is_none());
+            state = Some(BuildSettingsState::new(SettingsTab::Resolution));
+            frame(&context, LARGE, &mut editor, &mut state, Vec::new());
+
+            assert_eq!(nerthus_engine::to_terrain_json(&editor.document.project), saved_project);
+            assert!(!editor.document.dirty);
+            assert!(editor.document.undo_labels().is_empty());
+            assert!(editor.document.redo_labels().is_empty());
+
+            apply_layout(&mut editor, 4096, Subdivision::Balanced, true, 1024, None);
+            assert!(editor.document.dirty);
+            assert_eq!(editor.document.undo_labels(), ["Build settings"]);
+            assert_eq!(editor.document.build_definition().resolution, 4096);
+        }
+    }
+
+    #[test]
+    fn copying_the_build_command_uses_the_complete_command_without_editing() {
+        use nerthus_engine::automation::{Variable, VariableValue};
+
+        for saved_with_variables in [false, true] {
+            let context = context();
+            let mut document = Document::new();
+            if saved_with_variables {
+                document.path = Some(std::path::PathBuf::from("/projects/a 'quoted' terrain.terrain"));
+                let variables = [
+                    ("Height", VariableValue::Float(0.5)),
+                    ("Style", VariableValue::Text("ridge 'north' \"south\"".to_string())),
+                ];
+                for (name, value) in variables {
+                    let saved_variable = json!({"Name": name});
+                    let mut variable = Variable::from_json(&saved_variable);
+                    variable.value = value;
+                    document.project.assets[0].automation.variables.insert(name.to_string(), variable);
+                }
+            }
+            let saved_project = nerthus_engine::to_terrain_json(&document.project);
+            let mut editor = Editor::new(document);
+            let expected = crate::ui::command_line_window::build_command_line(&editor);
+            let mut state = Some(BuildSettingsState::new(SettingsTab::Build));
+            let (shapes, _) = settle(&context, LARGE, &mut editor, &mut state);
+            let copy_button = texts(&shapes).find(|text| text.galley.text() == "Copy Command Line");
+            let position = copy_button.expect("the copy button is painted").visual_bounding_rect().center();
+            let press = Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
+            frame(&context, LARGE, &mut editor, &mut state, vec![Event::PointerMoved(position), press]);
+
+            let release = Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE };
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, LARGE)), events: vec![release], ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                let (starts, finishes) = crate::ui::value_edit_boundaries(ui.ctx());
+                if starts {
+                    editor.document.finish_value_edit();
+                }
+                show(ui.ctx(), &mut editor, &mut state, &mut Vec::new());
+                if finishes {
+                    editor.document.finish_value_edit();
+                }
+            });
+            let copied: Vec<&str> = output.platform_output.commands.iter().filter_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                _ => None,
+            }).collect();
+            assert_eq!(copied, [expected.as_str()]);
+            output.drop_without_applying_deltas();
+
+            assert_eq!(nerthus_engine::to_terrain_json(&editor.document.project), saved_project);
+            assert!(!editor.document.dirty);
+            assert!(editor.document.undo_labels().is_empty());
+            assert!(editor.document.redo_labels().is_empty());
+            assert!(state.is_some());
+        }
+    }
+
+    #[test]
+    fn build_text_typing_is_one_undo_step_across_key_presses_and_releases() {
+        let fields = [
+            (SettingsTab::Build, DESTINATION_FIELD, "Destination"),
+            (SettingsTab::Tiles, TILE_PATTERN_FIELD, "TilePattern"),
+            (SettingsTab::Script, SCRIPT_FIELD, "PostBuildScript"),
+        ];
+        for (tab, field, member) in fields {
+            let context = context();
+            let mut editor = Editor::new(Document::new());
+            let initial = [("OutputType", Value::from("CroppedTiles")), (member, Value::from("base"))];
+            editor.document.set_build_settings(&initial);
+            let history_length = editor.document.undo_labels().len();
+            let mut state = Some(BuildSettingsState::new(tab));
+            settle(&context, LARGE, &mut editor, &mut state);
+            focus_field(&context, &mut editor, &mut state, field);
+
+            let expected = if tab == SettingsTab::Tiles {
+                let select_all = Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND };
+                frame(&context, LARGE, &mut editor, &mut state, vec![select_all]);
+                frame(&context, LARGE, &mut editor, &mut state, vec![key_event(Key::A, false)]);
+                frame(&context, LARGE, &mut editor, &mut state, vec![key_event(Key::Backspace, true)]);
+                frame(&context, LARGE, &mut editor, &mut state, vec![key_event(Key::Backspace, false)]);
+                frame(&context, LARGE, &mut editor, &mut state, Vec::new());
+                let saved_pattern = &editor.document.project.assets[0].extra["BuildDefinition"]["TilePattern"];
+                assert_eq!(saved_pattern, "");
+                "abc"
+            } else {
+                "baseabc"
+            };
+            for (key, text) in [(Key::A, "a"), (Key::B, "b"), (Key::C, "c")] {
+                type_character(&context, &mut editor, &mut state, key, text);
+            }
+            assert_field_text(&context, &mut editor, &mut state, expected);
+            assert_eq!(editor.document.undo_labels().len(), history_length + 1, "typing {member} added extra undo steps");
+            assert!(editor.document.undo());
+            assert_field_text(&context, &mut editor, &mut state, "base");
+            assert!(editor.document.redo());
+            assert_field_text(&context, &mut editor, &mut state, expected);
+        }
+    }
+
+    #[test]
+    fn build_text_follows_undo_profiles_and_replacement_documents() {
+        let fields = [
+            (SettingsTab::Build, DESTINATION_FIELD, "Destination"),
+            (SettingsTab::Tiles, TILE_PATTERN_FIELD, "TilePattern"),
+        ];
+        for (tab, field, member) in fields {
+            let context = context();
+            let mut editor = Editor::new(Document::new());
+            let initial = [("OutputType", Value::from("CroppedTiles")), (member, Value::from("profile"))];
+            editor.document.set_build_settings(&initial);
+            editor.document.save_build_profile("Saved");
+            editor.document.set_build_setting(member, Value::from("base"));
+            let mut state = Some(BuildSettingsState::new(tab));
+            settle(&context, LARGE, &mut editor, &mut state);
+            assert_field_text(&context, &mut editor, &mut state, "base");
+
+            editor.document.set_build_setting(member, Value::from("changed"));
+            assert_field_text(&context, &mut editor, &mut state, "changed");
+            assert!(editor.document.undo());
+            assert_field_text(&context, &mut editor, &mut state, "base");
+            assert!(editor.document.redo());
+            assert_field_text(&context, &mut editor, &mut state, "changed");
+            assert!(editor.document.undo());
+            focus_field(&context, &mut editor, &mut state, field);
+            type_character(&context, &mut editor, &mut state, Key::D, "d");
+            assert_field_text(&context, &mut editor, &mut state, "based");
+
+            editor.document.load_build_profile("Saved");
+            assert_field_text(&context, &mut editor, &mut state, "profile");
+            let mut replacement = Document::new();
+            let replacement_settings = [("OutputType", Value::from("CroppedTiles")), (member, Value::from("replacement"))];
+            replacement.set_build_settings(&replacement_settings);
+            editor.document = replacement;
+            assert_field_text(&context, &mut editor, &mut state, "replacement");
+        }
+    }
+
+    #[test]
+    fn enter_finishes_destination_typing_and_continues_a_multiline_script() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        let mut state = Some(BuildSettingsState::new(SettingsTab::Build));
+        settle(&context, LARGE, &mut editor, &mut state);
+        focus_field(&context, &mut editor, &mut state, DESTINATION_FIELD);
+        type_character(&context, &mut editor, &mut state, Key::A, "a");
+        frame(&context, LARGE, &mut editor, &mut state, vec![key_event(Key::Enter, true)]);
+        frame(&context, LARGE, &mut editor, &mut state, vec![key_event(Key::Enter, false)]);
+        focus_field(&context, &mut editor, &mut state, DESTINATION_FIELD);
+        type_character(&context, &mut editor, &mut state, Key::B, "b");
+        assert_eq!(editor.document.undo_labels().len(), 2);
+        assert!(editor.document.undo());
+        assert_eq!(editor.document.build_definition().destination, "a");
+
+        state.as_mut().unwrap().tab = SettingsTab::Script;
+        frame(&context, LARGE, &mut editor, &mut state, Vec::new());
+        focus_field(&context, &mut editor, &mut state, SCRIPT_FIELD);
+        let history_length = editor.document.undo_labels().len();
+        type_character(&context, &mut editor, &mut state, Key::A, "a");
+        frame(&context, LARGE, &mut editor, &mut state, vec![key_event(Key::Enter, true)]);
+        frame(&context, LARGE, &mut editor, &mut state, vec![key_event(Key::Enter, false)]);
+        type_character(&context, &mut editor, &mut state, Key::B, "b");
+        assert_eq!(editor.document.build_definition().post_build_script, "a\nb");
+        assert_eq!(editor.document.undo_labels().len(), history_length + 1);
+        assert!(editor.document.undo());
+        assert_eq!(editor.document.build_definition().post_build_script, "");
+    }
+
+    #[test]
+    fn terrain_dimension_drags_undo_once_per_gesture() {
+        let context = context();
+        let mut editor = Editor::new(Document::new());
+        editor.document.set_terrain_size(5000.0, 2500.0);
+        let history_length = editor.document.undo_labels().len();
+        let mut state = Some(BuildSettingsState::new(SettingsTab::Terrain));
+        settle(&context, LARGE, &mut editor, &mut state);
+        let pointer_button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+
+        for (index, dimension) in ["Width", "Height"].into_iter().enumerate() {
+            let terrain = editor.document.terrain();
+            let initial_size = (terrain.width, terrain.height);
+            let mut sizes = vec![initial_size];
+            for gesture in 0..2 {
+                let (shapes, _) = frame(&context, LARGE, &mut editor, &mut state, Vec::new());
+                let field = texts(&shapes).filter(|text| text.galley.text().ends_with(" m")).nth(index);
+                let field = field.unwrap_or_else(|| panic!("{dimension} is not painted"));
+                let start = field.visual_bounding_rect().center();
+                frame(&context, LARGE, &mut editor, &mut state, vec![Event::PointerMoved(start)]);
+                frame(&context, LARGE, &mut editor, &mut state, vec![pointer_button(start, true)]);
+
+                let mut changed_frames = 0;
+                let mut previous_size = *sizes.last().unwrap();
+                for distance in [20.0, 40.0, 60.0, 80.0] {
+                    let position = start + Vec2::new(distance, 0.0);
+                    frame(&context, LARGE, &mut editor, &mut state, vec![Event::PointerMoved(position)]);
+                    let terrain = editor.document.terrain();
+                    let current_size = (terrain.width, terrain.height);
+                    changed_frames += usize::from(current_size != previous_size);
+                    previous_size = current_size;
+                }
+                let end = start + Vec2::new(80.0, 0.0);
+                frame(&context, LARGE, &mut editor, &mut state, vec![pointer_button(end, false)]);
+
+                assert!(changed_frames >= 2, "{dimension} changed in only {changed_frames} drag frames");
+                assert_eq!(editor.document.undo_labels().len(), history_length + gesture + 1, "{dimension} added extra undo steps");
+                sizes.push(previous_size);
+            }
+            for expected in sizes[..2].iter().rev() {
+                assert!(editor.document.undo());
+                let terrain = editor.document.terrain();
+                assert_eq!((terrain.width, terrain.height), *expected);
+            }
+        }
     }
 
     /// The Build tab at this screen size, scrolled to its end with the
@@ -1190,5 +1555,191 @@ mod tests {
         let painted: Vec<&str> = texts(&shapes).map(|text| text.galley.text()).collect();
         assert!(painted.contains(&"Real scale: 2.0000 m/pixel at 4096 × 4096"));
         assert!(painted.contains(&"Height-to-width ratio: 0.125000 (12.5000%)"));
+    }
+}
+
+#[cfg(test)]
+mod filename_tests {
+    use super::*;
+    use crate::document::Document;
+    use egui::epaint::ClippedShape;
+    use egui::{Event, Key, Modifiers, Pos2, Rect, Shape};
+
+    const SAVED_NAME: &str = "terrain-output";
+
+    struct FilenameWindow {
+        context: egui::Context,
+        editor: Editor,
+        state: Option<BuildSettingsState>,
+        node_id: i32,
+    }
+
+    impl FilenameWindow {
+        fn new() -> Self {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            egui_extras::install_image_loaders(&context);
+            let mut editor = Editor::new(Document::new());
+            let node_id = editor.document.add_node("Mountain", [0.0, 0.0]).unwrap();
+            editor.document.toggle_export(&[node_id], FileFormat::Png16);
+            editor.document.rename_export_file(node_id, SAVED_NAME);
+            let state = Some(BuildSettingsState::new(SettingsTab::Nodes));
+            let mut window = Self { context, editor, state, node_id };
+            for _ in 0..30 {
+                window.frame(Vec::new());
+            }
+            window
+        }
+
+        fn frame(&mut self, events: Vec<Event>) -> (Vec<ClippedShape>, Vec<Command>) {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1333.0, 800.0));
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut commands = Vec::new();
+            let mut output = self.context.run_ui(input, |ui| {
+                show(ui.ctx(), &mut self.editor, &mut self.state, &mut commands);
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.drop_without_applying_deltas();
+            (shapes, commands)
+        }
+
+        fn text_rect(&mut self, label: &str) -> Rect {
+            let (shapes, _) = self.frame(Vec::new());
+            shapes.iter().find_map(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == label => {
+                    let rect = text.galley.rect.translate(text.pos.to_vec2());
+                    Some(rect.intersect(clipped.clip_rect))
+                }
+                _ => None,
+            }).unwrap_or_else(|| panic!("{label:?} was not painted"))
+        }
+
+        fn click(&mut self, at: Pos2) -> Vec<Command> {
+            let press = Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
+            self.frame(vec![Event::PointerMoved(at), press]);
+            let release = Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE };
+            let (_, commands) = self.frame(vec![release]);
+            commands
+        }
+
+        fn type_filename(&mut self, filename: &str) {
+            let saved = self.saved_filename();
+            let rect = self.text_rect(&saved);
+            self.click(rect.center());
+            let select_all = key(Key::A, Modifiers::COMMAND);
+            self.frame(vec![select_all, Event::Text(filename.to_string())]);
+            assert_eq!(self.saved_filename(), saved);
+            assert_eq!(self.state.as_ref().unwrap().filenames[0].1, filename);
+        }
+
+        fn click_blank(&mut self) {
+            let area = egui::AreaState::load(&self.context, Id::new("build-settings")).unwrap();
+            let at = area.rect().max - Vec2::new(40.0, 80.0);
+            self.click(at);
+        }
+
+        fn saved_filename(&self) -> String {
+            self.editor.document.export_settings(self.node_id).unwrap().filename
+        }
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn filename_close_and_execute_build_accept_pending_typing() {
+        for button in ["Close", "Execute Build"] {
+            let mut window = FilenameWindow::new();
+            window.type_filename("  elevation  ");
+            let rect = window.text_rect(button);
+            let commands = window.click(rect.center());
+            assert!(window.state.is_none(), "{button}");
+            assert_eq!(window.saved_filename(), "elevation", "{button}");
+            assert_eq!(commands.contains(&Command::BuildAndExport), button == "Execute Build");
+        }
+    }
+
+    #[test]
+    fn filename_mouse_focus_loss_saves_and_immediate_undo_resyncs() {
+        let mut window = FilenameWindow::new();
+        window.type_filename("elevation");
+        window.click_blank();
+        assert_eq!(window.saved_filename(), "elevation");
+
+        assert!(window.editor.document.undo());
+        window.frame(Vec::new());
+        assert_eq!(window.saved_filename(), SAVED_NAME);
+        assert_eq!(window.state.as_ref().unwrap().filenames[0].1, SAVED_NAME);
+    }
+
+    #[test]
+    fn filename_escape_cancels_and_blank_typing_uses_the_node_name() {
+        let mut window = FilenameWindow::new();
+        window.type_filename("discarded");
+        window.frame(vec![key(Key::Escape, Modifiers::NONE)]);
+        assert_eq!(window.saved_filename(), SAVED_NAME);
+        assert_eq!(window.state.as_ref().unwrap().filenames[0].1, SAVED_NAME);
+
+        window.type_filename("   ");
+        window.click_blank();
+        let node_name = &window.editor.document.node(window.node_id).unwrap().name;
+        assert_eq!(&window.saved_filename(), node_name);
+    }
+
+    #[test]
+    fn filename_tab_switch_accepts_pending_typing() {
+        let mut window = FilenameWindow::new();
+        window.type_filename("elevation");
+        let rect = window.text_rect("Build");
+        window.click(rect.center());
+        assert_eq!(window.state.as_ref().unwrap().tab, SettingsTab::Build);
+        assert_eq!(window.saved_filename(), "elevation");
+    }
+
+    #[test]
+    fn filename_external_close_accepts_except_on_escape() {
+        for escaped in [false, true] {
+            let mut window = FilenameWindow::new();
+            window.type_filename("elevation");
+            tool_window::request_close(&window.context, Id::new("build-settings"));
+            let events = if escaped { vec![key(Key::Escape, Modifiers::NONE)] } else { Vec::new() };
+            window.frame(events);
+            assert!(window.state.is_none());
+            let expected = if escaped { SAVED_NAME } else { "elevation" };
+            assert_eq!(window.saved_filename(), expected);
+        }
+    }
+
+    #[test]
+    fn filename_tab_switch_keeps_a_saved_name_changed_elsewhere() {
+        let mut window = FilenameWindow::new();
+        window.type_filename("discarded");
+        window.editor.document.rename_export_file(window.node_id, "changed-elsewhere");
+        let rect = window.text_rect("Build");
+        window.click(rect.center());
+        assert_eq!(window.saved_filename(), "changed-elsewhere");
+        assert_eq!(window.state.as_ref().unwrap().filenames[0].1, "changed-elsewhere");
+    }
+
+    #[test]
+    fn resetting_views_discards_the_previous_documents_filename_draft() {
+        let mut window = FilenameWindow::new();
+        window.type_filename("discarded");
+        let mut ui_state = crate::ui::UiState::default();
+        ui_state.build_settings = window.state.take();
+        ui_state.reset_views();
+        window.state = ui_state.build_settings.take();
+        assert!(window.state.as_ref().unwrap().filenames.is_empty());
+
+        let mut document = Document::new();
+        // Reuse the graph deliberately: new nodes receive random ids.
+        document.project = window.editor.document.project.clone();
+        document.rename_export_file(window.node_id, "new-document-output");
+        window.editor.document = document;
+        window.type_filename("new-elevation");
+        let rect = window.text_rect("Close");
+        window.click(rect.center());
+        assert_eq!(window.saved_filename(), "new-elevation");
     }
 }

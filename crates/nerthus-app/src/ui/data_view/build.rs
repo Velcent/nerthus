@@ -439,18 +439,22 @@ fn ports_menu(ui: &mut Ui, editor: &mut Editor, node: &nerthus_engine::NodeData,
 
 /// `displayLabel`: a text box over `rect` (padding 4, 2, 4, 0), its line
 /// centred down it (`VerticalContentAlignment`), a long name cut off at
-/// its end. Saved on Enter or Tab (empty: the node's name); Escape puts
+/// its end. Saved when focus leaves (empty: the node's name); Escape puts
 /// the saved name back.
 fn filename_field(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, node: &nerthus_engine::NodeData, export: &ExportSettings, rect: Rect, color: Color32) {
+    let field_id = ui.id().with(("data-view-filename", node.id));
+    let editing_id = field_id.with("editing");
     let index = match state.filenames.iter().position(|(node_id, _)| *node_id == node.id) {
         Some(index) => index,
         None => {
+            // A reset view may reuse a node id from the previous document.
+            ui.data_mut(|data| data.remove::<String>(editing_id));
             state.filenames.push((node.id, export.filename.clone()));
             state.filenames.len() - 1
         }
     };
     let text_color = if export.enabled { color } else { theme::ACCENT_MUTED_RED };
-    let field_id = ui.id().with(("data-view-filename", node.id));
+    let was_focused = ui.memory(|memory| memory.has_focus(field_id));
     // egui takes a custom frame's margin, not the edit's own.
     let mut frame = egui::Frame::NONE;
     frame.inner_margin = egui::Margin { left: 4, right: 4, top: 2, bottom: 0 };
@@ -465,17 +469,31 @@ fn filename_field(ui: &mut Ui, editor: &mut Editor, state: &mut BuildState, node
     let mut field_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     field_ui.shrink_clip_rect(rect);
     let response = field_ui.add_enabled(export.enabled, edit);
-    let committed = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Tab));
     let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    if was_focused || response.has_focus() {
+        ui.data_mut(|data| {
+            data.get_temp_mut_or_insert_with(editing_id, || export.filename.clone());
+        });
+    }
+    // Focus loss can be reported for two frames; accepting an edit once
+    // lets an immediate undo resync the cached text on the next frame.
+    let original = if response.lost_focus() {
+        ui.data_mut(|data| data.remove_temp::<String>(editing_id))
+    } else {
+        None
+    };
+    let committed = original.as_deref() == Some(export.filename.as_str()) && !escaped;
     if committed {
         let typed = state.filenames[index].1.trim().to_string();
         let filename = if typed.is_empty() { node.name.clone() } else { typed };
         state.filenames[index].1 = filename.clone();
-        editor.document.edit_export(node.id, "Export filename", |settings| settings.filename = filename);
+        if filename != export.filename {
+            editor.document.edit_export(node.id, "Export filename", |settings| settings.filename = filename);
+        }
         return;
     }
     // Escape, or the name changed elsewhere (undo, fixing duplicates).
-    let cancelled = response.lost_focus() && escaped;
+    let cancelled = original.is_some() && escaped;
     let stale = !response.has_focus() && state.filenames[index].1 != export.filename;
     if cancelled || stale {
         state.filenames[index].1 = export.filename.clone();
@@ -535,6 +553,81 @@ mod tests {
 
     fn shown<'a>(texts: &'a [PaintedText], text: &str) -> &'a PaintedText {
         texts.iter().find(|painted| painted.shows && painted.text == text).unwrap_or_else(|| panic!("{text:?} shows"))
+    }
+
+    fn pointer_button(at: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    fn edit_filename(context: &egui::Context, editor: &mut Editor, state: &mut BuildState, id: i32, text: &str) {
+        row_frame(context, editor, state, id, Vec::new());
+        let texts = row_frame(context, editor, state, id, Vec::new());
+        let saved = editor.document.export_settings(id).unwrap().filename;
+        let name = shown(&texts, &saved).rect;
+        let at = Pos2::new(name.left() + 20.0, name.center().y);
+        row_frame(context, editor, state, id, vec![egui::Event::PointerMoved(at), pointer_button(at, true)]);
+        row_frame(context, editor, state, id, vec![pointer_button(at, false)]);
+        let events = vec![key(egui::Key::A, egui::Modifiers::COMMAND), egui::Event::Text(text.to_string())];
+        row_frame(context, editor, state, id, events);
+    }
+
+    #[test]
+    fn filename_mouse_focus_loss_saves_and_an_immediate_undo_resyncs() {
+        let (context, mut editor, mut state, id) = long_named_row();
+        edit_filename(&context, &mut editor, &mut state, id, "  elevation  ");
+        assert_eq!(editor.document.export_settings(id).unwrap().filename, LONG_NAME);
+
+        let outside = Pos2::new(600.0, 150.0);
+        row_frame(&context, &mut editor, &mut state, id, vec![egui::Event::PointerMoved(outside), pointer_button(outside, true)]);
+        row_frame(&context, &mut editor, &mut state, id, vec![pointer_button(outside, false)]);
+        assert_eq!(editor.document.export_settings(id).unwrap().filename, "elevation");
+
+        assert!(editor.document.undo());
+        row_frame(&context, &mut editor, &mut state, id, Vec::new());
+        assert_eq!(editor.document.export_settings(id).unwrap().filename, LONG_NAME);
+        assert_eq!(state.filenames[0].1, LONG_NAME);
+    }
+
+    #[test]
+    fn filename_escape_cancels_and_enter_or_tab_still_accepts() {
+        for key_pressed in [egui::Key::Escape, egui::Key::Enter, egui::Key::Tab] {
+            let (context, mut editor, mut state, id) = long_named_row();
+            edit_filename(&context, &mut editor, &mut state, id, "elevation");
+            let events = vec![key(key_pressed, egui::Modifiers::NONE)];
+            row_frame(&context, &mut editor, &mut state, id, events);
+            let expected = if key_pressed == egui::Key::Escape { LONG_NAME } else { "elevation" };
+            assert_eq!(editor.document.export_settings(id).unwrap().filename, expected, "{key_pressed:?}");
+            assert_eq!(state.filenames[0].1, expected, "{key_pressed:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_filename_uses_the_node_name_on_mouse_focus_loss() {
+        let (context, mut editor, mut state, id) = long_named_row();
+        edit_filename(&context, &mut editor, &mut state, id, "   ");
+        let outside = Pos2::new(600.0, 150.0);
+        row_frame(&context, &mut editor, &mut state, id, vec![egui::Event::PointerMoved(outside), pointer_button(outside, true)]);
+        row_frame(&context, &mut editor, &mut state, id, vec![pointer_button(outside, false)]);
+        let node_name = &editor.document.node(id).unwrap().name;
+        assert_eq!(&editor.document.export_settings(id).unwrap().filename, node_name);
+        assert_eq!(&state.filenames[0].1, node_name);
+    }
+
+    #[test]
+    fn filename_typing_after_a_view_reset_uses_the_new_saved_name() {
+        let (context, mut editor, mut state, id) = long_named_row();
+        edit_filename(&context, &mut editor, &mut state, id, "discarded");
+        state = BuildState::default();
+        editor.document.rename_export_file(id, "replacement-output");
+        edit_filename(&context, &mut editor, &mut state, id, "elevation");
+        let outside = Pos2::new(600.0, 150.0);
+        row_frame(&context, &mut editor, &mut state, id, vec![egui::Event::PointerMoved(outside), pointer_button(outside, true)]);
+        row_frame(&context, &mut editor, &mut state, id, vec![pointer_button(outside, false)]);
+        assert_eq!(editor.document.export_settings(id).unwrap().filename, "elevation");
     }
 
     #[test]

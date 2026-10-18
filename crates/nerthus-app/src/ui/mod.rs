@@ -292,6 +292,9 @@ impl UiState {
     pub fn reset_views(&mut self) {
         self.graph.reset();
         self.data_view.reset();
+        if let Some(settings) = &mut self.build_settings {
+            *settings = build_settings::BuildSettingsState::new(settings.tab);
+        }
         // The batch build script is cleared with the project.
         self.turntable_memory = turntable_window::TurntableMemory::default();
     }
@@ -736,12 +739,16 @@ fn draw_editor(
 /// commits and later gestures. Idle frames leave MCP's deliberate value
 /// merging alone.
 fn value_edit_boundaries(ctx: &egui::Context) -> (bool, bool) {
+    let build_text = build_settings::editing_text(ctx);
     ctx.input(|input| {
         let pointer_down = input.pointer.any_down();
         let mut starts = input.pointer.any_pressed();
         let mut finishes = input.pointer.any_released();
         for event in &input.events {
             if let egui::Event::Key { key, pressed, repeat, .. } = event {
+                if build_text {
+                    continue;
+                }
                 if !pointer_down {
                     starts |= *pressed && !*repeat;
                     finishes |= !*pressed;

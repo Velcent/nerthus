@@ -82,15 +82,23 @@ pub struct UndoHistoryItem<'a> {
     pub separator_before: bool,
 }
 
+/// The control whose consecutive changes belong to one undo gesture.
+#[derive(PartialEq, Eq)]
+enum UndoMergeKey {
+    Value(i32, String),
+    BuildSetting(String),
+    TerrainSize(String),
+}
+
 /// A state of the project to return to, named after the edit that left it.
 struct UndoEntry {
     label: String,
     project: Project,
     kind: UndoKind,
     element: Option<i32>,
-    /// The node and property a value edit changed: further edits of the
-    /// same one join this entry.
-    merge_key: Option<(i32, String)>,
+    /// The property a value edit changed: further edits of the same one
+    /// join this entry until the gesture ends.
+    merge_key: Option<UndoMergeKey>,
     /// Going back to it reopens the whole project, the graph's view with
     /// it (`ExecuteUndo` of a full record); a value edit only sets the
     /// value back.
@@ -235,10 +243,11 @@ impl Document {
         }
     }
 
-    fn push_undo(&mut self, label: String, merge_key: Option<(i32, String)>) {
-        let restores_view = merge_key.is_none();
-        let kind = if merge_key.is_some() { UndoKind::NodeParameter } else { UndoKind::Graph };
-        let element = merge_key.as_ref().map(|(node, _)| *node);
+    fn push_undo(&mut self, label: String, merge_key: Option<UndoMergeKey>) {
+        let (restores_view, kind, element) = match merge_key.as_ref() {
+            Some(UndoMergeKey::Value(node, _)) => (false, UndoKind::NodeParameter, Some(*node)),
+            _ => (true, UndoKind::Graph, None),
+        };
         let entry = UndoEntry {
             label,
             project: self.project.clone(),
@@ -263,7 +272,7 @@ impl Document {
     }
 
     /// Ends a value-edit gesture. Further edits of the same parameter,
-    /// modifier or variable start a new undo step.
+    /// modifier, variable or build setting start a new undo step.
     pub fn finish_value_edit(&mut self) {
         if let Some(entry) = self.undo.last_mut() {
             entry.merge_key = None;
@@ -563,7 +572,7 @@ impl Document {
             return;
         }
         let label = format!("{} modifier updated", data.name);
-        let merge_key = (node, format!("modifier {index} {name}"));
+        let merge_key = UndoMergeKey::Value(node, format!("modifier {index} {name}"));
         let continues = self.undo.last().is_some_and(|entry| entry.merge_key.as_ref() == Some(&merge_key));
         if !(continues && self.redo.is_empty()) {
             self.push_undo(label, Some(merge_key));
@@ -654,7 +663,7 @@ impl Document {
         if current.values.get(name) == Some(&value) {
             return;
         }
-        let merge_key = (node, name.to_string());
+        let merge_key = UndoMergeKey::Value(node, name.to_string());
         // After an undo the redo history must go, so the edit starts anew.
         let continues = self.undo.last().is_some_and(|entry| entry.merge_key.as_ref() == Some(&merge_key));
         let merges = continues && self.redo.is_empty();
@@ -1466,7 +1475,7 @@ impl Document {
         if saved.as_ref() == Some(&value) {
             return;
         }
-        let merge_key = (-1, key.to_string());
+        let merge_key = UndoMergeKey::Value(-1, key.to_string());
         let continues = self.undo.last().is_some_and(|entry| entry.merge_key.as_ref() == Some(&merge_key));
         if !(continues && self.redo.is_empty()) {
             self.push_undo(format!("Change {key}"), Some(merge_key));
@@ -1740,6 +1749,17 @@ impl Document {
         self.set_build_settings(&[(member, value)]);
     }
 
+    /// One build-setting control's edits as a single undo gesture, until
+    /// `finish_value_edit` ends it. Discrete controls use `set_build_setting`.
+    pub fn set_build_setting_edited(&mut self, member: &str, value: Value) {
+        if !self.build_member_differs(member, &value) {
+            return;
+        }
+        let merge_key = UndoMergeKey::BuildSetting(member.to_string());
+        self.checkpoint_build_edit("Build settings", merge_key);
+        self.write_build_member(member, value);
+    }
+
     /// Several `BuildDefinition` members as one edit.
     pub fn set_build_settings(&mut self, members: &[(&str, Value)]) {
         let changed: Vec<&(&str, Value)> = members.iter().filter(|(member, value)| self.build_member_differs(member, value)).collect();
@@ -1750,6 +1770,14 @@ impl Document {
         for (member, value) in changed {
             self.write_build_member(member, value.clone());
         }
+    }
+
+    fn checkpoint_build_edit(&mut self, label: &str, merge_key: UndoMergeKey) {
+        let continues = self.undo.last().is_some_and(|entry| entry.merge_key.as_ref() == Some(&merge_key));
+        if !(continues && self.redo.is_empty()) {
+            self.push_undo(label.to_string(), Some(merge_key));
+        }
+        self.dirty = true;
     }
 
     fn build_member_differs(&self, member: &str, value: &Value) -> bool {
@@ -1866,6 +1894,23 @@ impl Document {
             return;
         }
         self.checkpoint("Terrain size");
+        self.write_terrain_size(width, height);
+    }
+
+    /// One terrain-size control's edits as a single undo gesture. `member`
+    /// distinguishes the width and height controls; `finish_value_edit`
+    /// ends the gesture.
+    pub fn set_terrain_size_edited(&mut self, member: &str, width: f32, height: f32) {
+        let terrain = self.terrain();
+        if terrain.width == width && terrain.height == height {
+            return;
+        }
+        let merge_key = UndoMergeKey::TerrainSize(member.to_string());
+        self.checkpoint_build_edit("Terrain size", merge_key);
+        self.write_terrain_size(width, height);
+    }
+
+    fn write_terrain_size(&mut self, width: f32, height: f32) {
         let terrain = self.project.terrain_mut();
         terrain.width = width;
         terrain.height = height;
@@ -2281,6 +2326,116 @@ mod tests {
         let resolution = members.iter().position(|name| *name == "Resolution").unwrap();
         let open_folder = members.iter().position(|name| *name == "OpenFolder").unwrap();
         assert!(resolution < open_folder);
+    }
+
+    #[test]
+    fn build_setting_text_edits_merge_until_the_gesture_ends() {
+        for member in ["Destination", "TilePattern", "PostBuildScript"] {
+            let mut document = Document::new();
+            let original = document.project.assets[0].extra.get("BuildDefinition").cloned();
+            document.set_build_setting_edited(member, json!("first"));
+            document.set_build_setting_edited(member, json!("final"));
+            document.set_build_setting_edited(member, json!("final"));
+            assert_eq!(document.undo_labels().len(), 1, "{member}");
+            let entry = document.undo.last().unwrap();
+            assert_eq!(entry.kind, UndoKind::Graph);
+            assert_eq!(entry.element, None);
+            assert!(entry.restores_view);
+
+            document.finish_value_edit();
+            document.set_build_setting_edited(member, json!("second gesture"));
+            assert_eq!(document.undo_labels().len(), 2, "{member}");
+            assert!(document.undo());
+            let definition = document.project.assets[0].extra.get("BuildDefinition").unwrap();
+            assert_eq!(definition[member], json!("final"));
+            assert!(document.undo());
+            let restored = document.project.assets[0].extra.get("BuildDefinition").cloned();
+            assert_eq!(restored, original, "{member}");
+            assert!(document.redo());
+            let definition = document.project.assets[0].extra.get("BuildDefinition").unwrap();
+            assert_eq!(definition[member], json!("final"));
+        }
+    }
+
+    #[test]
+    fn build_setting_edits_keep_members_and_discrete_controls_separate() {
+        let mut document = Document::new();
+        document.set_build_setting_edited("Destination", json!("first"));
+        document.set_build_setting_edited("Destination", json!("final"));
+        document.set_build_setting_edited("PostBuildScript", json!("echo first"));
+        document.set_build_setting_edited("PostBuildScript", json!("echo final"));
+        assert_eq!(document.undo_labels().len(), 2);
+
+        document.set_build_setting("OpenFolder", json!(true));
+        document.set_build_setting("OpenFolder", json!(false));
+        document.set_build_setting_edited("PostBuildScript", json!("echo later"));
+        assert_eq!(document.undo_labels().len(), 5);
+        assert!(document.undo());
+        assert_eq!(document.build_definition().post_build_script, "echo final");
+        assert!(document.undo());
+        assert!(document.build_definition().open_folder);
+        assert!(document.undo());
+        assert!(!document.build_definition().open_folder);
+        assert!(document.undo());
+        assert_eq!(document.build_definition().destination, "final");
+    }
+
+    #[test]
+    fn build_setting_edit_after_undo_starts_a_new_branch() {
+        let mut document = Document::new();
+        document.set_build_setting_edited("Destination", json!("first"));
+        document.set_build_setting_edited("PostBuildScript", json!("echo build"));
+        assert!(document.undo());
+        document.set_build_setting_edited("Destination", json!("first"));
+        assert!(document.can_redo());
+
+        document.set_build_setting_edited("Destination", json!("new branch"));
+        assert!(!document.can_redo());
+        assert_eq!(document.undo_labels().len(), 2);
+        assert!(document.undo());
+        assert_eq!(document.build_definition().destination, "first");
+        assert!(document.redo());
+        assert_eq!(document.build_definition().destination, "new branch");
+        document.set_build_setting_edited("Destination", json!("after redo"));
+        assert_eq!(document.undo_labels().len(), 3);
+        assert!(document.undo());
+        assert_eq!(document.build_definition().destination, "new branch");
+    }
+
+    #[test]
+    fn terrain_size_edits_merge_per_control_and_gesture() {
+        let mut document = Document::new();
+        let original_width = document.terrain().width;
+        let original_height = document.terrain().height;
+        let width = original_width + 100.0;
+        let height = original_height + 100.0;
+        document.take_stale();
+
+        document.set_terrain_size_edited("Width", width, original_height);
+        document.set_terrain_size_edited("Width", width + 100.0, original_height);
+        document.set_terrain_size_edited("Width", width + 100.0, original_height);
+        assert_eq!(document.undo_labels().len(), 1);
+        assert!(document.take_stale().1);
+        let entry = document.undo.last().unwrap();
+        assert_eq!(entry.kind, UndoKind::Graph);
+        assert_eq!(entry.element, None);
+        assert!(entry.restores_view);
+
+        document.set_terrain_size_edited("Height", width + 100.0, height);
+        document.set_terrain_size_edited("Height", width + 100.0, height + 100.0);
+        document.finish_value_edit();
+        document.set_terrain_size_edited("Height", width + 100.0, height + 200.0);
+        assert_eq!(document.undo_labels().len(), 3);
+        assert!(document.undo());
+        assert_eq!(document.terrain().height, height + 100.0);
+        assert!(document.undo());
+        assert_eq!(document.terrain().height, original_height);
+        assert!(document.undo());
+        assert_eq!(document.terrain().width, original_width);
+        assert_eq!(document.terrain().height, original_height);
+        assert!(document.redo());
+        assert_eq!(document.terrain().width, width + 100.0);
+        assert_eq!(document.terrain().height, original_height);
     }
 
     #[test]
