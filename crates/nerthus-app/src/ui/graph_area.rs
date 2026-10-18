@@ -206,7 +206,7 @@ fn tab_outline(rect: Rect) -> Vec<Pos2> {
 fn tabs(ui: &mut Ui, area: Rect, editor: &Editor, ui_state: &mut UiState, selected_color: egui::Color32, commands: &mut Vec<Command>) {
     let strip = Rect::from_min_size(area.min, Vec2::new(area.width(), TABS_HEIGHT));
     let strip_response = ui.interact(strip, ui.id().with("graph-tab-strip"), Sense::click());
-    strip_response.context_menu(|ui| {
+    crate::ui::widgets::context_menu(&strip_response, |ui| {
         menu_style(ui);
         if menu_item(ui, Some("square-rounded-plus-2"), Some(theme::ACCENT_BLUE), "New Tab", "").clicked() {
             commands.push(Command::NewGraphTab);
@@ -232,7 +232,7 @@ fn tabs(ui: &mut Ui, area: Rect, editor: &Editor, ui_state: &mut UiState, select
             ui_state.graph.renaming_tab = Some((tab.index, tab.name.clone()));
         }
         // `CreateContextMenuForTab`: Tab to group, Rename, Delete, the colours.
-        response.context_menu(|ui| {
+        crate::ui::widgets::context_menu(&response, |ui| {
             menu_style(ui);
             submenu(ui, Some("stack-push"), None, "Tab to group", |ui| {
                 if let Some(target) = menus::tab_targets(ui, editor, tab.index) {
@@ -585,7 +585,7 @@ fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, data_shown: bool, editor: &Edi
             let command = if editor.selection.is_empty() { Command::RefreshAll } else { Command::Refresh };
             commands.push(command);
         }
-        refresh.context_menu(|ui| {
+        crate::ui::widgets::context_menu(&refresh, |ui| {
             menu_style(ui);
             if menu_item(ui, Some("rotate-360"), None, "Refresh all nodes", "").clicked() {
                 commands.push(Command::RefreshAll);
@@ -595,7 +595,7 @@ fn graph_toolbar(ui: &mut Ui, toolbar_rect: Rect, data_shown: bool, editor: &Edi
         if mutate.clicked() {
             commands.push(Command::Graph(GraphCommand::MutateButton));
         }
-        mutate.context_menu(|ui| {
+        crate::ui::widgets::context_menu(&mutate, |ui| {
             menu_style(ui);
             if menu_item(ui, Some("potion"), None, "Mutate all nodes", "").clicked() {
                 commands.push(Command::Graph(GraphCommand::MutateAll));

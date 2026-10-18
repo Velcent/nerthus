@@ -161,7 +161,7 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         if response.double_clicked() {
             commands.push(Command::Graph(GraphCommand::ToggleNoteType(*id)));
         }
-        response.context_menu(|ui| note_menu(ui, *id, commands));
+        crate::ui::widgets::context_menu(response, |ui| note_menu(ui, *id, commands));
         if let (Some(thumb), Some(note)) = (thumb, notes.iter().find(|note| note.id == *id))
             && thumb.drag_started()
         {

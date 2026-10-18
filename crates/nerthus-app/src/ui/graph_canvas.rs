@@ -1992,7 +1992,7 @@ fn selection_neighbours(terrain: &nerthus_engine::Terrain, start: i32, anchor: i
 /// The node's context menu on a right-click of the node or one of its
 /// ports, the node selected unless it already is.
 fn node_menu(response: &Response, editor: &mut Editor, id: i32, commands: &mut Vec<Command>) {
-    response.context_menu(|ui| {
+    crate::ui::widgets::context_menu(response, |ui| {
         if !editor.selection.contains(&id) {
             editor.select(Some(id));
         }
@@ -2435,7 +2435,7 @@ fn handle_background(
     let on_connection = hovered.is_some();
     let right_click_on_connection = on_connection && background.secondary_clicked();
     if (background.context_menu_opened() || !on_connection) && !right_click_on_connection {
-        background.context_menu(|ui| {
+        crate::ui::widgets::context_menu(background, |ui| {
             canvas_context_menu(ui, editor, state, commands);
         });
     }

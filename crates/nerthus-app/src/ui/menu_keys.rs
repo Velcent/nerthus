@@ -466,29 +466,32 @@ pub fn bar_focus(ctx: &Context) -> Option<usize> {
 /// access key opens that item. In menu mode Left and Right go between the
 /// items, Down, Enter or Space open the one highlighted, and Escape or a
 /// press leaves; Escape out of an open menu comes back to its item. Left
-/// and Right in an open menu open the one beside.
-pub fn bar(ctx: &Context, menus: &[(Id, Key)]) {
+/// and Right in an open menu open the one beside. A modal window keeps
+/// these keys and cancels menu mode, including a menu already open.
+pub fn bar(ctx: &Context, menus: &[(Id, Key)], modal: bool) {
+    if modal {
+        for (popup, _) in menus {
+            Popup::close_id(ctx, *popup);
+        }
+        with(ctx, |keyboard| *keyboard = Keyboard::default());
+        return;
+    }
     if menus.is_empty() {
         return;
     }
     let count = menus.len();
     let open = menus.iter().position(|(id, _)| Popup::is_id_open(ctx, *id));
     let step = with(ctx, |keyboard| keyboard.step.take());
-    let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
-    let f10 = !modal && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F10));
+    let f10 = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F10));
     let alt_alone = with(ctx, |keyboard| std::mem::take(&mut keyboard.alt_let_go_alone));
-    let toggled = f10 || (!modal && alt_alone);
+    let toggled = f10 || alt_alone;
     // Alt and a key with no Ctrl, a system key: an access key.
     let bar_mode = with(ctx, |keyboard| keyboard.bar_focus.is_some());
-    let access = if modal {
-        None
-    } else {
-        ctx.input_mut(|input| {
-            menus.iter().position(|(_, key)| {
-                input.consume_key(Modifiers::ALT, *key) || (bar_mode && input.consume_key(Modifiers::NONE, *key))
-            })
+    let access = ctx.input_mut(|input| {
+        menus.iter().position(|(_, key)| {
+            input.consume_key(Modifiers::ALT, *key) || (bar_mode && input.consume_key(Modifiers::NONE, *key))
         })
-    };
+    });
     let escape = ctx.input(|input| input.key_pressed(Key::Escape));
     let (focus, keys, was_open) = with(ctx, |keyboard| (keyboard.bar_focus, keyboard.bar_keys, keyboard.bar_open));
 

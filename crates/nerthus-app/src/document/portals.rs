@@ -182,6 +182,17 @@ impl Document {
     /// moved to (Name) Tab", the nodes, notes and groups on that tab (or a
     /// new one), the connections it cuts made portals. Returns the tab.
     pub fn move_elements_to_tab(&mut self, nodes: &[i32], notes: &[i32], groups: &[i32], target: TabTarget) -> usize {
+        if let TabTarget::Existing(tab) = target {
+            let nodes_move = nodes.iter().filter_map(|id| self.node(*id)).any(|node| node_tab(node) != tab);
+            let notes_move = self.notes().iter().any(|(id, fields)| {
+                let graph_index = fields.get("GraphIndex").and_then(Value::as_u64).unwrap_or(0) as usize;
+                notes.contains(id) && graph_index != tab
+            });
+            let groups_move = groups.iter().filter_map(|id| self.group(*id)).any(|group| group.graph_index != tab);
+            if !nodes_move && !notes_move && !groups_move {
+                return tab;
+            }
+        }
         // The menu entry's header names the step ("New Graph" for a new tab,
         // which then keeps a step of its own).
         let header = match target {
@@ -321,6 +332,54 @@ fn tab_extents(boxes: &[([f32; 2], [f32; 2])]) -> ([f32; 2], [f32; 2]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_to_the_current_tab_preserves_history_and_dirty_state() {
+        for tab in [0, 1] {
+            let mut document = Document::new();
+            document.add_graph_tab();
+            let node = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+            let note = document.add_note([0.0, 0.0], tab);
+            let group = document.add_group(&[], [0.0, 0.0], [200.0, 200.0], tab);
+            if tab != 0 {
+                document.move_elements_to_tab(&[node], &[], &[], TabTarget::Existing(tab));
+            }
+            // Leave a redo step too: a no-op must preserve both lists.
+            document.rename_group(group, "Renamed");
+            document.undo();
+            document.dirty = false;
+            let undo_labels = document.undo_labels();
+            let redo_labels = document.redo_labels();
+            let selections = [(vec![node], vec![], vec![]), (vec![], vec![note], vec![]), (vec![], vec![], vec![group]), (vec![node], vec![note], vec![group])];
+            for (nodes, notes, groups) in selections {
+                let result = document.move_elements_to_tab(&nodes, &notes, &groups, TabTarget::Existing(tab));
+                assert_eq!(result, tab);
+                assert_eq!(document.undo_labels(), undo_labels);
+                assert_eq!(document.redo_labels(), redo_labels);
+                assert!(!document.dirty);
+            }
+        }
+    }
+
+    #[test]
+    fn moving_notes_and_groups_to_another_tab_keeps_an_undo_step() {
+        let mut document = Document::new();
+        let target = document.add_graph_tab();
+        let note = document.add_note([0.0, 0.0], 0);
+        let group = document.add_group(&[], [0.0, 0.0], [200.0, 200.0], 0);
+        let before = document.undo_labels().len();
+
+        document.move_elements_to_tab(&[], &[note], &[group], TabTarget::Existing(target));
+
+        assert_eq!(document.undo_labels().len(), before + 1);
+        assert_eq!(document.group(group).unwrap().graph_index, target);
+        let note_tab = document.notes().iter().find(|(id, _)| *id == note).unwrap().1["GraphIndex"].as_u64();
+        assert_eq!(note_tab, Some(target as u64));
+        document.undo();
+        assert_eq!(document.group(group).unwrap().graph_index, 0);
+        let note_tab = document.notes().iter().find(|(id, _)| *id == note).unwrap().1.get("GraphIndex");
+        assert!(note_tab.is_none());
+    }
 
     #[test]
     fn moving_a_node_away_makes_portals() {

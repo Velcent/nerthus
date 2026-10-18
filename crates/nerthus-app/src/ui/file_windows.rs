@@ -117,7 +117,7 @@ fn project_thumbnail(editor: &Editor, project: &Path) -> Option<PathBuf> {
 
 /// The menu on a file's button (`PopulateMRU`'s context menu).
 fn open_menu(response: &egui::Response, path: &Path, example: bool, commands: &mut Vec<Command>) {
-    response.context_menu(|ui| {
+    crate::ui::widgets::context_menu(response, |ui| {
         crate::ui::widgets::menu_style(ui);
         let open = |mode| {
             if example {

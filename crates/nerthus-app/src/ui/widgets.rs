@@ -32,6 +32,8 @@ const MENU_ROW_HEIGHT: f32 = 23.0;
 const MENU_ICON_COLUMN: f32 = 30.0;
 const MENU_ARROW_COLUMN: f32 = 20.0;
 const MENU_MIN_WIDTH: f32 = 190.0;
+const MENU_MAX_WIDTH: f32 = 360.0;
+const MENU_WIDTH_TAG: &str = "nerthus-menu-max-width";
 /// A disabled row's icon, text and arrow are drawn at half opacity.
 const MENU_DISABLED_OPACITY: f32 = 0.5;
 
@@ -158,18 +160,32 @@ fn icon_menu_button(ui: &mut Ui, icon: &str, tint: Option<Color32>, size: Vec2, 
         widgets.open.weak_bg_fill = theme::MENU_BACKGROUND_HOVER;
         widgets.open.bg_stroke = Stroke::NONE;
         widgets.active.bg_stroke = Stroke::NONE;
-        let (response, _) = menu.ui(ui, |ui| {
-            menu_style(ui);
-            contents(ui);
-        });
+        let anchor = ui.available_rect_before_wrap();
+        let anchor = Rect::from_min_size(anchor.min, size);
+        let (response, _) = menu.ui(ui, |ui| menu_rows_below(ui, anchor, contents));
         response
     });
     scope.inner
 }
 
-/// Menus close on a click inside.
+/// Rows close menus when activated; other clicks inside can scroll or
+/// change a row in place, such as a bookmark's removal confirmation.
 pub fn menu_config() -> MenuConfig {
-    MenuConfig::default()
+    MenuConfig::default().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+}
+
+/// A context menu whose rows scroll in the room above or below its fixed
+/// pointer anchor. Right clicks and scroll bar clicks leave it open.
+pub fn context_menu<R>(response: &Response, contents: impl FnOnce(&mut Ui) -> R) -> Option<egui::InnerResponse<R>> {
+    let popup = egui::Popup::context_menu(response);
+    let pointer = response.ctx.pointer_hover_pos().unwrap_or(response.rect.center());
+    let anchor = if response.secondary_clicked() {
+        Rect::from_min_size(pointer, Vec2::ZERO)
+    } else {
+        popup.get_anchor_rect().unwrap_or(Rect::from_min_size(pointer, Vec2::ZERO))
+    };
+    let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    popup.show(|ui| menu_rows_beside(ui, anchor, contents))
 }
 
 /// Inside a menu: no gaps between rows, at least 190 wide. Notes the
@@ -180,7 +196,7 @@ pub fn menu_style(ui: &mut Ui) {
     style.visuals.override_text_color = Some(theme::MENU_FOREGROUND);
     style.spacing.item_spacing = Vec2::ZERO;
     style.spacing.button_padding = egui::vec2(2.0, 4.0);
-    ui.set_min_width(MENU_MIN_WIDTH);
+    ui.set_min_width(MENU_MIN_WIDTH.min(menu_width_limit(ui)));
 }
 
 /// The rows of a menu dropped from the main menu (`menu_rows_within`),
@@ -189,6 +205,16 @@ pub fn menu_style(ui: &mut Ui) {
 /// its own title there) with its last rows cut off at the window's bottom.
 pub fn menu_rows<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
     let room = ui.ctx().content_rect().height() - title_bar::HEIGHT;
+    menu_rows_within(ui, room, contents)
+}
+
+/// Rows dropped from a button, fitting below its bottom or above its top
+/// without covering the title bar or the button that opens them.
+pub fn menu_rows_below<R>(ui: &mut Ui, anchor: Rect, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let window = ui.ctx().content_rect();
+    let below = window.bottom() - anchor.bottom();
+    let above = anchor.top() - (window.top() + title_bar::HEIGHT);
+    let room = below.max(above) - 1.0;
     menu_rows_within(ui, room, contents)
 }
 
@@ -242,16 +268,29 @@ fn row_galley(ui: &Ui, text: &str, style: RowText, color: Color32) -> std::sync:
 }
 
 /// How wide a menu row of `content_width` is drawn. A popup first lays its
-/// rows out in a sizing pass, offered `Spacing::default_area_size` (600)
-/// across: there a row takes only what it needs (at least the menu's 190),
-/// so the menu is as wide as its widest row; afterwards every row runs
-/// across the menu.
+/// rows out in a sizing pass, where a row takes only what it needs. Long
+/// labels share a sensible width cap, reduced to the available side of a
+/// submenu's anchor; afterwards every row runs across the menu.
 pub fn menu_row_width(ui: &Ui, content_width: f32) -> f32 {
-    let needed = content_width.max(MENU_MIN_WIDTH);
+    let limit = menu_width_limit(ui);
+    let needed = content_width.max(MENU_MIN_WIDTH).min(limit);
     if ui.is_sizing_pass() {
         return needed;
     }
-    ui.available_width().max(needed)
+    ui.available_width().max(needed).min(limit)
+}
+
+fn menu_width_limit(ui: &Ui) -> f32 {
+    let screen_width = ui.ctx().content_rect().width();
+    let limit = (screen_width * 0.4).clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH);
+    let frame_width = Frame::menu(ui.style()).total_margin().sum().x;
+    let limit = limit.min((screen_width - frame_width).max(0.0));
+    for stack in ui.stack().iter() {
+        if let Some(width) = stack.info.tags.get_downcast::<f32>(MENU_WIDTH_TAG) {
+            return limit.min(*width);
+        }
+    }
+    limit
 }
 
 /// A row's shortcut colour: `Menu-Gesture` at 0.75, which a disabled
@@ -295,7 +334,16 @@ fn menu_row_styled(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, style
     }
     let plain_color = if highlighted { theme::MENU_FOREGROUND_HOVER } else { theme::MENU_FOREGROUND };
     let text_color = style.color.unwrap_or(plain_color).gamma_multiply(opacity);
-    let galley = row_galley(ui, text, style, text_color);
+    let text_room = (width - MENU_ICON_COLUMN - 4.0 - shortcut_width.max(MENU_ARROW_COLUMN)).max(0.0);
+    let full_galley = row_galley(ui, text, style, text_color);
+    let elided = full_galley.size().x > text_room;
+    let galley = if elided {
+        let mut job = full_galley.job.as_ref().clone();
+        job.wrap = egui::text::TextWrapping::truncate_at_width(text_room);
+        ui.painter().layout_job(job)
+    } else {
+        full_galley
+    };
     let text_position = Pos2::new(rect.left() + MENU_ICON_COLUMN + 2.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(text_position, galley, text_color);
     if !shortcut.is_empty() {
@@ -309,7 +357,11 @@ fn menu_row_styled(ui: &mut Ui, icon: Option<(&str, Color32)>, text: &str, style
         let arrow_rect = Rect::from_center_size(arrow_center, Vec2::splat(icons::DEFAULT_SIZE));
         icons::paint(ui, arrow_rect, "chevron-right", theme::MENU_ICON.gamma_multiply(opacity));
     }
-    response
+    if elided {
+        response.tooltip(text)
+    } else {
+        response
+    }
 }
 
 /// A menu entry: icon (in its accent colour), text and shortcut.
@@ -389,7 +441,21 @@ fn submenu_row<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R, draw: impl F
         row.interact_rect.max.x = row.interact_rect.max.x.max(menu.max_rect.right());
     }
     let room = submenu_room(ui, &row);
-    let shown = SubMenu::new().show(ui, &row, |ui| menu_rows_within(ui, room, contents));
+    let window = ui.ctx().content_rect();
+    let frame_width = Frame::menu(ui.style()).total_margin().sum().x;
+    let side_room = (window.right() - row.interact_rect.right()).max(row.interact_rect.left() - window.left());
+    // Match egui's SubMenu gap, including the popup's own frame. Leave
+    // room for the scrollbar gutter even before its rows have been sized,
+    // and one point for rounding so its side alignment always fits.
+    let gap = frame_width / 2.0 + 2.0;
+    let scroll = ui.spacing().scroll;
+    let gutter = scroll.bar_width + scroll.bar_inner_margin;
+    let width = (side_room - frame_width - gap - gutter - 1.0).max(0.0);
+    let info = egui::UiStackInfo::default().with_tag_value(MENU_WIDTH_TAG, width);
+    let builder = egui::UiBuilder::new().ui_stack_info(info);
+    let shown = SubMenu::new().show(ui, &row, |ui| {
+        ui.scope_builder(builder, |ui| menu_rows_within(ui, room, contents)).inner
+    });
     shown.map(|inner| inner.inner)
 }
 
@@ -977,6 +1043,263 @@ mod tests {
     fn a_submenu_with_no_room_on_the_right_opens_on_the_left() {
         let (menu, _, submenu) = open_bake(640.0, 520.0);
         assert!(submenu.right() <= menu.left(), "{submenu:?} covers {menu:?}");
+    }
+
+    const LONG_MENU_LABEL: &str = "Final combine of rock colour and snow mask for the alpine valley with extra long descriptive name v1 and then some more words";
+
+    struct IconMenu {
+        button: Rect,
+        menu: Option<Rect>,
+        rows: Vec<Rect>,
+        clicked: bool,
+    }
+
+    fn icon_menu_frame(context: &egui::Context, events: Vec<egui::Event>) -> IconMenu {
+        let screen = Rect::from_min_size(Pos2::ZERO, SHORT_SCREEN);
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut shown = IconMenu { button: Rect::NOTHING, menu: None, rows: Vec::new(), clicked: false };
+        let mut popup_id = None;
+        let output = context.run_ui(input, |ui| {
+            let origin = Pos2::new(400.0, title_bar::HEIGHT - 24.0);
+            let slot = Rect::from_min_size(origin, Vec2::splat(24.0));
+            let builder = egui::UiBuilder::new().max_rect(slot);
+            let mut toolbar = ui.new_child(builder);
+            let response = icon_menu_sized(&mut toolbar, "arrow-back-up", "Undo", None, slot.size(), |ui| {
+                for row in 0..LONG_ROWS {
+                    let response = menu_item(ui, None, None, &format!("Step {row}"), "");
+                    shown.rows.push(response.rect);
+                    shown.clicked |= response.clicked();
+                }
+                if !ui.is_sizing_pass() {
+                    shown.menu = Some(Rect::NOTHING);
+                }
+            });
+            shown.button = response.rect;
+            popup_id = Some(egui::Popup::default_response_id(&response));
+        });
+        output.drop_without_applying_deltas();
+        if shown.menu.is_some() {
+            shown.menu = context.memory(|memory| memory.area_rect(popup_id.unwrap()));
+        }
+        shown
+    }
+
+    #[test]
+    fn tall_icon_menus_scroll_below_their_button_and_a_second_click_closes_them() {
+        let context = themed_context();
+        let button = icon_menu_frame(&context, Vec::new()).button;
+        let pointer = button.center();
+        icon_menu_frame(&context, vec![egui::Event::PointerMoved(pointer), click(pointer, true)]);
+        icon_menu_frame(&context, vec![click(pointer, false)]);
+        let mut shown = icon_menu_frame(&context, Vec::new());
+        for _ in 0..3 {
+            shown = icon_menu_frame(&context, Vec::new());
+        }
+        let menu = shown.menu.expect("the icon menu opens");
+        assert_under(menu, button.bottom(), "icon menu");
+        assert!(shown.rows[LONG_ROWS - 1].top() > menu.bottom(), "the last row needs scrolling");
+        icon_menu_frame(&context, vec![click(pointer, true)]);
+        let shown = icon_menu_frame(&context, vec![click(pointer, false)]);
+        assert!(!shown.clicked, "closing the menu activated a history entry");
+        assert!(icon_menu_frame(&context, Vec::new()).menu.is_none());
+    }
+
+    #[test]
+    fn clicks_inside_a_menu_only_close_it_when_a_row_is_activated() {
+        let context = themed_context();
+        let (context, shown) = {
+            // The scrollbar's gutter is outside the menu's row widgets.
+            let button = icon_menu_frame(&context, Vec::new()).button.center();
+            icon_menu_frame(&context, vec![egui::Event::PointerMoved(button), click(button, true)]);
+            icon_menu_frame(&context, vec![click(button, false)]);
+            let mut shown = icon_menu_frame(&context, Vec::new());
+            for _ in 0..3 {
+                shown = icon_menu_frame(&context, Vec::new());
+            }
+            (context, shown)
+        };
+        let row = shown.rows[0].center();
+        let secondary = |pressed| egui::Event::PointerButton { pos: row, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE };
+        icon_menu_frame(&context, vec![egui::Event::PointerMoved(row), secondary(true)]);
+        icon_menu_frame(&context, vec![secondary(false)]);
+        assert!(icon_menu_frame(&context, Vec::new()).menu.is_some(), "a right click closed the menu");
+
+        let menu = shown.menu.unwrap();
+        let gutter = Pos2::new(shown.rows[0].right() + 5.0, menu.bottom() - 10.0);
+        icon_menu_frame(&context, vec![egui::Event::PointerMoved(gutter), click(gutter, true)]);
+        icon_menu_frame(&context, vec![click(gutter, false)]);
+        let shown = icon_menu_frame(&context, Vec::new());
+        assert!(shown.menu.is_some(), "a scroll bar click closed the menu");
+        assert!(!shown.clicked);
+
+        let row = shown.rows.iter().find(|row| shown.menu.unwrap().contains(row.center())).expect("a row is visible").center();
+        icon_menu_frame(&context, vec![egui::Event::PointerMoved(row), click(row, true)]);
+        let clicked = icon_menu_frame(&context, vec![click(row, false)]);
+        assert!(clicked.clicked, "a visible command activates");
+        assert!(icon_menu_frame(&context, Vec::new()).menu.is_none(), "activation closes the menu");
+    }
+
+    fn context_menu_frame(context: &egui::Context, events: Vec<egui::Event>) -> IconMenu {
+        let screen = Rect::from_min_size(Pos2::ZERO, SHORT_SCREEN);
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut shown = IconMenu { button: Rect::NOTHING, menu: None, rows: Vec::new(), clicked: false };
+        let output = context.run_ui(input, |ui| {
+            let body = Rect::from_min_max(Pos2::new(50.0, title_bar::HEIGHT), screen.max);
+            let response = ui.allocate_rect(body, Sense::click());
+            shown.button = response.rect;
+            let menu = context_menu(&response, |ui| {
+                for row in 0..LONG_ROWS {
+                    let response = menu_item(ui, None, None, &format!("Command {row}"), "");
+                    shown.rows.push(response.rect);
+                    shown.clicked |= response.clicked();
+                }
+            });
+            shown.menu = menu.map(|menu| menu.response.rect);
+        });
+        output.drop_without_applying_deltas();
+        shown
+    }
+
+    #[test]
+    fn tall_context_menus_fit_above_or_below_their_fixed_pointer_anchor() {
+        for pointer in [Pos2::new(200.0, 60.0), Pos2::new(200.0, 270.0)] {
+            let context = themed_context();
+            context_menu_frame(&context, Vec::new());
+            let secondary = |pressed| egui::Event::PointerButton { pos: pointer, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE };
+            context_menu_frame(&context, vec![egui::Event::PointerMoved(pointer), secondary(true)]);
+            context_menu_frame(&context, vec![secondary(false)]);
+            let mut shown = context_menu_frame(&context, Vec::new());
+            for _ in 0..3 {
+                shown = context_menu_frame(&context, Vec::new());
+            }
+            let menu = shown.menu.expect("the context menu opens");
+            assert_under(menu, title_bar::HEIGHT, "context menu");
+            assert!(menu.top() >= pointer.y || menu.bottom() <= pointer.y, "the menu {menu:?} covers its anchor {pointer:?}");
+            assert!(menu.height() < LONG_ROWS as f32 * MENU_ROW_HEIGHT);
+
+            // Moving the pointer does not change the anchor or available room.
+            let pointer = Pos2::new(900.0, 150.0);
+            let moved = context_menu_frame(&context, vec![egui::Event::PointerMoved(pointer)]);
+            assert_eq!(moved.menu, shown.menu);
+            context_menu_frame(&context, vec![click(pointer, true)]);
+            context_menu_frame(&context, vec![click(pointer, false)]);
+            assert!(context_menu_frame(&context, Vec::new()).menu.is_none(), "a click outside closes the context menu");
+        }
+    }
+
+    #[test]
+    fn long_menu_labels_are_elided_without_covering_their_shortcuts() {
+        let context = themed_context();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(568.0, 400.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let output = context.run_ui(input, |ui| {
+            menu_style(ui);
+            let response = menu_item(ui, None, None, LONG_MENU_LABEL, "Ctrl Shift S");
+            assert!(response.rect.width() <= screen.width() * 0.4);
+        });
+        let mut label = None;
+        let mut shortcut = None;
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                if text.galley.text() == LONG_MENU_LABEL {
+                    label = Some(text);
+                } else if text.galley.text() == "Ctrl Shift S" {
+                    shortcut = Some(text);
+                }
+            }
+        }
+        let label = label.expect("the label is painted");
+        let shortcut = shortcut.expect("the shortcut is painted");
+        assert!(label.galley.elided, "the label needs an ellipsis");
+        assert!(label.visual_bounding_rect().right() < shortcut.visual_bounding_rect().left(), "the label covers its shortcut");
+        output.drop_without_applying_deltas();
+    }
+
+    fn long_label_frame(context: &egui::Context, screen_width: f32, button_x: f32, row_count: usize, events: Vec<egui::Event>) -> (Shown, Vec<(String, bool)>) {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(screen_width, 500.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let mut shown = Shown { button: Rect::NOTHING, menu: None, rows: Vec::new(), submenu: None };
+        let mut submenu_id = None;
+        let output = context.run_ui(input, |ui| {
+            let slot = Rect::from_min_size(Pos2::new(button_x, title_bar::HEIGHT), Vec2::new(60.0, 24.0));
+            let builder = egui::UiBuilder::new().max_rect(slot);
+            let mut bar = ui.new_child(builder);
+            let menu = MenuButton::new("Graph").config(menu_config());
+            let (response, _) = menu.ui(&mut bar, |ui| {
+                menu_style(ui);
+                let child_id = SubMenu::id_from_widget_id(ui.next_auto_id());
+                let child = submenu(ui, None, None, "Bookmarks", |ui| {
+                    if !ui.is_sizing_pass() {
+                        shown.rows.clear();
+                    }
+                    for _ in 0..row_count {
+                        let response = menu_item(ui, None, None, LONG_MENU_LABEL, "Ctrl Shift S");
+                        if !ui.is_sizing_pass() {
+                            shown.rows.push(response.rect);
+                        }
+                    }
+                });
+                if !ui.is_sizing_pass() {
+                    shown.menu = Some(ui.min_rect());
+                    submenu_id = child.map(|_| child_id);
+                }
+            });
+            shown.button = response.rect;
+        });
+        let mut labels = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                labels.push((text.galley.text().to_string(), text.galley.elided));
+            }
+        }
+        output.drop_without_applying_deltas();
+        shown.submenu = submenu_id.and_then(|id| context.memory(|memory| memory.area_rect(id)));
+        (shown, labels)
+    }
+
+    #[test]
+    fn long_label_submenus_fit_beside_their_parent_and_show_the_full_name_on_hover() {
+        for (screen_width, button_x, row_count) in [(568.0, 170.0, 1), (914.0, 210.0, 1), (640.0, 520.0, 1), (568.0, 170.0, LONG_ROWS)] {
+            let context = themed_context();
+            context.global_style_mut(|style| {
+                style.interaction.tooltip_delay = 0.0;
+                style.interaction.show_tooltips_only_when_still = false;
+            });
+            let (shown, _) = long_label_frame(&context, screen_width, button_x, row_count, Vec::new());
+            let pointer = shown.button.center();
+            long_label_frame(&context, screen_width, button_x, row_count, vec![egui::Event::PointerMoved(pointer), click(pointer, true)]);
+            long_label_frame(&context, screen_width, button_x, row_count, vec![click(pointer, false)]);
+            let mut shown = long_label_frame(&context, screen_width, button_x, row_count, Vec::new()).0;
+            for _ in 0..3 {
+                shown = long_label_frame(&context, screen_width, button_x, row_count, Vec::new()).0;
+            }
+            let row = shown.menu.expect("the parent menu opens").center();
+            long_label_frame(&context, screen_width, button_x, row_count, vec![egui::Event::PointerMoved(row)]);
+            for _ in 0..3 {
+                shown = long_label_frame(&context, screen_width, button_x, row_count, Vec::new()).0;
+            }
+            let menu = shown.menu.unwrap();
+            let child = shown.submenu.expect("Bookmarks opens");
+            assert!(child.left() >= menu.right() || child.right() <= menu.left(), "the submenu {child:?} overlaps its parent {menu:?}");
+            assert!(child.left() >= 0.0 && child.right() <= screen_width);
+            let frame_width = Frame::menu(&context.global_style()).total_margin().sum().x;
+            let scroll = context.global_style().spacing.scroll;
+            let max_width = MENU_MAX_WIDTH + frame_width + scroll.bar_width + scroll.bar_inner_margin;
+            assert!(child.width() <= max_width);
+            if row_count == LONG_ROWS {
+                assert!(child.height() < row_count as f32 * MENU_ROW_HEIGHT, "the submenu scrolls");
+                assert!(shown.rows[row_count - 1].bottom() > child.bottom(), "the last bookmark needs scrolling");
+            }
+
+            let bookmark = shown.rows[0].center();
+            long_label_frame(&context, screen_width, button_x, row_count, vec![egui::Event::PointerMoved(bookmark)]);
+            let mut labels = Vec::new();
+            for _ in 0..5 {
+                labels = long_label_frame(&context, screen_width, button_x, row_count, Vec::new()).1;
+            }
+            assert!(labels.iter().any(|(text, elided)| text == LONG_MENU_LABEL && *elided), "the bookmark label is elided: {labels:?}");
+            assert!(labels.iter().any(|(text, elided)| text == LONG_MENU_LABEL && !*elided), "the full name appears in a tooltip: {labels:?}");
+        }
     }
 
     /// The WCAG contrast of `color`, laid over `background` as egui blends

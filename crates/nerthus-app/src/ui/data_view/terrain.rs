@@ -550,7 +550,7 @@ fn tree(ui: &mut Ui, editor: &Editor, state: &mut TerrainState, graph: &mut Grap
         commands.push(Command::SelectNode(id));
     }
     let open_command = context.map(|_| egui::SetOpenCommand::Bool(true));
-    let info = UiStackInfo::new(UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, MenuConfig::default());
+    let info = UiStackInfo::new(UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, crate::ui::widgets::menu_config());
     let popup_id = ui.id().with("tree-node-menu");
     let mut popup = egui::Popup::new(popup_id, ui.ctx().clone(), egui::PopupAnchor::PointerFixed, ui.layer_id());
     popup = popup.kind(egui::PopupKind::Menu);
@@ -558,7 +558,10 @@ fn tree(ui: &mut Ui, editor: &Editor, state: &mut TerrainState, graph: &mut Grap
     popup = popup.info(info);
     popup = popup.open_memory(open_command);
     popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    popup.show(|ui| node_context_menu(ui, editor, commands));
+    let pointer = ui.ctx().pointer_hover_pos().unwrap_or_default();
+    let pointer_anchor = Rect::from_min_size(pointer, Vec2::ZERO);
+    let anchor = if context.is_some() { pointer_anchor } else { popup.get_anchor_rect().unwrap_or(pointer_anchor) };
+    popup.show(|ui| crate::ui::widgets::menu_rows_beside(ui, anchor, |ui| node_context_menu(ui, editor, commands)));
 }
 
 fn toggle<T: std::hash::Hash + Eq>(set: &mut HashSet<T>, key: T) {

@@ -224,7 +224,10 @@ fn header(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     }
     bar.add_space(8.0);
     let current = editor.preview_region.clone().unwrap_or_else(|| "Whole Terrain".to_string());
-    bar.menu_button(current, |ui| regions_menu(ui, editor, commands, false));
+    let response = bar.button(current);
+    let mut popup = egui::Popup::menu(&response);
+    popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    popup.show(|ui| crate::ui::widgets::menu_rows_below(ui, response.interact_rect, |ui| regions_menu(ui, editor, commands, false)));
     bar.label(egui::RichText::new("Preview region").font(theme::interface(12.0)).color(theme::LABEL_DEFAULT));
 }
 
@@ -354,7 +357,7 @@ fn canvas(ui: &mut Ui, editor: &mut Editor, state: &mut RegionsState, commands: 
         state.menu = Some(target);
     }
     let menu_target = state.menu.clone();
-    response.context_menu(|ui| match &menu_target {
+    crate::ui::widgets::context_menu(&response, |ui| match &menu_target {
         Some(MenuTarget::Region(name)) => region_menu(ui, editor, state, name, commands),
         _ => canvas_menu(ui, editor, state, canvas, commands),
     });

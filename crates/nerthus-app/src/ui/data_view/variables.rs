@@ -675,7 +675,7 @@ fn unbound_row(ui: &mut Ui, editor: &mut Editor, key: &str, variable: &Variable,
         let value_position = Pos2::new(value_left, rect.center().y - value_galley.size().y / 2.0);
         ui.painter_at(value_place).galley(value_position, value_galley, theme::ACCENT_MUTED_GREEN);
     }
-    response.context_menu(|ui| {
+    crate::ui::widgets::context_menu(&response, |ui| {
         crate::ui::widgets::menu_style(ui);
         if menu_item(ui, None, None, "Edit...", "").clicked() {
             commands.push(Command::EditVariable(key.to_string()));

@@ -19,9 +19,9 @@ use crate::editor::Editor;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::{menu_keys, menus};
-use crate::ui::tool_commands::ToolCommand;
+use crate::ui::tool_commands::{self, ToolCommand};
 use crate::files::{FileCommand, AUTOSAVE_CHOICES};
-use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_item, menu_item_enabled, menu_rows, menu_separator, menu_style, toolbar_button};
+use crate::ui::widgets::{checked_icon_item, icon_button_sized, icon_menu, menu_caption, menu_config, menu_item, menu_item_enabled, menu_rows, menu_separator, menu_style, toolbar_button};
 use crate::ui::UiState;
 
 pub const HEIGHT: f32 = 36.0;
@@ -277,6 +277,10 @@ fn menu_bar(ui: &mut Ui, editor: &Editor, ui_state: &UiState, commands: &mut Vec
 }
 
 fn menu_items(ui: &mut Ui, editor: &Editor, ui_state: &UiState, commands: &mut Vec<Command>) {
+    let modal = tool_commands::modal_open(ui.ctx(), ui_state);
+    if modal {
+        ui.disable();
+    }
     egui::MenuBar::new().ui(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.spacing_mut().button_padding = Vec2::ZERO;
@@ -301,21 +305,27 @@ fn menu_items(ui: &mut Ui, editor: &Editor, ui_state: &UiState, commands: &mut V
             if lit {
                 ui.visuals_mut().widgets.inactive = ui.visuals().widgets.hovered;
             }
-            let menu = MenuButton::from_button(button);
-            let (response, _) = menu.ui(ui, |ui| menu_rows(ui, |ui| menu_contents(ui, name, editor, ui_state, commands)));
+            let menu = MenuButton::from_button(button).config(menu_config());
+            let (response, _) = menu.ui(ui, |ui| {
+                // Popup UIs are detached from the disabled bar. Leave
+                // their commands undrawn until `bar` closes the roots.
+                if !modal {
+                    menu_rows(ui, |ui| menu_contents(ui, name, editor, ui_state, commands));
+                }
+            });
             ui.visuals_mut().widgets.inactive = inactive;
             popups.push((egui::Popup::default_response_id(&response), access_key));
         }
-        menu_keys::bar(ui.ctx(), &popups);
+        menu_keys::bar(ui.ctx(), &popups, modal);
     });
 }
 
 fn menu_contents(ui: &mut Ui, name: &str, editor: &Editor, ui_state: &UiState, commands: &mut Vec<Command>) {
     match name {
         "File" => menus::file_menu(ui, editor, commands),
-        "Edit" => menus::edit_menu(ui, editor, commands),
+        "Edit" => menus::edit_menu(ui, editor, ui_state, commands),
         "Graph" => menus::graph_menu(ui, editor, ui_state, commands),
-        "Node" => menus::node_menu(ui, editor, commands),
+        "Node" => menus::node_menu(ui, editor, ui_state.graph.tab, commands),
         "Preview" => menus::preview_menu(ui, editor, commands),
         "Project" => menus::project_menu(ui, commands),
         "Tools" => menus::tools_menu(ui, editor, commands),
@@ -435,18 +445,16 @@ fn undo_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
             menu_caption(ui, "No undo history");
             return;
         }
-        menu_rows(ui, |ui| {
-            for (steps, item) in history.iter().enumerate() {
-                if item.separator_before {
-                    menu_separator(ui);
-                }
-                if menu_item(ui, Some(item.icon), None, item.label, "").clicked() {
-                    for _ in 0..=steps {
-                        commands.push(Command::Undo);
-                    }
+        for (steps, item) in history.iter().enumerate() {
+            if item.separator_before {
+                menu_separator(ui);
+            }
+            if menu_item(ui, Some(item.icon), None, item.label, "").clicked() {
+                for _ in 0..=steps {
+                    commands.push(Command::Undo);
                 }
             }
-        });
+        }
     });
 }
 
@@ -820,13 +828,17 @@ mod tests {
     /// followed by two without.
     fn keyed_with(context: &egui::Context, width: f32, editor: &Editor, keys: &[egui::Key], modifiers: egui::Modifiers) -> Vec<Command> {
         let ui_state = UiState::default();
+        keyed_in_state(context, width, editor, &ui_state, keys, modifiers)
+    }
+
+    fn keyed_in_state(context: &egui::Context, width: f32, editor: &Editor, ui_state: &UiState, keys: &[egui::Key], modifiers: egui::Modifiers) -> Vec<Command> {
         let mut commands = Vec::new();
         let pressed = |key: egui::Key| vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }];
         for events in keys.iter().flat_map(|key| [pressed(*key), Vec::new(), Vec::new()]) {
             let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, HEIGHT));
             let output = context.run_ui(input(width, events), |ui| {
                 menu_keys::begin(ui.ctx());
-                show(ui, rect, editor, &ui_state, &mut commands);
+                show(ui, rect, editor, ui_state, &mut commands);
             });
             output.drop_without_applying_deltas();
         }
@@ -835,6 +847,86 @@ mod tests {
 
     fn keyed(context: &egui::Context, width: f32, editor: &Editor, keys: &[egui::Key]) -> Vec<Command> {
         keyed_with(context, width, editor, keys, egui::Modifiers::NONE)
+    }
+
+    #[test]
+    fn move_to_tab_excludes_the_shown_tab_for_notes_and_groups() {
+        use egui::Key::{ArrowRight, ArrowUp, End, Enter, N};
+
+        for select_group in [false, true] {
+            let mut editor = editor_named(NAMES[0]);
+            let mut ui_state = UiState::default();
+            let tab = editor.document.add_graph_tab();
+            ui_state.graph.tab = tab;
+            if select_group {
+                let group = editor.document.add_group(&[], [0.0, 0.0], [200.0, 200.0], tab);
+                ui_state.graph.selected_groups = vec![group];
+            } else {
+                let note = editor.document.add_note([0.0, 0.0], tab);
+                ui_state.graph.selected_note = Some(note);
+            }
+
+            let width = 1600.0;
+            let context = themed_context(width);
+            keyed_in_state(&context, width, &editor, &ui_state, &[N], egui::Modifiers::ALT);
+            // Move to Tab is just before Presets; its first target must
+            // be Graph 1 when a note or group on Graph 2 is selected.
+            let commands = keyed_in_state(&context, width, &editor, &ui_state, &[End, ArrowUp, ArrowRight, Enter], egui::Modifiers::NONE);
+            let expected = Command::Graph(crate::ui::graph_commands::GraphCommand::MoveToTab(crate::document::TabTarget::Existing(0)));
+            assert_eq!(commands, [expected], "group selected: {select_group}");
+        }
+    }
+
+    #[test]
+    fn setup_and_help_windows_keep_f10_and_alt_access_keys() {
+        use egui::Key::{ArrowDown, Enter, F, F10};
+
+        let editor = editor_named(NAMES[0]);
+        let width = 1600.0;
+        for window in ["setup", "whats-new", "shortcuts", "about", "update"] {
+            let mut ui_state = UiState::default();
+            match window {
+                "setup" => ui_state.onboard = Some(crate::ui::onboard::Onboard::open(true)),
+                "whats-new" => ui_state.help.whats_new = Some(0),
+                "shortcuts" => ui_state.help.shortcuts = true,
+                "about" => ui_state.help.about = true,
+                _ => ui_state.help.update = Some(crate::ui::help_windows::UpdateDialog::sample()),
+            }
+            let context = themed_context(width);
+            let commands = keyed_in_state(&context, width, &editor, &ui_state, &[F10, ArrowDown, Enter], egui::Modifiers::NONE);
+            assert!(commands.is_empty(), "{window}: {commands:?}");
+            let commands = keyed_in_state(&context, width, &editor, &ui_state, &[F], egui::Modifiers::ALT);
+            assert!(commands.is_empty(), "{window}: {commands:?}");
+            assert!(!egui::Popup::is_any_open(&context), "{window}");
+            assert_eq!(menu_keys::bar_focus(&context), None, "{window}");
+        }
+    }
+
+    #[test]
+    fn a_modal_window_cancels_menu_mode_and_an_already_open_menu() {
+        use egui::Key::{ArrowDown, Enter, F10};
+
+        let editor = editor_named(NAMES[0]);
+        let width = 1600.0;
+        for open_menu in [false, true] {
+            let context = themed_context(width);
+            keyed(&context, width, &editor, &[F10]);
+            if open_menu {
+                keyed(&context, width, &editor, &[Enter]);
+                assert!(egui::Popup::is_any_open(&context));
+            }
+            let mut ui_state = UiState::default();
+            ui_state.help.whats_new = Some(0);
+            let commands = keyed_in_state(&context, width, &editor, &ui_state, &[Enter, ArrowDown, Enter], egui::Modifiers::NONE);
+            assert!(commands.is_empty(), "menu open: {open_menu}: {commands:?}");
+            assert!(!egui::Popup::is_any_open(&context));
+            assert!(!menu_keys::active(&context));
+            assert_eq!(menu_keys::bar_focus(&context), None);
+            ui_state.help.whats_new = None;
+            let commands = keyed_in_state(&context, width, &editor, &ui_state, &[ArrowDown, Enter], egui::Modifiers::NONE);
+            assert!(commands.is_empty());
+            assert!(!egui::Popup::is_any_open(&context));
+        }
     }
 
     #[test]

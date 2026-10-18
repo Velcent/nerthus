@@ -839,14 +839,16 @@ fn nodes_tab(ui: &mut Ui, editor: &mut Editor, settings: &mut BuildSettingsState
         return;
     }
     ui.horizontal(|ui| {
-        ui.menu_button("Change formats for all nodes", |ui| {
+        let response = ui.button("Change formats for all nodes");
+        let mut popup = egui::Popup::menu(&response);
+        popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        popup.show(|ui| crate::ui::widgets::menu_rows_below(ui, response.interact_rect, |ui| {
             for format in FileFormat::ALL {
-                if ui.button(format.name()).clicked() {
+                if menu_item(ui, None, None, format.name(), "").clicked() {
                     editor.document.set_all_export_formats(format);
-                    ui.close();
                 }
             }
-        });
+        }));
         if editor.document.has_duplicate_export_names() {
             let warning = RichText::new("There are duplicate filenames! Click to fix them!").color(theme::ACCENT_RED);
             if ui.link(warning).clicked() {

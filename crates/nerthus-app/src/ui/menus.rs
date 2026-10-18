@@ -4,7 +4,7 @@
 use egui::Ui;
 use nerthus_engine::StateOverride;
 
-use crate::document::{node_tab, CombineKind, PortalState, TabTarget};
+use crate::document::{CombineKind, PortalState, TabTarget};
 use crate::editor::{Editor, RenderMode, PREVIEW_RESOLUTIONS};
 use crate::files::FileCommand;
 use crate::theme;
@@ -81,7 +81,7 @@ pub fn file_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     }
 }
 
-pub fn edit_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
+pub fn edit_menu(ui: &mut Ui, editor: &Editor, ui_state: &UiState, commands: &mut Vec<Command>) {
     menu_style(ui);
     let can_undo = editor.document.can_undo();
     let can_redo = editor.document.can_redo();
@@ -93,6 +93,9 @@ pub fn edit_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     }
     menu_separator(ui);
     let has_selection = !editor.selection.is_empty();
+    let graph = &ui_state.graph;
+    let can_rename = has_selection || !graph.selected_groups.is_empty() || graph.selected_note.is_some();
+    let can_delete = can_rename || !graph.selected_connections.is_empty();
     // `MiEdit_SubmenuOpened`: Cut and Copy for nodes, Paste once something
     // was cut or copied (`IsPasteActive`), Copy Properties for the node
     // shown and Paste Properties onto one of the copied node's type.
@@ -117,14 +120,14 @@ pub fn edit_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
         commands.push(Command::Graph(GraphCommand::PastePropertiesToActive));
     }
     menu_separator(ui);
-    if menu_item_enabled(ui, None, None, "Rename", "F2", has_selection).clicked() {
+    if menu_item_enabled(ui, None, None, "Rename", "F2", can_rename).clicked() {
         commands.push(Command::Rename);
     }
     if menu_item_enabled(ui, Some("stack"), None, "Duplicate", "Ctrl D", has_selection).clicked() {
         commands.push(Command::Duplicate);
     }
     menu_separator(ui);
-    if menu_item_enabled(ui, Some("square-rounded-x"), Some(theme::ACCENT_RED), "Delete", "Del", has_selection).clicked() {
+    if menu_item_enabled(ui, Some("square-rounded-x"), Some(theme::ACCENT_RED), "Delete", "Del", can_delete).clicked() {
         commands.push(Command::Delete);
     }
 }
@@ -340,7 +343,7 @@ fn bake_estimate(editor: &Editor, node: i32, resolution: usize) -> String {
     format!("Bake Selected ({} nodes, {size})", chain.len())
 }
 
-pub fn node_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
+pub fn node_menu(ui: &mut Ui, editor: &Editor, current_tab: usize, commands: &mut Vec<Command>) {
     menu_style(ui);
     let has_selection = !editor.selection.is_empty();
     if menu_item_enabled(ui, Some("rotate-360"), Some(theme::ACCENT_GREEN), "Refresh", "F5", has_selection).clicked() {
@@ -394,8 +397,8 @@ pub fn node_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
         convert_port_items(ui, editor, commands);
     });
     menu_separator(ui);
-    // The tab shown is the selected node's.
-    let current_tab = editor.active_node().and_then(|id| editor.document.node(id)).map_or(0, node_tab);
+    // `PrepareMoveToMenu` excludes the shown tab, including when the
+    // selection consists of notes or groups.
     submenu(ui, None, None, "Move to Tab", |ui| {
         if let Some(target) = tab_targets(ui, editor, current_tab) {
             commands.push(Command::Graph(GraphCommand::MoveToTab(target)));
@@ -601,5 +604,71 @@ pub fn help_menu(ui: &mut Ui, commands: &mut Vec<Command>) {
     menu_separator(ui);
     if menu_item(ui, Some("versions"), None, "About Nerthus", "").clicked() {
         commands.push(Command::Tools(ToolCommand::ShowAbout));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+
+    fn click_edit_row(editor: &Editor, ui_state: &UiState, text: &str) -> Vec<Command> {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut commands = Vec::new();
+        let output = context.run_ui(egui::RawInput::default(), |ui| edit_menu(ui, editor, ui_state, &mut commands));
+        let row_position = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(shape) if shape.galley.text() == text => Some(shape.pos + egui::vec2(4.0, shape.galley.size().y / 2.0)),
+            _ => None,
+        }).expect("the Edit row is drawn");
+        output.drop_without_applying_deltas();
+        for pressed in [true, false] {
+            let event = egui::Event::PointerButton {
+                pos: row_position,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let events = vec![egui::Event::PointerMoved(row_position), event];
+            let input = egui::RawInput { events, ..Default::default() };
+            let output = context.run_ui(input, |ui| edit_menu(ui, editor, ui_state, &mut commands));
+            output.drop_without_applying_deltas();
+        }
+        commands
+    }
+
+    #[test]
+    fn edit_actions_follow_the_selected_element_types() {
+        let actions = [
+            ("Cut", Command::Graph(GraphCommand::Cut)),
+            ("Copy", Command::Graph(GraphCommand::Copy)),
+            ("Duplicate", Command::Duplicate),
+            ("Rename", Command::Rename),
+            ("Delete", Command::Delete),
+        ];
+        for selection in ["none", "node", "connection", "note", "group"] {
+            let mut editor = Editor::new(Document::new());
+            let mut ui_state = UiState::default();
+            let node = editor.document.add_node("Mountain", [0.0, 0.0]).unwrap();
+            match selection {
+                "node" => editor.set_selection(vec![node]),
+                "connection" => ui_state.graph.selected_connections = vec![(node, "In".to_string())],
+                "note" => ui_state.graph.selected_note = Some(editor.document.add_note([0.0, 0.0], 0)),
+                "group" => {
+                    let group = editor.document.add_group(&[], [0.0, 0.0], [200.0, 200.0], 0);
+                    ui_state.graph.selected_groups = vec![group];
+                }
+                _ => {}
+            }
+            for (text, command) in &actions {
+                let enabled = match *text {
+                    "Rename" => matches!(selection, "node" | "note" | "group"),
+                    "Delete" => selection != "none",
+                    _ => selection == "node",
+                };
+                let expected = if enabled { vec![command.clone()] } else { Vec::new() };
+                assert_eq!(click_edit_row(&editor, &ui_state, text), expected, "{selection}: {text}");
+            }
+        }
     }
 }

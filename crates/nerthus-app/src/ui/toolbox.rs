@@ -395,11 +395,11 @@ fn category_button(ui: &mut Ui, rect: Rect, category: &str, mode: ToolboxMode, l
         ui.painter().galley(Pos2::new(rect.left() + ICON_COLUMN, rect.center().y - galley.size().y / 2.0), galley, text_color);
     }
     let response = response.tooltip(category);
-    response.context_menu(|ui| settings_menu(ui, look.editor, settings));
+    crate::ui::widgets::context_menu(&response, |ui| settings_menu(ui, look.editor, settings));
 
     // The menu (`_SubMenuPopup`, placed right, margin 6). A flat list runs
     // long: its rows scroll in the room beside the button (egui's anchor).
-    let info = UiStackInfo::new(UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, MenuConfig::default());
+    let info = UiStackInfo::new(UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, crate::ui::widgets::menu_config());
     let anchor = egui::PopupAnchor::from(&response).rect(popup_id, ui.ctx()).unwrap_or(response.interact_rect);
     let mut popup = egui::Popup::menu(&response).id(popup_id);
     popup = popup.align(egui::RectAlign::RIGHT_START);
@@ -421,7 +421,7 @@ fn show_panel(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut GraphSta
     let look = EntryLook { editor, average: average_usage(editor) };
     let mut settings: Vec<SettingsChange> = Vec::new();
     let background = ui.interact(panel, ui.id().with("toolbox-panel"), Sense::click());
-    background.context_menu(|ui| settings_menu(ui, look.editor, &mut settings));
+    crate::ui::widgets::context_menu(&background, |ui| settings_menu(ui, look.editor, &mut settings));
     let inner = panel.shrink2(Vec2::new(5.0, 0.0));
     let builder = UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min));
     let mut panel_ui = ui.new_child(builder);
@@ -470,7 +470,7 @@ fn expander_header(ui: &mut Ui, category: &str, open: bool, look: &EntryLook, se
     icons::paint(ui, icon_rect, chevron, tint);
     let galley = ui.painter().layout_no_wrap(category.to_string(), theme::semibold(11.0), theme::LABEL_DEFAULT);
     ui.painter().galley(Pos2::new(rect.left() + 22.0, rect.center().y - galley.size().y / 2.0), galley, theme::LABEL_DEFAULT);
-    response.context_menu(|ui| settings_menu(ui, look.editor, settings));
+    crate::ui::widgets::context_menu(&response, |ui| settings_menu(ui, look.editor, settings));
     response.clicked()
 }
 
@@ -531,7 +531,7 @@ fn panel_grid(ui: &mut Ui, categories: &[&str], columns: usize, look: &EntryLook
         if !implemented {
             response = response.tooltip("Not available in Nerthus yet");
         }
-        response.context_menu(|ui| settings_menu(ui, look.editor, settings));
+        crate::ui::widgets::context_menu(&response, |ui| settings_menu(ui, look.editor, settings));
         if response.drag_started_by(egui::PointerButton::Primary) {
             state.toolbox_drag = Some(spec.key().to_string());
         } else if response.clicked() {
@@ -741,7 +741,7 @@ mod tests {
                 Drawn::Toolbox => show(ui, area, &mut self.editor, &mut self.state, &mut commands),
                 Drawn::ContextMenu => {
                     let graph = ui.interact(area, ui.id().with("graph"), Sense::click());
-                    graph.context_menu(|ui| {
+                    crate::ui::widgets::context_menu(&graph, |ui| {
                         menu_style(ui);
                         add_node_menus(ui, &self.editor, &mut self.state, &mut commands);
                     });

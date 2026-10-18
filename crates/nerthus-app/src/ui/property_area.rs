@@ -1078,8 +1078,9 @@ fn parameter_menu(ui: &mut Ui, rect: Rect, enabled: bool, bind_type: BindType, a
     let bound_type = automated.bound_to.as_ref().and_then(|name| automated.variables.iter().find(|(candidate, _)| candidate == name)).map(|(_, kind)| *kind);
     let expression_allowed = bound_type.is_none_or(|kind| matches!(kind, VarType::Float | VarType::Int));
     let mut edit = None;
-    egui::Popup::menu(&response).show(|ui| {
-        crate::ui::widgets::menu_style(ui);
+    let mut popup = egui::Popup::menu(&response);
+    popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    popup.show(|ui| crate::ui::widgets::menu_rows_below(ui, response.interact_rect, |ui| {
         menu_caption(ui, "EDIT PARAMETER");
         submenu(ui, None, None, "Bind to", |ui| {
             crate::ui::widgets::menu_style(ui);
@@ -1113,7 +1114,7 @@ fn parameter_menu(ui: &mut Ui, rect: Rect, enabled: bool, bind_type: BindType, a
         if menu_item(ui, None, None, "Help with Automation", "").clicked() {
             edit = Some(Edit::ShowDocs(crate::docs::PROPERTY_AUTOMATION));
         }
-    });
+    }));
     edit
 }
 

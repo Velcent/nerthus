@@ -13,7 +13,7 @@ use crate::ui::commands::Command;
 use crate::ui::graph_canvas::{close_rename_popup, drag_origin, elided_galley, line_height, rename_popup, GraphState, Renamed, SIMPLIFIED_ZOOM};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_popups::{icon_grid, swatch_grid};
-use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, menu_style, Tooltips};
+use crate::ui::widgets::{check_item, menu_caption, menu_item, menu_separator, Tooltips};
 
 /// `PART_Header`: the strip along the top a group is grabbed by (all of a
 /// collapsed group).
@@ -287,8 +287,7 @@ fn group_menu_popup(button: &Response, group: &GroupData, commands: &mut Vec<Com
     let mut popup = egui::Popup::menu(button);
     popup = popup.align(egui::RectAlign::BOTTOM_START);
     popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    popup.show(|ui| {
-        menu_style(ui);
+    popup.show(|ui| crate::ui::widgets::menu_rows_below(ui, button.interact_rect, |ui| {
         if menu_item(ui, Some("stack-pop"), None, "Group to Tab", "").clicked() {
             commands.push(Command::Graph(GraphCommand::GroupToTab(group.id)));
         }
@@ -309,7 +308,7 @@ fn group_menu_popup(button: &Response, group: &GroupData, commands: &mut Vec<Com
             commands.push(Command::Graph(GraphCommand::SetGroupIcon(group.id, icon)));
             ui.close();
         }
-    });
+    }));
 }
 
 /// `RenameGroup`: the rename popup on the group it is open on

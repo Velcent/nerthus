@@ -16,7 +16,7 @@ use crate::ui::commands::Command;
 use crate::ui::graph_canvas::GraphState;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_search::SearchPopup;
-use crate::ui::widgets::{menu_caption, menu_item, menu_item_enabled, menu_separator, menu_style, submenu, Tooltips};
+use crate::ui::widgets::{menu_caption, menu_item, menu_item_enabled, menu_rows_beside, menu_rows_below, menu_separator, menu_style, submenu, Tooltips};
 
 /// A menu's least width (`Default-Menu-Item`'s menus).
 const MENU_WIDTH: f32 = 190.0;
@@ -86,7 +86,11 @@ pub fn show(ui: &mut Ui, editor: &mut Editor, state: &mut GraphState, commands: 
 fn menu_popup(ui: &Ui, editor: &Editor, state: &GraphState, popup: &GraphPopup, commands: &mut Vec<Command>) -> bool {
     let id = Id::new(("graph-popup", popup.key()));
     let layer = LayerId::new(Order::Foreground, id);
-    let anchor = PopupAnchor::Position(popup.anchor());
+    let window = ui.ctx().content_rect();
+    let mut at = popup.anchor();
+    at.y = at.y.clamp(window.top() + crate::ui::title_bar::HEIGHT, window.bottom());
+    let anchor_rect = Rect::from_min_size(at, Vec2::ZERO);
+    let anchor = PopupAnchor::Position(at);
     // A new area takes the room it is given; menus start at their least
     // width (Manage Portals: two 157 wide columns) and grow to fit.
     let width = if matches!(popup, GraphPopup::Portals { .. }) { 2.0 * PORTALS_COLUMN } else { MENU_WIDTH };
@@ -97,8 +101,7 @@ fn menu_popup(ui: &Ui, editor: &Editor, state: &GraphState, popup: &GraphPopup, 
     menu = menu.layout(Layout::top_down_justified(Align::Min));
     menu = menu.close_behavior(PopupCloseBehavior::CloseOnClickOutside);
     menu = menu.open_bool(&mut open);
-    menu.show(|ui| {
-        menu_style(ui);
+    menu.show(|ui| menu_rows_beside(ui, anchor_rect, |ui| {
         match popup {
             GraphPopup::Connection { to, to_port, .. } => connection_menu(ui, editor, state, *to, to_port, commands),
             GraphPopup::Ports { from, from_port, from_output, node, .. } => ports_menu(ui, editor, *from, from_port, *from_output, *node, commands),
@@ -109,7 +112,7 @@ fn menu_popup(ui: &Ui, editor: &Editor, state: &GraphState, popup: &GraphPopup, 
             GraphPopup::Lazy { .. } => lazy_menu(ui, editor, state, commands),
             GraphPopup::Search(_) => {}
         }
-    });
+    }));
     open
 }
 
@@ -523,8 +526,7 @@ pub fn family_menu(name: &egui::Response, editor: &Editor, node: &nerthus_engine
     let mut popup = Popup::menu(name);
     popup = popup.align(egui::RectAlign::BOTTOM_START);
     popup = popup.close_behavior(PopupCloseBehavior::CloseOnClickOutside);
-    popup.show(|ui| {
-        menu_style(ui);
+    popup.show(|ui| menu_rows_below(ui, name.interact_rect, |ui| {
         let catalogue = Catalogue::get();
         let Some(spec) = catalogue.node(&node.type_name) else {
             return;
@@ -552,7 +554,7 @@ pub fn family_menu(name: &egui::Response, editor: &Editor, node: &nerthus_engine
         if menu_item(ui, None, None, "Other node...", "").clicked() {
             commands.push(Command::Graph(GraphCommand::ReplaceSearch));
         }
-    });
+    }));
 }
 
 #[cfg(test)]
@@ -589,6 +591,78 @@ mod tests {
         frame(context, editor, ui_state, None, Modifiers::NONE);
         frame(context, editor, ui_state, None, Modifiers::NONE);
         assert!(matches!(ui_state.graph.popup, Some(GraphPopup::Lazy { .. })));
+    }
+
+    #[test]
+    fn tall_graph_menus_stay_below_the_title_bar_and_scroll_to_the_last_action() {
+        // The minimum window at 120%, and a 1600 x 960 window at 200%.
+        let screens = [Vec2::new(682.0 / 1.2, 404.0 / 1.2), Vec2::new(800.0, 480.0)];
+        for screen in screens {
+            for node_menu in [false, true] {
+                let context = egui::Context::default();
+                theme::apply(&context);
+                let mut editor = Editor::new(crate::document::Document::new());
+                let node = editor.document.add_node("Combine", [0.0, 0.0]).unwrap();
+                editor.select(Some(node));
+                let at = Pos2::new(screen.x / 2.0, screen.y / 2.0);
+                let mut graph = GraphState::default();
+                if !node_menu {
+                    graph.popup = Some(GraphPopup::Lazy { at });
+                }
+                let mut draw_frame = |events: Vec<egui::Event>| {
+                    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)), events, ..Default::default() };
+                    let mut commands = Vec::new();
+                    let output = context.run_ui(input, |ui| {
+                        crate::ui::menu_keys::begin(ui.ctx());
+                        if node_menu {
+                            let body = Rect::from_min_max(Pos2::new(0.0, crate::ui::title_bar::HEIGHT), screen.to_pos2());
+                            let response = ui.interact(body, Id::new("node-menu-test"), Sense::click());
+                            crate::ui::widgets::context_menu(&response, |ui| {
+                                crate::ui::graph_canvas::node_context_menu(ui, &editor, &mut commands);
+                            });
+                        } else {
+                            show(ui, &mut editor, &mut graph, &mut commands);
+                        }
+                    });
+                    output.drop_without_applying_deltas();
+                    commands
+                };
+                draw_frame(vec![egui::Event::PointerMoved(at)]);
+                if node_menu {
+                    for pressed in [true, false] {
+                        let click = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE };
+                        assert!(draw_frame(vec![click]).is_empty());
+                    }
+                }
+                for _ in 0..3 {
+                    assert!(draw_frame(Vec::new()).is_empty());
+                }
+                let popup_id = if node_menu { Id::new("node-menu-test").with("popup") } else { Id::new(("graph-popup", "lazy")) };
+                let menu = context.memory(|memory| memory.area_rect(popup_id)).expect("the menu opened");
+                assert!(menu.top() >= crate::ui::title_bar::HEIGHT - 0.5, "node: {node_menu}, screen: {screen:?}, menu: {menu:?}");
+                assert!(menu.bottom() <= screen.y + 0.5, "node: {node_menu}, screen: {screen:?}, menu: {menu:?}");
+                draw_frame(vec![egui::Event::PointerMoved(menu.center())]);
+                let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -10_000.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE };
+                assert!(draw_frame(vec![wheel]).is_empty());
+                for _ in 0..60 {
+                    draw_frame(Vec::new());
+                }
+                let last_row = Pos2::new(menu.left() + 40.0, menu.bottom() - 10.0);
+                draw_frame(vec![egui::Event::PointerMoved(last_row)]);
+                let mut commands = Vec::new();
+                for pressed in [true, false] {
+                    let click = egui::Event::PointerButton { pos: last_row, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+                    commands.extend(draw_frame(vec![click]));
+                }
+                let expected = if node_menu { Command::ShowLocked2DViewport } else { Command::Graph(GraphCommand::LazyAction("toggle-skybox")) };
+                assert_eq!(commands, [expected], "node: {node_menu}, screen: {screen:?}");
+                if node_menu {
+                    assert!(!Popup::is_id_open(&context, popup_id));
+                } else {
+                    assert!(graph.popup.is_none());
+                }
+            }
+        }
     }
 
     #[test]

@@ -805,7 +805,7 @@ fn view_contents(ui: &mut Ui, rect: Rect, id: Id, view: &mut View2D, resolution:
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         painter.image(texture.id(), image, uv, Color32::WHITE);
     }
-    response.context_menu(|ui| contents(ui, menu));
+    crate::ui::widgets::context_menu(&response, |ui| contents(ui, menu));
 
     // `Toolbar` at the top right: the menu button (`tglToolbar`) and Mask
     // Enhancement.
