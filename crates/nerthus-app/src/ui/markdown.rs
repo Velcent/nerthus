@@ -88,7 +88,8 @@ pub struct View<'a> {
 pub fn parse(text: &str) -> Document {
     let parser = Parser::new_ext(text, crate::docs::markdown_options());
     let mut events = parser.peekable();
-    let blocks = parse_blocks(&mut events, None);
+    let mut anchors = crate::docs::HeadingAnchors::default();
+    let blocks = parse_blocks(&mut events, None, &mut anchors);
     Document { blocks }
 }
 
@@ -175,7 +176,7 @@ fn is_inline(event: &Event) -> bool {
 }
 
 /// Blocks until `end` (or the text's end).
-fn parse_blocks(events: &mut Events, end: Option<TagEnd>) -> Vec<Block> {
+fn parse_blocks(events: &mut Events, end: Option<TagEnd>, anchors: &mut crate::docs::HeadingAnchors) -> Vec<Block> {
     let mut blocks = Vec::new();
     while let Some(event) = events.peek() {
         // A tight list's items hold their text without paragraphs.
@@ -197,14 +198,15 @@ fn parse_blocks(events: &mut Events, end: Option<TagEnd>) -> Vec<Block> {
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 let spans = parse_inlines(events, Some(TagEnd::Heading(level)));
-                let anchor = crate::docs::slug(&plain(&spans));
+                let heading = plain(&spans);
+                let anchor = anchors.next(&heading);
                 blocks.push(Block::Heading { level: heading_number(level), anchor, spans });
             }
             Event::Start(Tag::List(start)) => {
                 let mut items = Vec::new();
                 while let Some(event) = events.next() {
                     match event {
-                        Event::Start(Tag::Item) => items.push(parse_blocks(events, Some(TagEnd::Item))),
+                        Event::Start(Tag::Item) => items.push(parse_blocks(events, Some(TagEnd::Item), anchors)),
                         Event::End(TagEnd::List(_)) => break,
                         _ => {}
                     }
@@ -212,7 +214,7 @@ fn parse_blocks(events: &mut Events, end: Option<TagEnd>) -> Vec<Block> {
                 blocks.push(Block::List { start, items });
             }
             Event::Start(Tag::BlockQuote(alert)) => {
-                let inner = parse_blocks(events, Some(TagEnd::BlockQuote(alert)));
+                let inner = parse_blocks(events, Some(TagEnd::BlockQuote(alert)), anchors);
                 blocks.push(Block::Quote { alert, blocks: inner });
             }
             Event::Start(Tag::CodeBlock(_)) => {
@@ -398,7 +400,7 @@ fn heading(ui: &mut Ui, level: usize, anchor: &str, spans: &[Span], context: &mu
     let style = TextStyle { size, color, bold };
     let rect = paragraph(ui, spans, style, context);
     ui.add_space(below);
-    if context.view.scroll_to == Some(anchor) {
+    if !context.drawn.scrolled && context.view.scroll_to == Some(anchor) {
         ui.scroll_to_rect(rect.expand(above), Some(Align::TOP));
         context.drawn.scrolled = true;
     }
@@ -866,6 +868,47 @@ mod tests {
         };
         assert_eq!(anchor, "menus-and-fast-access");
         assert!(matches!(document.blocks[1], Block::Quote { alert: Some(BlockQuoteKind::Warning), .. }));
+    }
+
+    #[test]
+    fn heading_anchors_are_unique_across_nested_blocks() {
+        let markdown = "# Repeat\n\n> ## Repeat\n\n- ### Repeat\n\n## Repeat-1\n\n## Repeat";
+        let document = parse(markdown);
+        assert!(matches!(&document.blocks[0], Block::Heading { anchor, .. } if anchor == "repeat"));
+        let Block::Quote { blocks, .. } = &document.blocks[1] else {
+            panic!("not a quote: {:?}", document.blocks[1]);
+        };
+        assert!(matches!(&blocks[0], Block::Heading { anchor, .. } if anchor == "repeat-1"));
+        let Block::List { items, .. } = &document.blocks[2] else {
+            panic!("not a list: {:?}", document.blocks[2]);
+        };
+        assert!(matches!(&items[0][0], Block::Heading { anchor, .. } if anchor == "repeat-2"));
+        assert!(matches!(&document.blocks[3], Block::Heading { anchor, .. } if anchor == "repeat-1-1"));
+        assert!(matches!(&document.blocks[4], Block::Heading { anchor, .. } if anchor == "repeat-3"));
+    }
+
+    #[test]
+    fn repeated_heading_links_scroll_to_each_occurrence() {
+        let filler = "Filler paragraph.\n\n".repeat(20);
+        let markdown = format!("# Repeated\n\n{filler}## Repeated\n\n{filler}");
+        let document = parse(&markdown);
+        let mut offsets = Vec::new();
+
+        for anchor in ["repeated", "repeated-1"] {
+            with_ui(|ui| {
+                let mut scroll = egui::ScrollArea::vertical();
+                scroll = scroll.animated(false);
+                scroll = scroll.max_height(120.0);
+                scroll = scroll.auto_shrink([false, false]);
+                let view = View { scroll_to: Some(anchor) };
+                let shown = scroll.show(ui, |ui| draw(ui, &document, view));
+                assert!(shown.inner.scrolled, "#{anchor} was not found");
+                offsets.push(shown.state.offset.y);
+            });
+        }
+
+        assert!(offsets[0] < 1.0, "the first heading scrolled to {}", offsets[0]);
+        assert!(offsets[1] > offsets[0] + 200.0, "the later heading did not scroll farther: {offsets:?}");
     }
 
     #[test]

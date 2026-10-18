@@ -6,7 +6,7 @@
 //! (`ui::docs_window`); a crash while Nerthus starts writes them out as
 //! HTML for the browser instead (`open_in_browser`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -383,6 +383,26 @@ pub fn slug(heading: &str) -> String {
     slug
 }
 
+/// Assigns unique heading anchors in page order, including headings
+/// whose text already ends in a suffix used by an earlier duplicate.
+#[derive(Default)]
+pub struct HeadingAnchors {
+    used: HashSet<String>,
+}
+
+impl HeadingAnchors {
+    pub fn next(&mut self, heading: &str) -> String {
+        let base = slug(heading);
+        let mut anchor = base.clone();
+        let mut suffix = 0;
+        while !self.used.insert(anchor.clone()) {
+            suffix += 1;
+            anchor = format!("{base}-{suffix}");
+        }
+        anchor
+    }
+}
+
 /// Shows the page in the browser: the documentation is written out as
 /// HTML to a folder of its own in the temporary folder (once a session)
 /// and the page opened there.
@@ -448,6 +468,7 @@ fn write_html(folder: &Path) -> std::io::Result<()> {
 /// The page's Markdown as HTML.
 fn page_html(markdown: &str) -> String {
     let mut events: Vec<Event> = Parser::new_ext(markdown, markdown_options()).collect();
+    let mut anchors = HeadingAnchors::default();
     // Headings carry their anchors; links to pages go to their HTML.
     let mut index = 0;
     while index < events.len() {
@@ -461,7 +482,7 @@ fn page_html(markdown: &str) -> String {
                     _ => {}
                 }
             }
-            let id = CowStr::from(slug(&text));
+            let id = CowStr::from(anchors.next(&text));
             events[index] = Event::Start(Tag::Heading { level, id: Some(id), classes: Vec::new(), attrs: Vec::new() });
         }
         if let Event::Start(Tag::Link { link_type, dest_url, title, id }) = &events[index] {
@@ -521,7 +542,8 @@ mod tests {
                     let text = library().page(&path).unwrap();
                     if let Some(anchor) = anchor {
                         let (_, headings) = plain_text(text);
-                        let found = headings.lines().any(|heading| slug(heading) == anchor);
+                        let mut anchors = HeadingAnchors::default();
+                        let found = headings.lines().any(|heading| anchors.next(heading) == anchor);
                         assert!(found, "{path} has no heading #{anchor}");
                     }
                 }
@@ -541,7 +563,8 @@ mod tests {
                 match resolve(path, &dest_url) {
                     Target::Page { path: target, anchor: Some(anchor) } => {
                         let (_, headings) = plain_text(library().page(&target).unwrap());
-                        if !headings.lines().any(|heading| slug(heading) == anchor) {
+                        let mut anchors = HeadingAnchors::default();
+                        if !headings.lines().any(|heading| anchors.next(heading) == anchor) {
                             broken.push(format!("{path}: {dest_url} (no heading #{anchor})"));
                         }
                     }
@@ -566,6 +589,37 @@ mod tests {
         assert_eq!(slug("Menus and Fast Access"), "menus-and-fast-access");
         assert_eq!(slug("2D Viewport (Docked)"), "2d-viewport-docked");
         assert_eq!(slug("Build_Tokens & More"), "build_tokens--more");
+    }
+
+    #[test]
+    fn heading_anchors_skip_used_suffixes() {
+        let mut anchors = HeadingAnchors::default();
+        assert_eq!(anchors.next("Repeated!"), "repeated");
+        assert_eq!(anchors.next("REPEATED"), "repeated-1");
+        assert_eq!(anchors.next("Repeated-1"), "repeated-1-1");
+        assert_eq!(anchors.next("Repeated-3"), "repeated-3");
+        assert_eq!(anchors.next("Repeated"), "repeated-2");
+        assert_eq!(anchors.next("Repeated"), "repeated-4");
+
+        let mut another_page = HeadingAnchors::default();
+        assert_eq!(another_page.next("Repeated"), "repeated");
+    }
+
+    #[test]
+    fn browser_pages_assign_unique_heading_ids_and_keep_anchor_links() {
+        let markdown = "# Repeat\n\n> ## Repeat\n\n- ### Repeat\n\n## Repeat-1\n\n## Repeat\n\n[Later](other.md#repeat-3)";
+        let html = page_html(markdown);
+        assert!(html.contains("<h1 id=\"repeat\">Repeat</h1>"));
+        assert!(html.contains("<h2 id=\"repeat-1\">Repeat</h2>"));
+        assert!(html.contains("<h3 id=\"repeat-2\">Repeat</h3>"));
+        assert!(html.contains("<h2 id=\"repeat-1-1\">Repeat-1</h2>"));
+        assert!(html.contains("<h2 id=\"repeat-3\">Repeat</h2>"));
+        assert!(html.contains("href=\"other.html#repeat-3\""));
+
+        let erosion = library().page("reference/nodes/simulate/erosion.md").unwrap();
+        let erosion_html = page_html(erosion);
+        assert!(erosion_html.contains("<h2 id=\"selective-processing\">Selective Processing</h2>"));
+        assert!(erosion_html.contains("<h3 id=\"selective-processing-1\">Selective Processing</h3>"));
     }
 
     #[test]

@@ -32,6 +32,8 @@ struct Place {
 
 /// The window while it is open.
 pub struct DocsWindow {
+    /// An external help command asks for the window above the other tools.
+    raise: bool,
     place: Place,
     document: Document,
     /// The heading still to be scrolled to.
@@ -53,6 +55,7 @@ impl DocsWindow {
     pub fn open(target: &str) -> DocsWindow {
         let place = place_of(target);
         let mut window = DocsWindow {
+            raise: true,
             place: place.clone(),
             document: Document::default(),
             scroll_to: None,
@@ -72,6 +75,11 @@ impl DocsWindow {
     pub fn go(&mut self, target: &str) {
         let place = place_of(target);
         self.visit(place);
+    }
+
+    /// Brings the window forward the next time it is shown.
+    pub fn request_raise(&mut self) {
+        self.raise = true;
     }
 
     /// The search box holding `query`, its results listed.
@@ -182,8 +190,12 @@ pub fn show(ctx: &egui::Context, docs: &mut DocsWindow) -> bool {
         });
         egui::CentralPanel::default().show(ui, |ui| page(ui, docs));
     });
-    // The mouse's back and forward buttons, over the window.
     if let Some(shown) = shown {
+        if docs.raise {
+            ctx.move_to_top(shown.response.layer_id);
+            docs.raise = false;
+        }
+        // The mouse's back and forward buttons, over the window.
         let (back, forward) = ctx.input(|input| (input.pointer.button_pressed(PointerButton::Extra1), input.pointer.button_pressed(PointerButton::Extra2)));
         if shown.response.contains_pointer() {
             if back {

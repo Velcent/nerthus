@@ -173,7 +173,10 @@ fn update_download(editor: &mut Editor, ui_state: &mut UiState) {
 /// The documentation at `target`, in its window (opened if need be).
 fn open_docs(ui_state: &mut UiState, target: &str) {
     match ui_state.docs.as_mut() {
-        Some(window) => window.go(target),
+        Some(window) => {
+            window.go(target);
+            window.request_raise();
+        }
         None => ui_state.docs = Some(DocsWindow::open(target)),
     }
 }
@@ -448,6 +451,40 @@ mod tests {
     /// Which of the documentation, Diagnostics and Export Macro are open.
     fn open(editor: &Editor, ui_state: &UiState) -> Vec<bool> {
         vec![ui_state.docs.is_some(), ui_state.diagnostics.is_some(), editor.files.export_macro.is_some()]
+    }
+
+    #[test]
+    fn documentation_commands_raise_an_existing_window_once() {
+        let (context, mut editor, mut ui_state) = shell();
+        let node = editor.document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        editor.selection.push(node);
+        open_docs(&mut ui_state, crate::docs::HOME);
+        settle(&context, &mut editor, &mut ui_state);
+        ui_state.diagnostics = Some(DiagnosticsWindow::open());
+        settle(&context, &mut editor, &mut ui_state);
+        let diagnostics_id = diagnostics_window::window_id();
+        let diagnostics_layer = egui::LayerId::new(egui::Order::Middle, diagnostics_id);
+        let commands = [
+            ToolCommand::ShowDocs(crate::docs::HOME.to_string()),
+            ToolCommand::ShowDocs(crate::docs::NODE_REFERENCE.to_string()),
+            ToolCommand::ShowNodeHelp,
+        ];
+
+        for command in commands {
+            assert_eq!(tool_window::on_top(&context), Some(diagnostics_id));
+            run(command, &mut editor, &mut ui_state);
+            settle(&context, &mut editor, &mut ui_state);
+            assert_eq!(tool_window::on_top(&context), Some(docs_window::window_id()));
+
+            context.move_to_top(diagnostics_layer);
+            settle(&context, &mut editor, &mut ui_state);
+            assert_eq!(tool_window::on_top(&context), Some(diagnostics_id));
+        }
+
+        // Page navigation within the documentation does not raise it again.
+        ui_state.docs.as_mut().unwrap().go(crate::docs::HOME);
+        settle(&context, &mut editor, &mut ui_state);
+        assert_eq!(tool_window::on_top(&context), Some(diagnostics_id));
     }
 
     #[test]

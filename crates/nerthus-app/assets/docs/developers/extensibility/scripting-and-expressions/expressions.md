@@ -21,7 +21,7 @@ If your Slider is bound to a Variable, then `x` represents the variable. This is
 
 For example, you have Mountain node with the `Height` property bound to a variable and then a FractalTerrace whose `Spacing` property is also bound to the same variable.
 
-You want the Height of the FractalTerrace to be proportionally linked to the Height of the Mountain. So, you would enter the expression: <mark style="color:yellow;">`x * 0.3`&lt;/mark&gt; so the FractalTerrace spacing is always 30% of the Mountain's height. This means no matter what the height, the FractalTerrace spacing remains consistently placed at the same location.
+You want the Height of the FractalTerrace to be proportionally linked to the Height of the Mountain. So, you would enter the expression: `x * 0.3` so the FractalTerrace spacing is always 30% of the Mountain's height. This means no matter what the height, the FractalTerrace spacing remains consistently placed at the same location.
 
 ## Additional Functions and Strategies
 
