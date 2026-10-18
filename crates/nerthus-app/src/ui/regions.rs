@@ -82,7 +82,9 @@ struct Move {
     corner: Option<Vec2>,
 }
 
-/// A corner thumb being dragged (`ResizeThumb_DragStarted`).
+/// A corner thumb being dragged (`ResizeThumb_DragStarted`); `changed`
+/// says a drag delta has moved it (a plain click on the thumb does not
+/// end one, `ResizeThumb_DragCompleted`).
 #[derive(Clone, Debug)]
 struct Resize {
     region: String,
@@ -90,6 +92,7 @@ struct Resize {
     left: f32,
     top: f32,
     side: f32,
+    changed: bool,
 }
 
 /// A region being renamed (`EditablePopup`): the text so far, and whether
@@ -299,6 +302,17 @@ fn canvas(ui: &mut Ui, editor: &mut Editor, state: &mut RegionsState, commands: 
     let mut regions = editor.document.regions();
     let pointer = response.interact_pointer_pos().or_else(|| ui.ctx().pointer_hover_pos());
 
+    // `Canvas_MouseDown`: choose the region as soon as the button goes
+    // down, before egui decides whether this is a click or a drag.
+    let primary_pressed = ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary));
+    let pressed_on_canvas = response.is_pointer_button_down_on() || response.clicked_by(egui::PointerButton::Primary);
+    if primary_pressed && pressed_on_canvas {
+        let origin = ui.input(|input| input.pointer.press_origin()).or(pointer);
+        if let Some(point) = origin {
+            press(ui, state, canvas, point, &regions);
+        }
+    }
+
     // A move in progress follows the mouse; a resize changes the region
     // as it goes (`ResizeThumb_DragDelta`).
     if response.dragged()
@@ -311,7 +325,8 @@ fn canvas(ui: &mut Ui, editor: &mut Editor, state: &mut RegionsState, commands: 
             regions = editor.document.regions();
         }
     }
-    if response.drag_stopped() {
+    let primary_released = ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary));
+    if primary_released || response.drag_stopped() {
         finish_drag(editor, state, canvas);
         regions = editor.document.regions();
     }
@@ -327,22 +342,6 @@ fn canvas(ui: &mut Ui, editor: &mut Editor, state: &mut RegionsState, commands: 
         let focused = state.focused.as_deref() == Some(region.name.as_str());
         let previewed = editor.preview_region.as_deref() == Some(region.name.as_str());
         draw_region(&painter, region, rect, focused, previewed);
-    }
-
-    // Presses: a corner thumb resizes, a region moves; Shift chooses among
-    // regions on top of each other, Alt takes the one below the top.
-    // egui reports a drag once the mouse has moved; the press counts where
-    // the button went down.
-    if response.drag_started_by(egui::PointerButton::Primary) {
-        let origin = ui.input(|input| input.pointer.press_origin()).or(pointer);
-        if let Some(point) = origin {
-            press(ui, state, canvas, point, &regions);
-        }
-    }
-    if response.clicked()
-        && let Some(point) = pointer
-    {
-        state.focused = topmost(&regions, canvas, point).map(|region| region.name.clone());
     }
 
     hover_cursor(ui, state, canvas, pointer, &regions);
@@ -459,7 +458,7 @@ fn press(ui: &Ui, state: &mut RegionsState, canvas: Rect, point: Pos2, regions: 
         let rect = region_rect(region, canvas);
         let left = rect.left() - canvas.left();
         let top = rect.top() - canvas.top();
-        state.resizing = Some(Resize { region: name.clone(), corner, left, top, side: rect.width() });
+        state.resizing = Some(Resize { region: name.clone(), corner, left, top, side: rect.width(), changed: false });
         state.focused = Some(name);
         return;
     }
@@ -533,42 +532,45 @@ fn drag_moving(state: &mut RegionsState, canvas: Rect, point: Pos2, snap_unit: f
     moving.corner = Some(corner);
 }
 
-/// `ResizeThumb_DragDelta`: the region stays square, at least 32 pixels,
-/// grown from the corner opposite the thumb and kept on the canvas; its
-/// place and width change as it goes. Returns the region changed.
-fn drag_resizing(state: &RegionsState, canvas: Rect, point: Pos2, snap_unit: f32, regions: &[Region]) -> Option<Region> {
-    let resizing = state.resizing.as_ref()?;
+/// `ResizeThumb_DragDelta`: the region stays square, grown from the
+/// corner opposite the thumb and kept on the canvas. The minimum is 32
+/// pixels (whole grid cells when snapped), limited by the available room.
+/// Its place and width change as it goes. Returns the region changed.
+fn drag_resizing(state: &mut RegionsState, canvas: Rect, point: Pos2, snap_unit: f32, regions: &[Region]) -> Option<Region> {
+    let resizing = state.resizing.as_mut()?;
     let region = regions.iter().find(|region| region.name == resizing.region)?;
     let (x_direction, y_direction) = resizing.corner.direction();
     let anchor_x = if x_direction < 0.0 { resizing.left + resizing.side } else { resizing.left };
     let anchor_y = if y_direction < 0.0 { resizing.top + resizing.side } else { resizing.top };
     let mouse = point - canvas.min;
     let reach = (mouse.x - anchor_x).abs().max((mouse.y - anchor_y).abs());
-    let mut side = reach.max(SMALLEST_SIDE);
-    let mut left = if x_direction < 0.0 { anchor_x - side } else { anchor_x };
-    let mut top = if y_direction < 0.0 { anchor_y - side } else { anchor_y };
-    if left < 0.0 {
-        left = 0.0;
-        side = anchor_x;
-    }
-    if top < 0.0 {
-        top = 0.0;
-        side = side.min(anchor_y);
-    }
     let bound = canvas.width();
-    if left + side > bound {
-        side = bound - left;
+    let available_x = if x_direction < 0.0 { anchor_x } else { bound - anchor_x };
+    let available_y = if y_direction < 0.0 { anchor_y } else { bound - anchor_y };
+    let largest_side = available_x.min(available_y);
+    if bound <= 0.0 || largest_side <= 0.0 {
+        return None;
     }
-    if top + side > bound {
-        side = bound - top;
-    }
-    side = side.max(SMALLEST_SIDE);
+    let mut side = reach.max(SMALLEST_SIDE).min(largest_side);
     if state.snap && snap_unit > 0.0 {
-        side = (side / snap_unit).trunc() * snap_unit;
+        let largest_snapped_side = (largest_side / snap_unit).trunc() * snap_unit;
+        if largest_snapped_side > 0.0 {
+            // The side rounds to the nearest whole cell (a side 1.9 cells
+            // long stays 2), so a side under one cell never truncates to 0.
+            let smallest_snapped_side = (SMALLEST_SIDE / snap_unit).ceil().max(1.0) * snap_unit;
+            let snapped_side = (side / snap_unit).round() * snap_unit;
+            side = snapped_side.max(smallest_snapped_side).min(largest_snapped_side);
+        }
     }
+    // Derive the dragged corner only after snapping and bounds have
+    // settled the side, so the opposite corner remains the anchor.
+    let left = if x_direction < 0.0 { anchor_x - side } else { anchor_x };
+    let top = if y_direction < 0.0 { anchor_y - side } else { anchor_y };
     let mut changed = region.clone();
-    changed.position = [truncate_to_five_places(left / bound), round_to_five_places(top / bound)];
     changed.width = side / bound;
+    let last = last_region_position(changed.width);
+    changed.position = [truncate_to_five_places(left / bound).clamp(0.0, last), round_to_five_places(top / bound).clamp(0.0, last)];
+    resizing.changed = true;
     Some(changed)
 }
 
@@ -577,7 +579,9 @@ fn drag_resizing(state: &RegionsState, canvas: Rect, point: Pos2, snap_unit: f32
 /// `ResizeThumb_DragCompleted`; either way a previewed region is cut again
 /// (`RegionUpdated`).
 fn finish_drag(editor: &mut Editor, state: &mut RegionsState, canvas: Rect) {
-    if let Some(resizing) = state.resizing.take() {
+    if let Some(resizing) = state.resizing.take()
+        && resizing.changed
+    {
         editor.region_changed(&resizing.region);
     }
     let Some(moving) = state.moving.take() else {
@@ -731,6 +735,11 @@ fn rename_popup(ui: &Ui, editor: &mut Editor, state: &mut RegionsState, canvas: 
     let Some(rename) = state.renaming.as_mut() else {
         return;
     };
+    // A duplicate-name message keeps the retry until its modal is closed.
+    if ui.memory(|memory| memory.top_modal_layer().is_some()) {
+        rename.focused = false;
+        return;
+    }
     let Some(region) = editor.document.regions().into_iter().find(|region| region.name == rename.region) else {
         state.renaming = None;
         return;
@@ -739,20 +748,27 @@ fn rename_popup(ui: &Ui, editor: &mut Editor, state: &mut RegionsState, canvas: 
     let mut area = egui::Area::new(Id::new("region-rename"));
     area = area.fixed_pos(rect.min + Vec2::new(1.0, 24.0));
     area = area.order(egui::Order::Foreground);
-    let mut outcome: Option<bool> = None;
     let shown = area.show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             let mut field = egui::TextEdit::singleline(&mut rename.text);
             field = field.font(theme::monospace(16.0));
             field = field.desired_width(160.0);
-            let response = ui.add(field);
-            if !rename.focused {
-                response.request_focus();
-                rename.focused = true;
-            }
-            outcome = crate::ui::widgets::popup_outcome(ui, &response);
-        });
+            ui.add(field)
+        }).inner
     });
+    let response = shown.inner;
+    if !rename.focused {
+        response.request_focus();
+        let length = rename.text.chars().count();
+        let mut text_state = egui::TextEdit::load_state(ui.ctx(), response.id).unwrap_or_default();
+        let selection = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(length));
+        text_state.cursor.set_char_range(Some(selection));
+        text_state.store(ui.ctx(), response.id);
+        rename.focused = true;
+        // Opening the box (or retrying) must not accept its initiating click.
+        return;
+    }
+    let mut outcome = crate::ui::widgets::popup_outcome(ui, &response);
     // A click elsewhere closes it as leaving the box does.
     if outcome.is_none() && shown.response.clicked_elsewhere() {
         outcome = Some(theme::settings(ui.ctx()).accept_on_lost_focus);
@@ -877,3 +893,131 @@ pub fn preview_tooltip(editor: &Editor) -> String {
 pub fn menus_visible(editor: &Editor) -> bool {
     !editor.document.regions().is_empty()
 }
+
+#[cfg(test)]
+#[path = "regions-rename-tests.rs"]
+mod rename_tests;
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    const CANVAS_SIDE: f32 = 512.0;
+
+    fn resize(region: &Region, corner: Corner, mouse: Vec2, snap_unit: Option<f32>) -> Region {
+        let canvas = Rect::from_min_size(Pos2::new(17.0, 23.0), Vec2::splat(CANVAS_SIDE));
+        let resizing = Resize {
+            region: region.name.clone(),
+            corner,
+            left: region.position[0] * CANVAS_SIDE,
+            top: region.position[1] * CANVAS_SIDE,
+            side: region.width * CANVAS_SIDE,
+            changed: false,
+        };
+        let mut state = RegionsState { resizing: Some(resizing), snap: snap_unit.is_some(), ..RegionsState::default() };
+        let regions = [region.clone()];
+        let point = canvas.min + mouse;
+        drag_resizing(&mut state, canvas, point, snap_unit.unwrap_or(0.0), &regions).expect("the region can be resized")
+    }
+
+    fn opposite_corner(region: &Region, corner: Corner) -> Vec2 {
+        let (x_direction, y_direction) = corner.direction();
+        let left = region.position[0] * CANVAS_SIDE;
+        let top = region.position[1] * CANVAS_SIDE;
+        let side = region.width * CANVAS_SIDE;
+        let x = if x_direction < 0.0 { left + side } else { left };
+        let y = if y_direction < 0.0 { top + side } else { top };
+        Vec2::new(x, y)
+    }
+
+    #[test]
+    fn snapped_shrink_keeps_a_positive_minimum_and_the_opposite_corner() {
+        let mut region = Region::new("Resize");
+        region.position = [0.25, 0.375];
+        region.width = 0.25;
+        for corner in Corner::ALL {
+            let anchor = opposite_corner(&region, corner);
+            for (snap_unit, expected_side) in [(64.0, 64.0), (16.0, 32.0), (12.0, 36.0)] {
+                let changed = resize(&region, corner, anchor, Some(snap_unit));
+                assert_eq!(changed.width * CANVAS_SIDE, expected_side, "{corner:?}, {snap_unit}");
+                let final_anchor = opposite_corner(&changed, corner);
+                assert!((final_anchor - anchor).length() < 0.01, "{corner:?}, {snap_unit}: {final_anchor:?} moved from {anchor:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn snapped_growth_keeps_every_corner_anchored_and_inside_the_canvas() {
+        let mut region = Region::new("Resize");
+        region.position = [0.25, 0.375];
+        region.width = 0.25;
+        for corner in Corner::ALL {
+            let anchor = opposite_corner(&region, corner);
+            let (x_direction, y_direction) = corner.direction();
+            let mouse = anchor + Vec2::new(x_direction * 1000.0, y_direction * 1000.0);
+            let changed = resize(&region, corner, mouse, Some(60.0));
+            assert_eq!((changed.width * CANVAS_SIDE) % 60.0, 0.0, "{corner:?}");
+            for position in changed.position {
+                assert!(position >= 0.0 && position + changed.width <= 1.0, "{corner:?}: {changed:?}");
+            }
+            let final_anchor = opposite_corner(&changed, corner);
+            assert!((final_anchor - anchor).length() < 0.01, "{corner:?}: {final_anchor:?} moved from {anchor:?}");
+        }
+    }
+
+    #[test]
+    fn unsnapped_resize_limits_both_axes_before_placing_the_dragged_corner() {
+        let mut region = Region::new("Resize");
+        region.position = [0.25, 0.375];
+        region.width = 0.25;
+        let anchor = opposite_corner(&region, Corner::TopLeft);
+        let changed = resize(&region, Corner::TopLeft, Vec2::splat(-1000.0), None);
+        assert_eq!(changed.position, [0.0, 0.125]);
+        assert_eq!(changed.width, 0.5);
+        assert_eq!(opposite_corner(&changed, Corner::TopLeft), anchor);
+    }
+
+    #[test]
+    fn small_anchored_regions_stay_positive_and_in_bounds_when_a_grid_cell_cannot_fit() {
+        let mut region = Region::new("Resize");
+        region.width = 16.0 / CANVAS_SIDE;
+        let anchor = opposite_corner(&region, Corner::TopLeft);
+        for snap_unit in [None, Some(64.0)] {
+            let changed = resize(&region, Corner::TopLeft, Vec2::splat(-1000.0), snap_unit);
+            assert_eq!(changed.position, [0.0, 0.0]);
+            assert_eq!(changed.width, region.width);
+            assert_eq!(opposite_corner(&changed, Corner::TopLeft), anchor);
+        }
+    }
+
+    #[test]
+    fn rounded_resize_position_keeps_the_region_within_the_terrain() {
+        let mut region = Region::new("Resize");
+        region.position = [0.0, 0.123457];
+        region.width = 0.25;
+        let changed = resize(&region, Corner::BottomRight, Vec2::splat(1000.0), None);
+        assert!(changed.width > 0.0);
+        for position in changed.position {
+            assert!(position >= 0.0 && position + changed.width <= 1.0, "{changed:?}");
+        }
+    }
+
+    #[test]
+    fn snapped_sides_round_to_the_nearest_cell_and_never_below_one() {
+        let mut region = Region::new("Resize");
+        region.position = [0.0, 0.0];
+        region.width = 0.5;
+        // A side 1.9 cells across rounds up to 2 cells.
+        let changed = resize(&region, Corner::BottomRight, Vec2::splat(190.0), Some(100.0));
+        assert_eq!(changed.width * CANVAS_SIDE, 200.0);
+        assert_eq!(changed.position, [0.0, 0.0]);
+        // 0.6 cells stops at one cell instead of truncating to 0.
+        let changed = resize(&region, Corner::BottomRight, Vec2::splat(60.0), Some(100.0));
+        assert_eq!(changed.width * CANVAS_SIDE, 100.0);
+        assert_eq!(changed.position, [0.0, 0.0]);
+    }
+}
+
+#[cfg(test)]
+#[path = "regions-selection-tests.rs"]
+mod selection_tests;
