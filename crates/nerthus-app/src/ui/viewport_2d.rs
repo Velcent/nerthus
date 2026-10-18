@@ -146,6 +146,12 @@ pub struct Viewport2DState {
     /// Where the docked view was last drawn (the Lazy Menu moves the
     /// pointer there).
     docked_rect: Option<Rect>,
+    /// A cancel key belongs to the view that had the keyboard when it
+    /// went down, even if a field or popup releases focus before key-up.
+    docked_escape_held: bool,
+    docked_cancel_requested: bool,
+    docked_focused: bool,
+    docked_keyboard_claimed: bool,
     floating: Vec<FloatingView>,
     following: Option<FollowingView>,
     picked: Option<Picked>,
@@ -176,6 +182,49 @@ impl Viewport2DState {
             self.docked_view.picking = false;
             self.docked_view.measuring = false;
             self.docked_rect = None;
+            self.docked_escape_held = false;
+            self.docked_cancel_requested = false;
+            self.docked_focused = false;
+        }
+    }
+
+    /// After the shell routes menu and window keys, capture
+    /// `Viewport2D_KeyUp`'s owner before drawing text fields. egui clears
+    /// text focus on Escape before drawing, so its previous owner counts.
+    pub fn begin_keyboard(&mut self, ctx: &egui::Context, blocked: bool) {
+        self.docked_cancel_requested = false;
+        let window_focused = ctx.input(|input| input.focused);
+        if !self.docked || blocked || !window_focused || ctx.any_popup_open() {
+            self.docked_escape_held = false;
+            return;
+        }
+
+        let keyboard_claimed = self.docked_keyboard_claimed || ctx.egui_wants_keyboard_input();
+        let owns_key = self.docked_focused && !keyboard_claimed;
+        ctx.input(|input| {
+            for event in &input.events {
+                let egui::Event::Key { key: egui::Key::Escape, pressed, repeat, .. } = event else {
+                    continue;
+                };
+                if *pressed {
+                    if !repeat {
+                        self.docked_escape_held = owns_key;
+                    }
+                } else {
+                    self.docked_cancel_requested = self.docked_escape_held && owns_key;
+                    self.docked_escape_held = false;
+                }
+            }
+        });
+    }
+
+    /// Remember text and widget focus after every panel is drawn, before
+    /// egui can surrender it for next frame's Escape.
+    pub fn finish_keyboard(&mut self, ctx: &egui::Context) {
+        self.docked_keyboard_claimed = ctx.egui_wants_keyboard_input();
+        if self.docked_keyboard_claimed {
+            self.docked_focused = false;
+            self.docked_escape_held = false;
         }
     }
 
@@ -196,6 +245,8 @@ impl Viewport2DState {
         view.picking = !view.picking;
         if view.picking {
             view.measuring = false;
+            // `StartPicking` focuses the main 2D viewport.
+            self.docked_focused = true;
         }
     }
 
@@ -331,6 +382,7 @@ impl Viewport2DState {
             "pick" => {
                 self.docked = true;
                 self.docked_view.picking = true;
+                self.docked_focused = true;
             }
             "measure" => {
                 self.docked = true;
@@ -394,24 +446,30 @@ fn show_docked(ui: &mut Ui, rect: Rect, editor: &Editor, state: &mut Viewport2DS
     let reference = if view.picking || view.measuring { pick_reference(editor) } else { None };
     let mut menu = ViewMenu::default();
     let resolution = colours.as_ref().map(|colours| colours.width).unwrap_or(1);
-    view_contents(ui, rect, id, view, resolution, &mut menu, |ui, menu| {
-        context_menu(ui, menu, &ports, &editor.preview_port, true, colours.is_some());
-    });
-    let painter = ui.painter_at(rect);
+    let response = view_contents(ui, rect, id, view, resolution);
+    let overlay_builder = egui::UiBuilder::new().id_salt(id.with("overlays")).max_rect(rect);
+    let mut overlay_ui = ui.new_child(overlay_builder);
+    // `ZoomBorder.ClipToBounds`: both painting and hit areas stay inside
+    // the view. A clipped handle can still finish a drag begun inside it.
+    overlay_ui.set_clip_rect(ui.clip_rect().intersect(rect));
+    let painter = overlay_ui.painter().clone();
     let image = image_rect(rect, view);
     if view.measuring {
-        measure_overlay(ui, &painter, rect, image, view, reference.as_deref(), editor);
+        measure_overlay(&mut overlay_ui, &painter, rect, image, view, reference.as_deref(), editor);
     }
     if view.picking {
-        if let Some(reference) = &reference {
-            pick_readout(ui, &painter, rect, image, reference, editor);
-        }
-        let response = ui.interact(image.intersect(rect), id.with("pick"), Sense::click());
-        if response.hovered() {
+        let toolbar = view_toolbar_rect(ui, rect);
+        let pointer = response.hover_pos();
+        let over_image = pointer.is_some_and(|pointer| image.contains(pointer) && !toolbar.contains(pointer));
+        if response.hovered() && over_image {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
         }
-        if response.clicked()
+        if response.hovered() && over_image && let Some(reference) = &reference {
+            pick_readout(ui, &painter, rect, image, reference, editor);
+        }
+        if response.clicked_by(egui::PointerButton::Primary)
             && let (Some(pointer), Some(reference)) = (response.interact_pointer_pos(), &reference)
+            && image.contains(pointer) && !toolbar.contains(pointer)
         {
             // `OnMouseLeftButtonUp` → `HeightPicked`, which stops picking.
             let position = (pointer - image.min) / image.size();
@@ -426,7 +484,7 @@ fn show_docked(ui: &mut Ui, rect: Rect, editor: &Editor, state: &mut Viewport2DS
         && let Some(node) = editor.document.node(gizmo.node())
     {
         let input = snow_input(editor, gizmo);
-        let edit = gizmo_layer(ui, image, rect, zoom, node, gizmo, input.as_deref());
+        let edit = gizmo_layer(&mut overlay_ui, image, rect, zoom, node, gizmo, input.as_deref());
         if let Some(edit) = edit {
             let changes = edit.values.iter().any(|(name, value)| node.values.get(name) != Some(value));
             if changes || edit.started || edit.finished {
@@ -434,9 +492,30 @@ fn show_docked(ui: &mut Ui, rect: Rect, editor: &Editor, state: &mut Viewport2DS
             }
         }
     }
-    // `Viewport2D_KeyUp` checks WPF Key 13 (Escape, rather than ASCII
-    // carriage return). Releasing it ends either measurement mode.
-    if ui.input(|input| input.key_released(egui::Key::Escape)) {
+    crate::ui::widgets::context_menu(&response, |ui| {
+        context_menu(ui, &mut menu, &ports, &editor.preview_port, true, colours.is_some());
+    });
+    // Gaea's toolbar is a sibling above the clipped zoom border, so it
+    // paints over the overlays and takes pointer input before them.
+    view_toolbar(ui, rect, id, &mut menu, |ui, menu| {
+        context_menu(ui, menu, &ports, &editor.preview_port, true, colours.is_some());
+    });
+    // Like the 3D view, keep logical keyboard focus without making egui
+    // claim the shell's shortcuts. Toolbar menus keep their own keys.
+    if ui.input(|input| input.pointer.any_pressed()) {
+        let toolbar = view_toolbar_rect(ui, rect);
+        let pointer = ui.input(|input| input.pointer.interact_pos());
+        state.docked_focused = pointer.is_some_and(|pointer| {
+            rect.contains(pointer) && !toolbar.contains(pointer) && ui.ctx().layer_id_at(pointer) == Some(ui.layer_id())
+        });
+        if !state.docked_focused {
+            state.docked_escape_held = false;
+            state.docked_cancel_requested = false;
+        }
+    }
+    // WPF Key 13 is Escape, rather than ASCII carriage return. Only a
+    // gesture begun with this view's keyboard focus ends either mode.
+    if std::mem::take(&mut state.docked_cancel_requested) {
         view.picking = false;
         view.measuring = false;
     }
@@ -449,6 +528,7 @@ fn show_docked(ui: &mut Ui, rect: Rect, editor: &Editor, state: &mut Viewport2DS
         if menu.pick {
             view.measuring = false;
             view.picking = !view.picking && node.is_some();
+            state.docked_focused = view.picking;
         }
         if menu.measure {
             view.picking = false;
@@ -534,7 +614,9 @@ fn window_view(ui: &mut Ui, id: Id, view: &mut View2D, colours: Option<&Arc<Terr
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     upload(ui.ctx(), view, colours, texture_name);
     let resolution = colours.map(|colours| colours.width).unwrap_or(1);
-    view_contents(ui, rect, id, view, resolution, menu, contents);
+    let response = view_contents(ui, rect, id, view, resolution);
+    crate::ui::widgets::context_menu(&response, |ui| contents(ui, menu));
+    view_toolbar(ui, rect, id, menu, contents);
 }
 
 /// The Map Viewer while it shows: the previewed node's outputs in its
@@ -756,9 +838,9 @@ fn upload(ctx: &egui::Context, view: &mut View2D, colours: Option<&Arc<TerrainCo
     view.texture = Some((key, texture));
 }
 
-/// The view itself: background, image, zooming and panning, the toolbar
-/// (its menu button and Mask Enhancement) and the right-click menu.
-fn view_contents(ui: &mut Ui, rect: Rect, id: Id, view: &mut View2D, resolution: usize, menu: &mut ViewMenu, contents: impl Fn(&mut Ui, &mut ViewMenu)) {
+/// The view's background, image, zooming and panning. Picking shares its
+/// response so secondary clicks can still open the view's context menu.
+fn view_contents(ui: &mut Ui, rect: Rect, id: Id, view: &mut View2D, resolution: usize) -> egui::Response {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, BACKGROUND);
     let response = ui.interact(rect, id, Sense::click_and_drag());
@@ -805,15 +887,29 @@ fn view_contents(ui: &mut Ui, rect: Rect, id: Id, view: &mut View2D, resolution:
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         painter.image(texture.id(), image, uv, Color32::WHITE);
     }
-    crate::ui::widgets::context_menu(&response, |ui| contents(ui, menu));
+    response
+}
 
-    // `Toolbar` at the top right: the menu button (`tglToolbar`) and Mask
-    // Enhancement.
+fn view_toolbar_rect(ui: &Ui, rect: Rect) -> Rect {
     let button = crate::ui::widgets::toolbar_button(ui);
-    let toolbar = Rect::from_min_size(Pos2::new(rect.right() - 4.0 - 40.0, rect.top() + 4.0), Vec2::new(40.0, 2.0 * button + 12.0));
-    crate::ui::widgets::toolbar_background(ui, toolbar, theme::MENU_BORDER, 1.5);
+    let position = Pos2::new(rect.right() - 4.0 - 40.0, rect.top() + 4.0);
+    Rect::from_min_size(position, Vec2::new(40.0, 2.0 * button + 12.0))
+}
+
+/// `Toolbar` at the top right, above all image overlays: the menu button
+/// (`tglToolbar`) and Mask Enhancement.
+fn view_toolbar(ui: &mut Ui, rect: Rect, id: Id, menu: &mut ViewMenu, contents: impl Fn(&mut Ui, &mut ViewMenu)) {
+    let toolbar = view_toolbar_rect(ui, rect);
+    let toolbar_builder = egui::UiBuilder::new().id_salt(id.with("toolbar")).max_rect(toolbar);
+    let mut toolbar_ui = ui.new_child(toolbar_builder);
+    toolbar_ui.set_clip_rect(ui.clip_rect().intersect(rect));
+    // The plate's padding also belongs to the toolbar, rather than to a
+    // gizmo or the image beneath it.
+    toolbar_ui.interact(toolbar, id.with("toolbar-plate"), Sense::click_and_drag());
+    crate::ui::widgets::toolbar_background(&toolbar_ui, toolbar, theme::MENU_BORDER, 1.5);
     let inner = toolbar.shrink(1.5).shrink2(Vec2::new(2.0, 4.0));
-    let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)));
+    let bar_builder = egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center));
+    let mut bar = toolbar_ui.new_child(bar_builder);
     bar.spacing_mut().item_spacing.y = 2.0;
     icon_menu(&mut bar, "menu-deep", "Menu", None, |ui| contents(ui, menu));
     icon_menu(&mut bar, "render-lvl", "Mask Enhancement", None, |ui| {
@@ -1082,6 +1178,14 @@ fn grouped_optional(value: f64, decimals: usize, fixed_decimals: bool) -> String
 }
 
 #[cfg(test)]
+#[path = "viewport-2d-interaction-tests.rs"]
+mod interaction_tests;
+
+#[cfg(test)]
+#[path = "viewport-2d-keyboard-tests.rs"]
+mod keyboard_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1122,6 +1226,7 @@ mod tests {
         for mode in ["pick", "measure"] {
             let mut state = Viewport2DState::default();
             state.open_at_launch(mode);
+            state.docked_focused = true;
             let mut frame = |key, pressed| {
                 let event = egui::Event::Key {
                     key,
@@ -1132,8 +1237,10 @@ mod tests {
                 };
                 let input = egui::RawInput { screen_rect: Some(screen), events: vec![event], ..Default::default() };
                 context.run_ui(input, |ui| {
+                    state.begin_keyboard(ui.ctx(), false);
                     let mut commands = Vec::new();
                     show_docked(ui, screen, &editor, &mut state, &mut commands);
+                    state.finish_keyboard(ui.ctx());
                     assert!(commands.is_empty());
                 }).drop_without_applying_deltas();
                 (state.is_picking(), state.is_measuring())
@@ -1194,7 +1301,7 @@ mod tests {
         let other = document.add_node("Mountain", [26300.0, 26000.0]).unwrap();
         let mut editor = Editor::new(document);
         editor.select(Some(erosion));
-        let resolution = nerthus_engine::Resolution::square(4);
+        let resolution = nerthus_engine::Resolution::square(64);
         let heights = Arc::new(Map::filled(resolution, 0.5));
         let deposits = Arc::new(Map::filled(resolution, 0.25));
         editor.outputs = vec![("Out".to_string(), heights), ("Deposits".to_string(), deposits)];

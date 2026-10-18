@@ -161,6 +161,8 @@ pub fn draw(
     if ui_state.sun_open && tool_window::take_escape(&ctx, &[lighting]).is_some() {
         ui_state.sun_open = false;
     }
+    let docked_keys_blocked = crate::ui::tool_commands::modal_open(&ctx, &ui_state);
+    ui_state.viewport_2d.begin_keyboard(&ctx, docked_keys_blocked);
     let full = ctx.content_rect();
     let builder = UiBuilder::new().layer_id(LayerId::background()).max_rect(full);
     let mut root = Ui::new(ctx.clone(), "nerthus-floating-viewport".into(), builder);
@@ -179,6 +181,7 @@ pub fn draw(
     let interface = ui_state.as_mut();
     let host = viewport_area::show(&mut root, area, &editor, &mut settings, &mut interface.sun_open, &mut interface.viewport_2d, &overlays, &mut pending);
     tool_window::note_keyboard(&ctx);
+    interface.viewport_2d.finish_keyboard(&ctx);
     root.painter().set(background, surround(full, host));
     interface.floating_commands.extend(pending);
 

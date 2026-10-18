@@ -426,6 +426,7 @@ impl Editor {
         self.document = document;
         self.document_serial += 1;
         self.selection.clear();
+        self.gizmo_active = false;
         self.preview_node = None;
         self.preview_locked = false;
         self.preview_region = None;
@@ -2630,6 +2631,35 @@ mod tests {
         editor.follow_preview_lock();
         assert!(!editor.preview_locked);
         assert_eq!(editor.preview_node, Some(erosion));
+    }
+
+    #[test]
+    fn changing_projects_deactivates_the_previous_gizmo() {
+        let mut document = Document::new();
+        let mountain = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let mut editor = Editor::new(document);
+        editor.select(Some(mountain));
+        editor.gizmo_active = true;
+
+        let mut replacement = Document::new();
+        let selected = replacement.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let locked = replacement.add_node("Mountain", [300.0, 0.0]).unwrap();
+        replacement.note_selected_node(Some(selected));
+        replacement.toggle_preview_lock(locked);
+        editor.set_document(replacement);
+
+        assert!(!editor.gizmo_active);
+        assert_eq!(editor.selection, vec![selected]);
+        assert!(editor.preview_locked);
+        assert_eq!(editor.preview_node, Some(locked));
+
+        editor.gizmo_active = true;
+        editor.set_document(Document::new());
+
+        assert!(!editor.gizmo_active);
+        assert!(editor.selection.is_empty());
+        assert!(!editor.preview_locked);
+        assert_eq!(editor.preview_node, None);
     }
 
     #[test]

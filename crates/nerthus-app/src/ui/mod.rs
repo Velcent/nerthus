@@ -524,6 +524,10 @@ fn draw_editor(
         shortcuts(ctx, node_keys, &mut pending);
         tool_commands::shortcuts(ctx, &mut pending);
     }
+    if !floating {
+        let docked_keys_blocked = tool_commands::modal_open(ctx, ui_state) || graph_popup_open || menu_keys::bar_focus(ctx).is_some();
+        ui_state.viewport_2d.begin_keyboard(ctx, docked_keys_blocked);
+    }
     // Text fields process typing before egui checks their layer. Release
     // any editor focus before drawing them behind the Options dialog.
     if ui_state.options.is_some() {
@@ -652,6 +656,9 @@ fn draw_editor(
     }
     // Everything is drawn: where the keyboard is, for next frame's Esc.
     tool_window::note_keyboard(ctx);
+    if !floating {
+        ui_state.viewport_2d.finish_keyboard(ctx);
+    }
     // Accepted options (or settings back to their defaults) reach the
     // interface and the view's mask gradient at once.
     if options_outcome.accepted || settings_reset {
