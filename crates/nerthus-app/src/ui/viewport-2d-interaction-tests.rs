@@ -143,6 +143,44 @@ fn primary_click_on_the_image_still_samples_and_ends_picking() {
 }
 
 #[test]
+fn sampled_pixel_modal_belongs_to_the_window_hosting_the_docked_view() {
+    for floating in [false, true] {
+        let mut view = TestView::new();
+        view.state.docked_view.picking = true;
+        view.settle();
+        let pointer = view.rect.min + Vec2::splat(100.0);
+        view.click(pointer, egui::PointerButton::Primary);
+        assert!(view.state.picked.is_some());
+
+        let main_context = if floating { egui::Context::default() } else { view.context.clone() };
+        let mut commands = Vec::new();
+        main_context.run_ui(egui::RawInput::default(), |ui| {
+            show_floating(ui.ctx(), &mut view.editor, &mut view.state, &[], &mut commands);
+            if !floating {
+                picked_dialog(ui.ctx(), &mut view.state, &mut commands);
+            }
+        }).drop_without_applying_deltas();
+        assert_eq!(main_context.memory(|memory| memory.top_modal_layer().is_some()), !floating);
+
+        if floating {
+            view.context.run_ui(egui::RawInput::default(), |ui| {
+                picked_dialog(ui.ctx(), &mut view.state, &mut commands);
+            }).drop_without_applying_deltas();
+            assert!(view.context.memory(|memory| memory.top_modal_layer().is_some()));
+            assert!(main_context.memory(|memory| memory.top_modal_layer().is_none()));
+
+            // Docking an open result into a different context keeps its
+            // report with the sample, rather than reporting it twice.
+            main_context.run_ui(egui::RawInput::default(), |ui| {
+                picked_dialog(ui.ctx(), &mut view.state, &mut commands);
+            }).drop_without_applying_deltas();
+        }
+        let reports = commands.iter().filter(|command| matches!(command, Command::Report(_))).count();
+        assert_eq!(reports, 1);
+    }
+}
+
+#[test]
 fn invisible_gizmo_ring_yields_to_outside_controls_and_visible_drags_still_finish() {
     let mut view = TestView::new();
     view.gizmo(0.0, 0.5);

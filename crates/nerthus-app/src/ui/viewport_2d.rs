@@ -133,6 +133,7 @@ impl FollowingView {
 struct Picked {
     values: Vec<f32>,
     terrain_height: f32,
+    reported: bool,
 }
 
 /// Everything 2D: the docked view and its column, and the floating views.
@@ -166,6 +167,22 @@ pub struct Viewport2DState {
 }
 
 impl Viewport2DState {
+    /// A new document closes its locked Map Viewers (`Shell.CloseFile`)
+    /// and discards samples, renders and tool state from the old one.
+    /// The docked layout and the preview-following viewer stay open.
+    pub fn reset(&mut self) {
+        let following = self.following.is_some().then(FollowingView::new);
+        let state = Self {
+            docked: self.docked,
+            docked_width: self.docked_width,
+            following,
+            gizmo_at_launch: self.gizmo_at_launch,
+            following_at_launch: self.following_at_launch,
+            ..Self::default()
+        };
+        *self = state;
+    }
+
     /// The floating Map Viewers' layers, for routing Esc to the top one.
     pub fn window_ids(&self) -> Vec<Id> {
         let mut windows: Vec<Id> = self.floating.iter().filter(|view| view.open).map(|view| Id::new(("map-viewer", view.node))).collect();
@@ -476,7 +493,7 @@ fn show_docked(ui: &mut Ui, rect: Rect, editor: &Editor, state: &mut Viewport2DS
             let values = sample(reference, position.x, position.y);
             let terrain_height = editor.document.terrain().height;
             view.picking = false;
-            state.picked = Some(Picked { values, terrain_height });
+            state.picked = Some(Picked { values, terrain_height, reported: false });
         }
     }
     let zoom = view.zoom;
@@ -590,7 +607,6 @@ pub fn show_floating(ctx: &egui::Context, editor: &mut Editor, state: &mut Viewp
         }
     }
     show_following(ctx, editor, state, commands);
-    picked_dialog(ctx, state, commands);
 }
 
 /// A `MapViewer` window: 720 square (its title bar included) in the
@@ -1077,8 +1093,8 @@ fn readout(painter: &egui::Painter, rect: Rect, text: &str) -> Rect {
 
 /// The "Pixel sampled" dialog (`Viewport2D_HeightPicked`): the value as
 /// metres, percent and raw (or a colour as floats and bytes), with buttons
-/// copying it.
-fn picked_dialog(ctx: &egui::Context, state: &mut Viewport2DState, commands: &mut Vec<Command>) {
+/// copying it. Drawn by the window that hosts the docked 2D view.
+pub fn picked_dialog(ctx: &egui::Context, state: &mut Viewport2DState, commands: &mut Vec<Command>) {
     let Some(picked) = state.picked.clone() else {
         return;
     };
@@ -1100,9 +1116,9 @@ fn picked_dialog(ctx: &egui::Context, state: &mut Viewport2DState, commands: &mu
         let status = format!("Height sampled: {} m", grouped_optional(metres as f64, 0, false));
         (format!("Height sampled:\n{metric}{percentage}{raw}"), status, ["Copy in metric", "Copy in percentage"])
     };
-    if !state.picked.as_ref().is_some_and(|_| ctx.data(|data| data.get_temp::<bool>(Id::new("picked-reported"))).unwrap_or(false)) {
+    if let Some(picked) = state.picked.as_mut() && !picked.reported {
         commands.push(Command::Report(status));
-        ctx.data_mut(|data| data.insert_temp(Id::new("picked-reported"), true));
+        picked.reported = true;
     }
     let mut close = false;
     let modal = TaskDialog::new(ctx, Id::new("pixel-sampled"), 420.0);
@@ -1126,7 +1142,6 @@ fn picked_dialog(ctx: &egui::Context, state: &mut Viewport2DState, commands: &mu
     });
     if close || response.should_close() {
         state.picked = None;
-        ctx.data_mut(|data| data.remove::<bool>(Id::new("picked-reported")));
     }
 }
 
@@ -1188,6 +1203,81 @@ mod keyboard_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changing_documents_closes_locked_views_even_when_node_ids_are_reused() {
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples");
+        let first_path = examples.join("Alpine Valley.terrain");
+        let second_path = examples.join("River Plains.terrain");
+        let first_document = crate::document::Document::open(&first_path).unwrap();
+        let second_document = crate::document::Document::open(&second_path).unwrap();
+        let shared_node = 318;
+        assert_eq!(first_document.node(shared_node).unwrap().name, "Range");
+        assert_eq!(second_document.node(shared_node).unwrap().name, "Rivers");
+
+        let mut ui_state = crate::ui::UiState::default();
+        ui_state.viewport_2d.open_floating(shared_node);
+        assert_eq!(ui_state.viewport_2d.window_ids(), [Id::new(("map-viewer", shared_node))]);
+
+        ui_state.reset_views();
+        let context = egui::Context::default();
+        let mut editor = Editor::new(second_document);
+        let mut commands = Vec::new();
+        context.run_ui(egui::RawInput::default(), |ui| {
+            show_floating(ui.ctx(), &mut editor, &mut ui_state.viewport_2d, &[], &mut commands);
+        }).drop_without_applying_deltas();
+        assert!(ui_state.viewport_2d.window_ids().is_empty());
+        assert!(ui_state.viewport_2d.watched_nodes(&editor).is_empty());
+    }
+
+    #[test]
+    fn document_reset_clears_samples_tools_and_followed_outputs_but_preserves_layout() {
+        let context = egui::Context::default();
+        let image = ColorImage::filled([1, 1], Color32::WHITE);
+        let texture = context.load_texture("old-document", image, TextureOptions::LINEAR);
+        let mut state = Viewport2DState::default();
+        state.docked = true;
+        state.docked_width = Some(300.0);
+        state.docked_view.texture = Some((1, texture.clone()));
+        state.docked_view.picking = true;
+        state.docked_view.measuring = true;
+        state.docked_rect = Some(Rect::EVERYTHING);
+        state.docked_focused = true;
+        state.docked_escape_held = true;
+        state.docked_cancel_requested = true;
+        state.docked_keyboard_claimed = true;
+        state.last_active = Some(318);
+        state.gizmo = Some(GizmoState::new(318, GizmoKind::Ts));
+        state.gizmo_was_on = true;
+        state.picked = Some(Picked { values: vec![0.5], terrain_height: 2500.0, reported: true });
+        let mut following = FollowingView::new();
+        following.picked = Some((318, "Out".to_string()));
+        following.view.texture = Some((1, texture));
+        let colours = TerrainColours { width: 1, height: 1, rgb: vec![255; 3] };
+        following.colours = Some(Arc::new(colours));
+        state.following = Some(following);
+
+        state.reset();
+
+        assert!(state.docked);
+        assert_eq!(state.docked_width, Some(300.0));
+        assert!(!state.is_picking());
+        assert!(!state.is_measuring());
+        assert!(state.docked_view.texture.is_none());
+        assert!(state.docked_rect().is_none());
+        assert!(!state.docked_focused);
+        assert!(!state.docked_escape_held);
+        assert!(!state.docked_cancel_requested);
+        assert!(!state.docked_keyboard_claimed);
+        assert!(state.last_active.is_none());
+        assert!(state.gizmo.is_none());
+        assert!(!state.gizmo_was_on);
+        assert!(state.picked.is_none());
+        let following = state.following.as_ref().expect("the preview-following viewer stays open");
+        assert!(following.picked.is_none());
+        assert!(following.view.texture.is_none());
+        assert!(following.colours.is_none());
+    }
 
     #[test]
     fn mixer_thumbnails_watch_the_ground_and_layer_sources_without_masks_or_duplicates() {

@@ -125,14 +125,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, settings: &mut ViewportSet
         toolbar_separator(column, 8.0, 8.0);
         icon_menu(column, "menu-deep", "Viewport Options", None, |ui| {
             menu_caption(ui, "Viewport");
-            // `TglEmbed_OnClick`, `TglFloat_OnClick`.
-            let floating = editor.user.options.viewport_floating();
-            if check_item(ui, !floating, "Embedded", "").clicked() && floating {
-                commands.push(Command::SetViewportFloating(false));
-            }
-            if check_item(ui, floating, "Floating", "").clicked() && !floating {
-                commands.push(Command::SetViewportFloating(true));
-            }
+            viewport_layout_items(ui, editor, commands);
             menu_separator(ui);
             if menu_item(ui, None, None, "Load Camera...", "").clicked() {
                 commands.push(Command::LoadCamera);
@@ -167,6 +160,18 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, settings: &mut ViewportSet
         }
     }
     host
+}
+
+/// `TglEmbed_OnClick`, `TglFloat_OnClick`, also reachable from the main
+/// window's Preview menu when the floating window's toolbar is hidden.
+pub fn viewport_layout_items(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
+    let floating = editor.user.options.viewport_floating();
+    if check_item(ui, !floating, "Embedded", "").clicked() && floating {
+        commands.push(Command::SetViewportFloating(false));
+    }
+    if check_item(ui, floating, "Floating", "").clicked() && !floating {
+        commands.push(Command::SetViewportFloating(true));
+    }
 }
 
 /// The preview resolution: the size drawn as text (monospace bold,

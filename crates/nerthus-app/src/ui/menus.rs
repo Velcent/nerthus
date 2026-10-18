@@ -421,6 +421,11 @@ pub fn preview_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
         }
     }
     menu_separator(ui);
+    if !cfg!(target_arch = "wasm32") {
+        menu_caption(ui, "Viewport");
+        crate::ui::viewport_area::viewport_layout_items(ui, editor, commands);
+        menu_separator(ui);
+    }
     // `miRegions` and `sepRegion` (`RegionPreviewMenuVisibility`), once
     // the terrain has regions.
     if crate::ui::regions::menus_visible(editor) {
@@ -668,6 +673,41 @@ mod tests {
                 };
                 let expected = if enabled { vec![command.clone()] } else { Vec::new() };
                 assert_eq!(click_edit_row(&editor, &ui_state, text), expected, "{selection}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_main_preview_menu_can_embed_and_float_the_viewport() {
+        let mut editor = Editor::new(Document::new());
+        for floating in [false, true] {
+            editor.user.options.set_viewport_floating(floating);
+            for (text, wanted) in [("Embedded", false), ("Floating", true)] {
+                let context = egui::Context::default();
+                theme::apply(&context);
+                let mut commands = Vec::new();
+                let output = context.run_ui(egui::RawInput::default(), |ui| preview_menu(ui, &editor, &mut commands));
+                let row_position = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(shape) if shape.galley.text() == text => Some(shape.pos + egui::vec2(4.0, shape.galley.size().y / 2.0)),
+                    _ => None,
+                }).expect("the viewport layout row is drawn in the main menu");
+                output.drop_without_applying_deltas();
+
+                for pressed in [true, false] {
+                    let event = egui::Event::PointerButton {
+                        pos: row_position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    };
+                    let events = vec![egui::Event::PointerMoved(row_position), event];
+                    let input = egui::RawInput { events, ..Default::default() };
+                    let output = context.run_ui(input, |ui| preview_menu(ui, &editor, &mut commands));
+                    output.drop_without_applying_deltas();
+                }
+
+                let expected = if floating != wanted { vec![Command::SetViewportFloating(wanted)] } else { Vec::new() };
+                assert_eq!(commands, expected, "{text} when floating={floating}");
             }
         }
     }

@@ -292,6 +292,7 @@ impl UiState {
     pub fn reset_views(&mut self) {
         self.graph.reset();
         self.data_view.reset();
+        self.viewport_2d.reset();
         if let Some(settings) = &mut self.build_settings {
             *settings = build_settings::BuildSettingsState::new(settings.tab);
         }
@@ -467,6 +468,12 @@ fn draw_editor(
     window: &mut Window,
     diagnostics: &DiagnosticsStore,
 ) -> Result {
+    if ui_state.document_serial != editor.document_serial {
+        ui_state.reset_views();
+        // The project opens on the graph tab it was saved showing.
+        ui_state.graph.tab = editor.document.opening_tab();
+        ui_state.document_serial = editor.document_serial;
+    }
     // Fonts set now take effect next frame, so the first frame only
     // installs them.
     if !ui_state.styled {
@@ -491,12 +498,6 @@ fn draw_editor(
     ctx.set_zoom_factor(editor.user.options.ui_scale());
     theme::set_settings(ctx, editor.user.options.interface_settings());
     formulas::publish(ctx, editor);
-    if ui_state.document_serial != editor.document_serial {
-        ui_state.reset_views();
-        // The project opens on the graph tab it was saved showing.
-        ui_state.graph.tab = editor.document.opening_tab();
-        ui_state.document_serial = editor.document_serial;
-    }
     // `--show` windows open once the first render is in, so what they
     // report on has been built (at once when nothing is previewed).
     let nothing_to_render = editor.preview_node.is_none() && !editor.building && !editor.needs_build;
@@ -589,6 +590,9 @@ fn draw_editor(
     }
     let constructor_sources = ui_state.constructor.as_ref().map(|window| window.sources(editor)).unwrap_or_default();
     viewport_2d::show_floating(ctx, editor, &mut ui_state.viewport_2d, &constructor_sources, &mut pending);
+    if !floating {
+        viewport_2d::picked_dialog(ctx, &mut ui_state.viewport_2d, &mut pending);
+    }
     // `RendererQuality.FastAO` while a gizmo or Draw's painter is held.
     let constructor_held = ui_state.constructor.as_ref().is_some_and(constructor::ConstructorWindow::gizmo_held);
     let held = ui_state.viewport_2d.gizmo_held() || painter::painting(ctx) || constructor_held;
@@ -720,6 +724,12 @@ fn draw_editor(
         ctx.set_cursor_icon(CursorIcon::Wait);
     }
     if floating {
+        // A click anywhere in the main window takes the keyboard back
+        // from the viewport's separate egui context.
+        if ctx.input(|state| state.pointer.any_pressed()) {
+            ui_state.viewport_focused = false;
+            input.keys = false;
+        }
         return Ok(());
     }
     // Points to physical pixels: the window's scale and the interface's.
