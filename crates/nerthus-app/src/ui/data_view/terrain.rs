@@ -467,7 +467,7 @@ fn tree(ui: &mut Ui, editor: &Editor, state: &mut TerrainState, commands: &mut V
             if response.toggled {
                 toggle(&mut state.open_groups, group.id);
             }
-            if response.clicked {
+            if response.clicked || response.double_clicked {
                 clicked = Some((RowTarget::Group(group.id), response.double_clicked));
             }
             for member in &members {

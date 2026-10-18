@@ -68,6 +68,7 @@ pub struct ConsoleWindow {
     history: Vec<String>,
     history_position: Option<usize>,
     scroll_to_end: bool,
+    focus_prompt: bool,
     /// How many characters fit on a line of the output, as last drawn.
     line_characters: usize,
 }
@@ -80,6 +81,7 @@ impl ConsoleWindow {
             history: Vec::new(),
             history_position: None,
             scroll_to_end: true,
+            focus_prompt: true,
             line_characters: 80,
         };
         console.append_splash();
@@ -209,7 +211,7 @@ pub fn show(ctx: &egui::Context, console: &mut ConsoleWindow) -> bool {
     window = window.resizable(true);
     window = tool_window::place(ctx, window, window_id(), Vec2::new(800.0, 450.0));
     window = window.open(&mut open);
-    window.show(ctx, |ui| {
+    let shown = window.show(ctx, |ui| {
         let font = theme::monospace(13.0);
         let prompt_height = 26.0;
         let output_height = (ui.available_height() - prompt_height - 8.0).max(80.0);
@@ -238,13 +240,30 @@ pub fn show(ctx: &egui::Context, console: &mut ConsoleWindow) -> bool {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new(PROMPT).font(font.clone()).color(theme::ACCENT_MUTED_GREEN));
+            let prompt_id = window_id().with("prompt");
+            // Recall before TextEdit handles the arrows (Up otherwise
+            // moves a single-line field's caret to the start).
+            if ui.memory(|memory| memory.has_focus(prompt_id)) {
+                let older = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
+                let newer = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
+                if older || newer {
+                    console.recall(older);
+                    let length = console.input.chars().count();
+                    let mut state = TextEdit::load_state(ui.ctx(), prompt_id).unwrap_or_default();
+                    let range = egui::text::CCursorRange::one(egui::text::CCursor::new(length));
+                    state.cursor.set_char_range(Some(range));
+                    state.store(ui.ctx(), prompt_id);
+                }
+            }
             let mut field = TextEdit::singleline(&mut console.input);
+            field = field.id(prompt_id);
             field = field.font(font.clone());
             field = field.desired_width(f32::INFINITY);
             field = field.frame(egui::Frame::NONE);
             let response = ui.add(field);
-            if !response.has_focus() && !response.lost_focus() {
+            if console.focus_prompt {
                 response.request_focus();
+                console.focus_prompt = false;
             }
             // `txtCommand_KeyUp`: Enter runs what was typed, unless it is
             // blank.
@@ -256,22 +275,86 @@ pub fn show(ctx: &egui::Context, console: &mut ConsoleWindow) -> bool {
                     console.run(ui.ctx(), &typed);
                 }
             }
-            if response.has_focus() {
-                if ui.input(|input| input.key_pressed(Key::ArrowUp)) {
-                    console.recall(true);
-                }
-                if ui.input(|input| input.key_pressed(Key::ArrowDown)) {
-                    console.recall(false);
-                }
-            }
-        });
+            response
+        }).inner
     });
+    // Match `wpfConsole_GotFocus` / `txtLog_MouseUp`: clicking the
+    // console returns to its prompt without taking typing from other UI.
+    if let Some(shown) = shown {
+        let pressed = ctx.input(|input| input.pointer.press_origin().filter(|_| input.pointer.any_pressed()));
+        if let Some(pointer) = pressed {
+            let on_window = shown.response.rect.contains(pointer) && ctx.layer_id_at(pointer) == Some(shown.response.layer_id);
+            if on_window && let Some(prompt) = shown.inner {
+                prompt.request_focus();
+            }
+        }
+    }
     open
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn console_frame(ctx: &egui::Context, console: &mut ConsoleWindow, events: Vec<egui::Event>) {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let output = ctx.run_ui(input, |ui| {
+            show(ui.ctx(), console);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    fn key_event(key: Key) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }
+    }
+
+    #[test]
+    fn recalling_history_appends_typing_at_the_end() {
+        let ctx = egui::Context::default();
+        let mut console = ConsoleWindow::open();
+        console.run(&ctx, "help");
+        console.run(&ctx, "héllo");
+        for _ in 0..3 {
+            console_frame(&ctx, &mut console, Vec::new());
+        }
+        let events = vec![key_event(Key::ArrowUp), egui::Event::Text("x".to_string())];
+        console_frame(&ctx, &mut console, events);
+        assert_eq!(console.input, "héllox");
+        console_frame(&ctx, &mut console, vec![key_event(Key::ArrowUp)]);
+        console_frame(&ctx, &mut console, vec![egui::Event::Text("x".to_string())]);
+        assert_eq!(console.input, "helpx");
+        console_frame(&ctx, &mut console, vec![key_event(Key::ArrowDown)]);
+        console_frame(&ctx, &mut console, vec![egui::Event::Text("y".to_string())]);
+        assert_eq!(console.input, "hélloy");
+    }
+
+    #[test]
+    fn an_open_console_leaves_other_text_fields_the_keyboard() {
+        let ctx = egui::Context::default();
+        let mut console = ConsoleWindow::open();
+        for _ in 0..3 {
+            console_frame(&ctx, &mut console, Vec::new());
+        }
+        let other_id = Id::new("other-text-field");
+        let mut other_text = String::new();
+        for frame in 0..7 {
+            let events = if frame > 2 { vec![egui::Event::Text("x".to_string())] } else { Vec::new() };
+            let input = egui::RawInput { events, ..Default::default() };
+            let output = ctx.run_ui(input, |ui| {
+                let field = TextEdit::singleline(&mut other_text).id(other_id);
+                let response = ui.add(field);
+                if frame == 0 {
+                    response.request_focus();
+                }
+                show(ui.ctx(), &mut console);
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(other_text, "xxxx");
+        assert_eq!(console.input, "");
+        assert!(ctx.memory(|memory| memory.has_focus(other_id)));
+    }
 
     fn run(console: &mut ConsoleWindow, typed: &str) {
         let ctx = egui::Context::default();

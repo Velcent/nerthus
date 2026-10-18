@@ -397,7 +397,9 @@ pub fn lighting_panel_id() -> egui::Id {
 fn lighting_panel(ui: &Ui, sun_button: Rect, editor: &Editor, settings: &mut ViewportSettings, commands: &mut Vec<Command>) -> Rect {
     let left = lighting_popup_left(sun_button, ui.ctx().content_rect()) + LIGHTING_POPUP_MARGIN;
     let panel_width = LIGHTING_POPUP_WIDTH - 2.0 * LIGHTING_POPUP_MARGIN;
-    let position = Pos2::new(left, sun_button.top() + LIGHTING_POPUP_MARGIN);
+    let body = crate::ui::tool_window::body(ui.ctx());
+    let top = sun_button.top().max(body.top()) + LIGHTING_POPUP_MARGIN;
+    let position = Pos2::new(left, top);
     let area = egui::Area::new(lighting_panel_id()).fixed_pos(position).order(egui::Order::Foreground);
     let shown = area.show(ui.ctx(), |ui| {
         let mut frame = egui::Frame::new();

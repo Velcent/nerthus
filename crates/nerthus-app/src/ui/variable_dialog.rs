@@ -67,7 +67,9 @@ impl NumberField {
     /// `Txt_OnLostFocus`: the text as a number held to the limits, or the
     /// value's text again when it is not one.
     fn commit(&mut self) {
-        if let Ok(number) = self.text.trim().parse::<f32>() {
+        if let Ok(number) = self.text.trim().parse::<f32>()
+            && number.is_finite()
+        {
             self.value = number.clamp(-LIMIT, LIMIT);
         }
         self.text = self.value_text();
@@ -229,6 +231,13 @@ fn accept_changes(editor: &mut Editor, dialog: &mut EditVariable, commands: &mut
         if field.typed() {
             field.commit();
         }
+    }
+    let numeric = matches!(dialog.var_type, VarType::Float | VarType::Range | VarType::Int);
+    if numeric && (!dialog.min.value.is_finite() || !dialog.max.value.is_finite() || dialog.min.value > dialog.max.value) {
+        let caption = "Variable limits not allowed".to_string();
+        let text = "Min and Max must be finite numbers, with Min less than or equal to Max.".to_string();
+        commands.push(Command::ShowMessage { caption, text });
+        return false;
     }
     let limits = dialog.limits();
     editor.document.edit_variable(&dialog.key, &dialog.name, &limits);
@@ -425,5 +434,84 @@ mod tests {
 
         let text = Variable::from_json(&json!({"Name": "Path", "Value": "a", "ExtraData": "2"}));
         assert_eq!(EditVariable::new("Path", &text).limits(), VariableLimits::StringType(2));
+    }
+
+    #[test]
+    fn inverted_variable_limits_keep_the_dialog_open_without_applying_changes() {
+        for kind in ["Float", "Int", "Range"] {
+            let mut editor = Editor::new(Document::new());
+            let key = editor.document.add_variable(kind);
+            let mut dialog = open(&editor, &key).unwrap();
+            let before = editor.document.automation().variables[&key].json.clone();
+            dialog.min.text = "5".to_string();
+            dialog.max.text = "1".to_string();
+            let mut commands = Vec::new();
+            assert!(!accept_changes(&mut editor, &mut dialog, &mut commands));
+            assert_eq!(editor.document.automation().variables[&key].json, before);
+            assert!(matches!(commands.as_slice(), [Command::ShowMessage { .. }]));
+
+            dialog.max.text = "10".to_string();
+            commands.clear();
+            assert!(accept_changes(&mut editor, &mut dialog, &mut commands));
+            let variable = &editor.document.automation().variables[&key];
+            assert_eq!(variable.json["Min"].as_f64(), Some(5.0));
+            assert_eq!(variable.json["Max"].as_f64(), Some(10.0));
+        }
+    }
+
+    fn dialog_frame(context: &egui::Context, editor: &mut Editor, dialog: &mut Option<EditVariable>, events: Vec<egui::Event>) {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1138.0, 640.0));
+        let input = RawInput { events, screen_rect: Some(screen), ..Default::default() };
+        let mut commands = Vec::new();
+        let output = context.run_ui(input, |ui| show(ui.ctx(), editor, dialog, &mut commands));
+        output.drop_without_applying_deltas();
+        assert!(commands.is_empty());
+        assert!(dialog.is_some(), "choosing a string type must leave the dialog open");
+    }
+
+    #[test]
+    fn string_type_popup_stays_above_the_modal_after_quick_clicks_and_drags() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut editor = Editor::new(Document::new());
+        let key = editor.document.add_variable("Undefined");
+        let mut dialog = open(&editor, &key);
+        for _ in 0..3 {
+            dialog_frame(&context, &mut editor, &mut dialog, Vec::new());
+        }
+        let button_id = window_id().with("string-type").with("dropdown");
+        let popup_id = button_id.with("popup");
+        let button = rect(&context, button_id).center();
+        let name = rect(&context, window_id().with("name")).center();
+        let press = |position, pressed| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        // Give the modal an earlier interaction, then open the list with a tap
+        // whose press and release arrive in a single frame.
+        for event in [egui::Event::PointerMoved(name), press(name, true), press(name, false)] {
+            dialog_frame(&context, &mut editor, &mut dialog, vec![event]);
+        }
+        let tap = vec![egui::Event::PointerMoved(button), press(button, true), press(button, false)];
+        dialog_frame(&context, &mut editor, &mut dialog, tap);
+        for _ in 0..2 {
+            dialog_frame(&context, &mut editor, &mut dialog, Vec::new());
+        }
+        assert!(egui::Popup::is_id_open(&context, popup_id));
+        let popup = context.memory(|memory| memory.area_rect(popup_id)).unwrap();
+        let popup_layer = egui::LayerId::new(egui::Order::Foreground, popup_id);
+        let first_entry = Pos2::new(popup.center().x, popup.top() + 15.0);
+        assert_eq!(context.layer_id_at(first_entry), Some(popup_layer));
+
+        // Pressing and dragging in another field raises the modal. Its
+        // child popup must keep its position above it for the whole gesture.
+        let dragged = name + Vec2::new(60.0, 0.0);
+        for event in [egui::Event::PointerMoved(name), press(name, true), egui::Event::PointerMoved(dragged), press(dragged, false)] {
+            dialog_frame(&context, &mut editor, &mut dialog, vec![event]);
+            assert_eq!(context.layer_id_at(first_entry), Some(popup_layer));
+        }
+        assert!(egui::Popup::is_id_open(&context, popup_id));
+        let optional_output = Pos2::new(popup.center().x, popup.bottom() - 15.0);
+        for event in [egui::Event::PointerMoved(optional_output), press(optional_output, true), press(optional_output, false)] {
+            dialog_frame(&context, &mut editor, &mut dialog, vec![event]);
+        }
+        assert_eq!(dialog.unwrap().string_type, 4);
     }
 }

@@ -49,6 +49,12 @@ pub fn is_open(ctx: &egui::Context) -> bool {
     ctx.data(|data| data.get_temp::<MathEditor>(window_id()).is_some())
 }
 
+/// Drops the previous document's editor without applying Cancel's rollback.
+pub fn reset(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<MathEditor>(window_id()));
+    tool_window::close_requested(ctx, area_id());
+}
+
 /// `Editor_CommandExecuted("OpenEditor")`: the window for a Math node.
 pub fn open(ctx: &egui::Context, editor: &Editor, node: i32) {
     tool_window::close_requested(ctx, area_id());
@@ -63,7 +69,7 @@ pub fn show(ctx: &egui::Context, editor: &mut Editor) {
         return;
     };
     let cancel = tool_window::close_requested(ctx, area_id());
-    if editor.document.node(state.node).is_none() {
+    if editor.document.node(state.node).is_none_or(|node| node.type_name != "MathX") {
         ctx.data_mut(|data| data.remove::<MathEditor>(window_id()));
         return;
     }
@@ -257,6 +263,29 @@ mod tests {
         editor.document.set_value(node, "Expression", Value::from(expression));
         open(context, &editor, node);
         editor
+    }
+
+    #[test]
+    fn document_reset_closes_math_without_restoring_the_old_expression() {
+        let context = context();
+        let mut editor = opened(&context, "1 - a");
+        let state = context.data(|data| data.get_temp::<MathEditor>(window_id())).unwrap();
+        let node = state.node;
+        let mut replacement = Document::new();
+        replacement.project = editor.document.project.clone();
+        replacement.set_value(node, "Expression", Value::from("1 - a * 0.5"));
+        replacement.dirty = false;
+        editor.set_document(replacement);
+        let history = editor.document.undo_labels();
+        tool_window::request_close(&context, area_id());
+
+        reset(&context);
+        frame(&context, &mut editor, 0.0, Vec::new());
+
+        assert!(!is_open(&context));
+        assert_eq!(editor.document.node(node).unwrap().values["Expression"], "1 - a * 0.5");
+        assert!(!editor.document.dirty);
+        assert_eq!(editor.document.undo_labels(), history);
     }
 
     #[test]

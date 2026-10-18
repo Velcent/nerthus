@@ -84,10 +84,7 @@ impl DestinationContext {
 
 /// `Paths.Builds` by default: Documents/Nerthus/Builds.
 pub fn default_builds_root() -> PathBuf {
-    let user_directories = directories::UserDirs::new();
-    let documents = user_directories.as_ref().and_then(|directories| directories.document_dir().map(Path::to_path_buf));
-    let base = documents.unwrap_or_else(|| PathBuf::from("."));
-    base.join("Nerthus").join("Builds")
+    nerthus_core::user_paths::default_storage_folder().join("Builds")
 }
 
 /// A project path string as a path of this system.

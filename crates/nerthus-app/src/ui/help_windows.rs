@@ -52,8 +52,7 @@ pub struct HelpWindows {
 }
 
 impl HelpWindows {
-    /// Whether one of the windows is up (they take the keyboard, as modal
-    /// dialogs do).
+    /// Whether a help modal is open and blocks the editor's input.
     pub fn any_open(&self) -> bool {
         self.shortcuts || self.whats_new.is_some() || self.about || self.update.is_some()
     }
@@ -133,13 +132,7 @@ const DIALOG_MARGIN: Vec2 = Vec2::new(widgets::DIALOG_SCREEN_MARGIN, 0.0);
 pub fn dialog_window(ctx: &egui::Context, id: &str, wanted: Vec2) -> egui::Window<'static> {
     let body = tool_window::body(ctx);
     let size = wanted.min((body.size() - 2.0 * DIALOG_MARGIN).max(Vec2::ZERO));
-    let mut frame = egui::Frame::new();
-    frame = frame.fill(theme::WINDOW_DARK);
-    frame = frame.stroke(Stroke::new(1.0, theme::MENU_BORDER));
-    frame = frame.corner_radius(6.0);
-    // `DropShadowEffect`: blur 20, depth 5 straight down, half opaque.
-    let shadow = egui::Shadow { offset: [0, 5], blur: 20, spread: 0, color: Color32::from_black_alpha(128) };
-    frame = frame.shadow(shadow);
+    let frame = dialog_frame();
     let mut window = egui::Window::new(id.to_string());
     window = window.id(Id::new(id.to_string()));
     window = window.title_bar(false);
@@ -152,6 +145,34 @@ pub fn dialog_window(ctx: &egui::Context, id: &str, wanted: Vec2) -> egui::Windo
     window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
     window = window.order(egui::Order::Foreground);
     window
+}
+
+fn dialog_frame() -> egui::Frame {
+    let mut frame = egui::Frame::new();
+    frame = frame.fill(theme::WINDOW_DARK);
+    frame = frame.stroke(Stroke::new(1.0, theme::MENU_BORDER));
+    frame = frame.corner_radius(6.0);
+    // `DropShadowEffect`: blur 20, depth 5 straight down, half opaque.
+    let shadow = egui::Shadow { offset: [0, 5], blur: 20, spread: 0, color: Color32::from_black_alpha(128) };
+    frame = frame.shadow(shadow);
+    frame
+}
+
+/// Gaea shows the help windows with `ShowDialog`: their backdrop blocks
+/// the pointer as well as the editor's shortcuts.
+fn dialog_modal<R>(ctx: &egui::Context, id: &str, wanted: Vec2, content: impl FnOnce(&mut Ui) -> R) -> egui::ModalResponse<R> {
+    let body = tool_window::body(ctx);
+    let frame = dialog_frame();
+    let size = wanted.min((body.size() - 2.0 * DIALOG_MARGIN).max(Vec2::ZERO));
+    let content_size = (size - frame.total_margin().sum()).max(Vec2::ZERO);
+    let offset = body.center() - ctx.content_rect().center();
+    let mut modal = egui::Modal::new(Id::new(id)).frame(frame);
+    modal.area = modal.area.anchor(Align2::CENTER_CENTER, offset);
+    modal.show(ctx, |ui| {
+        ui.set_width(content_size.x);
+        ui.set_height(content_size.y);
+        content(ui)
+    })
 }
 
 /// `Button-Important`: the accented button, its text centred inside this
@@ -223,8 +244,7 @@ fn shortcuts_window(ctx: &egui::Context) -> bool {
     if !open {
         return false;
     }
-    let window = dialog_window(ctx, "shortcut-guide", Vec2::new(680.0, 920.0));
-    window.show(ctx, |ui| {
+    let response = dialog_modal(ctx, "shortcut-guide", Vec2::new(680.0, 920.0), |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(16.0);
             ui.label(RichText::new("Shortcut Guide").font(theme::interface(32.0)).color(theme::LABEL_EMPHASIS));
@@ -256,7 +276,7 @@ fn shortcuts_window(ctx: &egui::Context) -> bool {
         });
         ui.add_space(32.0);
     });
-    open
+    open && !response.should_close()
 }
 
 /// What's new in this version (`whatsnew.md` and `whatsnew-notes.md`).
@@ -266,8 +286,7 @@ fn whats_new_window(ctx: &egui::Context, tab: &mut usize) -> bool {
     if !open {
         return false;
     }
-    let window = dialog_window(ctx, "whats-new", Vec2::new(1240.0, 880.0));
-    window.show(ctx, |ui| {
+    let response = dialog_modal(ctx, "whats-new", Vec2::new(1240.0, 880.0), |ui| {
         let size = ui.available_size();
         ui.add_space(24.0);
         let footer = 18.0 + 2.0 * 8.0 + 32.0 + 24.0;
@@ -298,7 +317,7 @@ fn whats_new_window(ctx: &egui::Context, tab: &mut usize) -> bool {
         });
         ui.add_space(32.0);
     });
-    open
+    open && !response.should_close()
 }
 
 /// `StartExperience.VersionFirstRun`: What's New shows by itself the first
@@ -370,20 +389,25 @@ fn about_window(ctx: &egui::Context) -> bool {
     if close_key(ctx, id) {
         return false;
     }
-    let mut open = true;
     let title = concat!("About Nerthus ", env!("CARGO_PKG_VERSION"));
     let frame = egui::Frame::window(&ctx.global_style());
     let fit = DialogFit::new(ctx, id, &frame);
-    let mut window = egui::Window::new(title);
-    window = window.id(id);
-    window = window.collapsible(false);
-    window = window.resizable(false);
-    window = fit.window(window, 476.0 - frame.total_margin().sum().x);
-    window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
-    window = window.order(egui::Order::Foreground);
-    window = window.open(&mut open);
+    let modal = egui::Modal::new(id).frame(frame);
+    let modal = fit.modal(ctx, modal);
     let mut close = false;
-    let shown = window.show(ctx, |ui| {
+    let shown = modal.show(ctx, |ui| {
+        ui.set_width(fit.width(476.0 - frame.total_margin().sum().x));
+        ui.horizontal(|ui| {
+            let caption = RichText::new(title).font(theme::semibold(13.0)).color(theme::LABEL_EMPHASIS);
+            ui.label(caption);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let button = widgets::icon_button_sized(ui, "x", "Close", None, Vec2::splat(20.0), 12.0);
+                if button.clicked() {
+                    close = true;
+                }
+            });
+        });
+        ui.separator();
         fit.body(ui, |ui| {
             ui.add_space(16.0);
             let logo = egui::Image::new(egui::include_image!("../../assets/nerthus.svg"));
@@ -425,10 +449,8 @@ fn about_window(ctx: &egui::Context) -> bool {
             });
         });
     });
-    if let Some(shown) = shown {
-        fit.end(ctx, shown.response.rect);
-    }
-    open && !close
+    fit.end(ctx, shown.response.rect);
+    !close && !shown.should_close()
 }
 
 /// `ByteSize.Bytes(size).ToString()`: the largest whole unit, to two
@@ -453,7 +475,7 @@ fn notes_text(token: &UpdateToken) -> String {
         return token.notes.clone();
     }
     let start: String = characters[..1000].iter().collect();
-    format!("{start}...\n(read more on download page)")
+    format!("{start}...")
 }
 
 /// The check's answer as a task dialog: its words scroll when the window
@@ -507,7 +529,20 @@ fn update_window(ctx: &egui::Context, dialog: &mut UpdateDialog) -> (bool, Optio
                     let shown = expander.show(ui, |ui| {
                         let mut scroll = egui::ScrollArea::vertical();
                         scroll = scroll.max_height(240.0);
-                        scroll.show(ui, |ui| markdown::show(ui, &notes_text(token)));
+                        let notes = notes_text(token);
+                        scroll.show(ui, |ui| {
+                            markdown::show(ui, &notes);
+                            // A separate label stays outside the last
+                            // Markdown bullet, paragraph or code block.
+                            if token.notes.chars().count() > 1000 {
+                                ui.add_space(8.0);
+                                ui.label("(read more on download page)");
+                                // The glyph mesh can extend below its
+                                // line box; keep its descenders inside
+                                // the scroll clip at the bottom.
+                                ui.add_space(2.0);
+                            }
+                        });
                     });
                     if shown.header_response.clicked() {
                         dialog.notes_open = !dialog.notes_open;
@@ -600,6 +635,46 @@ mod tests {
     }
 
     #[test]
+    fn help_modals_block_clicks_to_the_editor() {
+        let cases = [
+            HelpWindows { shortcuts: true, ..Default::default() },
+            HelpWindows { whats_new: Some(0), ..Default::default() },
+            HelpWindows { about: true, ..Default::default() },
+        ];
+        for mut help in cases {
+            let context = fit_checks::context();
+            let screen = Vec2::new(1600.0, 1000.0);
+            let target = Rect::from_min_size(Pos2::new(4.0, 60.0), Vec2::splat(12.0));
+            let mut clicked = false;
+            let mut draw = |ctx: &egui::Context| {
+                let editor_area = egui::Area::new(Id::new("editor-layer")).order(egui::Order::Background);
+                editor_area.show(ctx, |ui| {
+                    clicked |= ui.interact(target, Id::new("editor-behind-help"), Sense::click()).clicked();
+                });
+                show(ctx, &mut help);
+            };
+            fit_checks::settle(&context, screen, &mut draw);
+            assert!(context.memory(|memory| memory.top_modal_layer().is_some()));
+            let position = target.center();
+            let press = egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let release = egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            fit_checks::frame(&context, screen, vec![egui::Event::PointerMoved(position), press], &mut draw);
+            fit_checks::frame(&context, screen, vec![release], &mut draw);
+            assert!(!clicked, "a help modal let an editor button receive the click");
+        }
+    }
+
+    #[test]
     fn about_keeps_its_title_and_close_in_small_windows() {
         let context = fit_checks::context();
         let title = concat!("About Nerthus ", env!("CARGO_PKG_VERSION"));
@@ -630,6 +705,38 @@ mod tests {
             let expected = ["Nerthus Version 9.9.9", "Download Update", "Cancel", "Open download page"];
             fit_checks::assert_fits(&context, screen, Id::new("update-check"), &words, &expected);
         }
+    }
+
+    #[test]
+    fn truncated_release_notes_keep_the_notice_below_the_last_bullet() {
+        let context = fit_checks::context();
+        let screen = Vec2::new(1333.0, 800.0);
+        let mut dialog = UpdateDialog::sample();
+        let UpdateAnswer::Available(token) = &mut dialog.answer else {
+            panic!("the sample offers an update");
+        };
+        token.notes = format!("- {}", "release details ".repeat(100));
+        let mut draw = |ctx: &egui::Context| {
+            update_window(ctx, &mut dialog);
+        };
+        let words = fit_checks::settle(&context, screen, &mut draw);
+        let (_, header, _) = words.iter().find(|(text, _, _)| text == "Release Notes").expect("the expander is drawn");
+        let pointer = header.center() + Vec2::new(40.0, 90.0);
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, -10_000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        fit_checks::frame(&context, screen, vec![egui::Event::PointerMoved(pointer), wheel], &mut draw);
+        for _ in 0..30 {
+            fit_checks::frame(&context, screen, Vec::new(), &mut draw);
+        }
+        let words = fit_checks::settle(&context, screen, &mut draw);
+        let (_, notice, clip) = words.iter().find(|(text, _, _)| text == "(read more on download page)").expect("the notice is a separate label");
+        let (_, bullet, _) = words.iter().find(|(text, _, _)| text.starts_with("release details")).expect("the last bullet is drawn");
+        assert!(notice.top() >= bullet.bottom(), "{notice:?} is not below the bullet {bullet:?}");
+        assert!(clip.contains_rect(*notice), "the notice {notice:?} does not scroll into view {clip:?}");
     }
 
     #[test]

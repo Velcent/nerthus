@@ -1052,7 +1052,8 @@ impl Automated {
 /// disabled, with the parameter's menu (`Ctx_Opened`): Bind to (a new
 /// variable, any variable, Unbind), Reset (not while bound), Expression.
 fn parameter_menu(ui: &mut Ui, rect: Rect, enabled: bool, bind_type: BindType, automated: &Automated) -> Option<Edit> {
-    let response = ui.interact(rect, ui.id().with(("parameter-menu", rect.min.x as i32, rect.min.y as i32)), Sense::click());
+    let sense = Sense::click().difference(Sense::FOCUSABLE);
+    let response = ui.interact(rect, ui.id().with(("parameter-menu", rect.min.x as i32, rect.min.y as i32)), sense);
     let base = match bind_type {
         BindType::None => theme::ICON_DEFAULT,
         BindType::Variable => theme::ACCENT_MUTED_PURPLE,

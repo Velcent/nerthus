@@ -219,8 +219,14 @@ impl IrregularSpline {
     }
 
     /// `Interpolate(Vector<float>)`, one lane: the position clamped to the
-    /// nodes' range (SSE min/max order), then the segment's cubic.
+    /// nodes' range (SSE min/max order), then the segment's cubic. A single
+    /// node is a constant curve; an empty curve leaves its input unchanged.
     pub fn interpolate(&self, position: f32) -> f32 {
+        match self.segments.as_slice() {
+            [] => return position,
+            [point] => return point.y,
+            _ => {}
+        }
         let first = self.segments[0].x;
         let last = self.segments[self.segments.len() - 1].x;
         let below_last = if position < last { position } else { last };
@@ -240,6 +246,24 @@ mod tests {
         for (index, expected) in [0.0f32, 0.5, 0.75].iter().enumerate() {
             let value = spline.interpolate(index as f32);
             assert!((value - expected).abs() < 1e-6, "node {index}: {value}");
+        }
+    }
+
+    #[test]
+    fn sparse_irregular_curves_are_safe_to_sample() {
+        let empty = IrregularSpline::from_unsorted(&[]);
+        let constant = IrregularSpline::from_unsorted(&[(0.4, 0.75)]);
+        for position in [-1.0, 0.0, 0.4, 1.0, 2.0] {
+            assert_eq!(empty.interpolate(position), position);
+            assert_eq!(constant.interpolate(position), 0.75);
+        }
+    }
+
+    #[test]
+    fn two_point_irregular_curve_still_interpolates_and_clamps() {
+        let spline = IrregularSpline::from_unsorted(&[(1.0, 0.5), (0.0, 0.0)]);
+        for (position, expected) in [(-1.0, 0.0), (0.0, 0.0), (0.5, 0.25), (1.0, 0.5), (2.0, 0.5)] {
+            assert!((spline.interpolate(position) - expected).abs() < 1e-6);
         }
     }
 }

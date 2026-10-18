@@ -88,12 +88,14 @@ fn apply_limits(members: &mut Map<String, Value>, limits: &VariableLimits) {
     match limits {
         VariableLimits::None => {}
         VariableLimits::Float { min, max } => {
-            set_variable_member(members, "Min", f32_value(*min));
-            set_variable_member(members, "Max", f32_value(*max));
+            let min = if min.is_finite() { *min } else { 0.0 };
+            let max = if max.is_finite() { *max } else { 1.0 };
+            set_variable_member(members, "Min", f32_value(min.min(max)));
+            set_variable_member(members, "Max", f32_value(min.max(max)));
         }
         VariableLimits::Int { min, max } => {
-            set_variable_member(members, "Min", json!(min));
-            set_variable_member(members, "Max", json!(max));
+            set_variable_member(members, "Min", json!(min.min(max)));
+            set_variable_member(members, "Max", json!(min.max(max)));
         }
         VariableLimits::Choices(choices) => {
             // Only a list already there takes the new choices.
@@ -257,6 +259,25 @@ mod tests {
         set_variable_member(&mut members, "Order", json!(3));
         let order: Vec<&str> = members.keys().map(String::as_str).collect();
         assert_eq!(order, ["Order", "Name", "Value", "Type", "Min", "Max", "ExtraData"]);
+    }
+
+    #[test]
+    fn numeric_variable_edits_store_ordered_finite_limits() {
+        for kind in ["Float", "Int", "Range"] {
+            let mut document = Document::new();
+            let key = document.add_variable(kind);
+            let limits = if kind == "Int" { VariableLimits::Int { min: 5, max: 1 } } else { VariableLimits::Float { min: 5.0, max: 1.0 } };
+            document.edit_variable(&key, &key, &limits);
+            let variable = &document.automation().variables[&key];
+            assert_eq!(variable.json["Min"].as_f64(), Some(1.0));
+            assert_eq!(variable.json["Max"].as_f64(), Some(5.0));
+            assert!(document.undo());
+        }
+        let mut members = Map::new();
+        let limits = VariableLimits::Float { min: f32::NAN, max: f32::INFINITY };
+        apply_limits(&mut members, &limits);
+        assert_eq!(members["Min"], json!(0.0));
+        assert_eq!(members["Max"], json!(1.0));
     }
 
     #[test]

@@ -1033,8 +1033,12 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
             if response.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             }
-            let tooltip = port_tooltip(editor, layout.id, port);
-            let response = response.tooltip_at_pointer(tooltip);
+            let response = if state.popup.is_none() {
+                let tooltip = port_tooltip(editor, layout.id, port);
+                response.tooltip_at_pointer(tooltip)
+            } else {
+                response
+            };
             port_responses.push((index, port.clone(), response));
         }
         draw_ports(&painter, layout, &view, origin, state, pointer_on_graph, snap_target.as_ref());
@@ -1962,8 +1966,12 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
         let id = layouts[*index].id;
         // Beside the pointer, not under the node's corner, which at a
         // high zoom is far off or past the graph's edge.
-        let tooltip = node_tooltip(editor, id);
-        let response = response.clone().tooltip_at_pointer(tooltip);
+        let response = if state.popup.is_none() {
+            let tooltip = node_tooltip(editor, id);
+            response.clone().tooltip_at_pointer(tooltip)
+        } else {
+            response.clone()
+        };
         if response.clicked() {
             select_clicked_node(editor, state, layouts, id, modifiers);
         }
@@ -2103,7 +2111,7 @@ fn drag_elements(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layouts: 
         return;
     };
     let view = state.view();
-    let escaped = ui.input(|input| input.key_pressed(Key::Escape)) && !ui.ctx().egui_wants_keyboard_input();
+    let escaped = ui.input(|input| input.key_pressed(Key::Escape)) && !ui.ctx().text_edit_focused();
     let dragging = ui.input(|input| input.pointer.primary_down()) && !escaped;
     if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
         let current = view.to_canvas(origin, pointer);
@@ -2511,7 +2519,7 @@ fn handle_background(
         });
     }
     // Keys while the pointer is over the graph and nothing types.
-    let typing = ui.ctx().egui_wants_keyboard_input();
+    let typing = ui.ctx().text_edit_focused();
     let over = ui.input(|input| input.pointer.hover_pos()).is_some_and(|point| state.rect.contains(point));
     if !typing && over && ui.input(|input| input.key_pressed(Key::Escape)) {
         state.drag = None;
@@ -3678,6 +3686,17 @@ mod tests {
             assert!(GRAPH.contains(point), "{element} rests outside the graph");
             let tooltip = tooltip_at(&context, &mut editor, &mut state, point, &text);
             assert!(tooltip.distance_to_pos(point) <= 16.0, "{element}'s tooltip {tooltip:?} is far from the pointer {point:?}");
+            let canvas = state.view().to_canvas(GRAPH.min, point);
+            let search = SearchPopup::new(SearchMode::Nodes { source: NodeSource::None }, point, [canvas.x, canvas.y]);
+            state.popup = Some(GraphPopup::Search(search));
+            for _ in 0..3 {
+                frame_amid_panels(&context, &mut editor, &mut state, Vec::new());
+            }
+            let tooltip_visible = context.memory(|memory| {
+                memory.areas().visible_layer_ids().iter().any(|layer| layer.order == egui::Order::Tooltip)
+            });
+            assert!(!tooltip_visible, "{element}'s tooltip covers the open search");
+            state.popup = None;
         }
     }
 

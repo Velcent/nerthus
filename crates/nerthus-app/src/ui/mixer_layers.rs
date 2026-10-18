@@ -21,8 +21,9 @@ use crate::icons;
 use crate::theme;
 use crate::ui::colour_button::colour_button;
 use crate::ui::colour_picker::{linear_to_srgb, srgb_to_linear};
-use crate::ui::editors::{dropdown_box, option_list, range_slider, slider, Edit, RangeSpec, SliderSpec};
+use crate::ui::editors::{dropdown_box, fitted_line, option_list, range_slider, slider, Edit, RangeSpec, SliderSpec};
 use crate::ui::graph_canvas::elided_galley;
+use crate::ui::widgets::Tooltips;
 use crate::worker::WatchedNode;
 
 /// `MaskSource` as the source list names it.
@@ -486,12 +487,19 @@ fn layer_editor(ui: &mut Ui, id: Id, layer: &Value, label: &str, key: &str, colo
         ui.spacing_mut().item_spacing = Vec2::ZERO;
         // The header: the source in the colour (monospace bold) and the
         // layer's name (margin 8, 4).
-        let (header, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
-        let name = ui.painter().layout_no_wrap(label.to_string(), theme::monospace_bold(12.0), color);
-        ui.painter().galley(Pos2::new(header.left() + 8.0, header.center().y - name.size().y / 2.0), name, color);
+        let (header, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
         let layer_name = ui.painter().layout_no_wrap(humanize_title(key), theme::monospace(12.0), theme::LABEL_DEFAULT);
         let layer_position = Pos2::new(header.right() - 8.0 - layer_name.size().x, header.center().y - layer_name.size().y / 2.0);
-        ui.painter().galley(layer_position, layer_name, theme::LABEL_DEFAULT);
+        let name_width = (layer_position.x - 8.0 - (header.left() + 8.0)).max(0.0);
+        let name = fitted_line(ui, label, theme::monospace_bold(12.0), color, name_width);
+        let elided = name.elided;
+        let name_position = Pos2::new(header.left() + 8.0, header.center().y - name.size().y / 2.0);
+        let name_rect = Rect::from_min_max(header.min, Pos2::new((layer_position.x - 8.0).max(header.left()), header.bottom()));
+        ui.painter_at(name_rect).galley(name_position, name, color);
+        ui.painter_at(header).galley(layer_position, layer_name, theme::LABEL_DEFAULT);
+        if elided {
+            response.tooltip(label);
+        }
 
         // The mask source (`lstSource`: `ListBox-OptionsX` at 10, its
         // `UniformGrid` one row at any width).
@@ -655,6 +663,31 @@ mod tests {
         });
         let topmost = found.min_by(|(_, one), (_, other)| one.pos.y.total_cmp(&other.pos.y));
         topmost.unwrap_or_else(|| panic!("{text:?} shows"))
+    }
+
+    #[test]
+    fn layer_editor_elides_the_source_before_the_layer_name() {
+        let context = themed_context();
+        let (mut document, mixer) = mixer(1);
+        let source = document.add_node("Constant", [0.0, 0.0]).unwrap();
+        let name = "Very Long Source Terrain Name With Extra Words And More Descriptive Terrain Details";
+        document.rename(source, name);
+        document.connect(source, "Out", mixer, "Layer1");
+        for width in WIDTHS {
+            let shapes = frame(&context, &document, mixer, width);
+            let source_names = shapes.iter().filter_map(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == name => Some((clipped.clip_rect, text)),
+                _ => None,
+            });
+            let header = source_names.max_by(|(_, one), (_, other)| one.pos.y.total_cmp(&other.pos.y)).expect("the editor source header shows");
+            let layer = shapes.iter().find_map(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == "Layer 1" && (text.pos.y - header.1.pos.y).abs() < 1.0 => Some(text),
+                _ => None,
+            }).expect("the layer number shows beside the source");
+            assert!(header.1.galley.elided, "at {width}, the long source was not elided");
+            let visible_name = header.1.visual_bounding_rect().intersect(header.0);
+            assert!(visible_name.right() <= layer.visual_bounding_rect().left() - 6.0, "at {width}, {visible_name:?} overlaps the layer number");
+        }
     }
 
     #[test]

@@ -15,6 +15,8 @@ pub mod postprocess_params;
 pub mod project;
 pub mod registry;
 pub mod slider;
+#[path = "user-paths.rs"]
+pub mod user_paths;
 
 pub use context::{BuildContext, CacheLevel, NodeState, ResourceProvider, TerrainDefinition, TileInfo};
 pub use dotnet_random::DotNetRandom;

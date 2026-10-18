@@ -600,6 +600,7 @@ mod focus_tests {
         let mut result = FocusFrame::default();
         let output = context.run_ui(input, |ui| {
             let context = ui.ctx().clone();
+            crate::ui::suppress_tab_focus(&context);
             focus_scope(&context, Id::new("focus-options"));
             let field = egui::TextEdit::singleline(&mut result.shell_text).id(Id::new("focus-shell-field"));
             let response = ui.add(field);

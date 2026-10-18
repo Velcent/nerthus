@@ -292,6 +292,7 @@ impl UiState {
     pub fn reset_views(&mut self) {
         self.graph.reset();
         self.data_view.reset();
+        self.statistics = None;
         self.viewport_2d.reset();
         if let Some(settings) = &mut self.build_settings {
             *settings = build_settings::BuildSettingsState::new(settings.tab);
@@ -470,6 +471,8 @@ fn draw_editor(
 ) -> Result {
     if ui_state.document_serial != editor.document_serial {
         ui_state.reset_views();
+        math_editor::reset(ctx);
+        painter::reset(ctx);
         // The project opens on the graph tab it was saved showing.
         ui_state.graph.tab = editor.document.opening_tab();
         ui_state.document_serial = editor.document_serial;
@@ -511,6 +514,7 @@ fn draw_editor(
     if starts_value_edit {
         editor.document.finish_value_edit();
     }
+    suppress_tab_focus(ctx);
     // An open menu takes its keys first.
     menu_keys::begin(ctx);
     // Then Esc closes the tool window on top.
@@ -748,7 +752,7 @@ fn draw_editor(
         ui_state.viewport_focused = over_view && !over_window;
     }
     let modifiers = ctx.input(|state| state.modifiers);
-    input.keys = ui_state.viewport_focused && !dialog_open && !ctx.egui_wants_keyboard_input() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
+    input.keys = ui_state.viewport_focused && !dialog_open && !ctx.text_edit_focused() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
     Ok(())
 }
 
@@ -938,7 +942,7 @@ fn split_layout(ui: &mut Ui, grid: Rect, state: &mut UiState, floating: bool) ->
     let row_split = (left.top() + top_height).round();
 
     let vertical = Rect::from_center_size(Pos2::new(column_split, grid.center().y), Vec2::new(SPLITTER, grid.height()));
-    let vertical_response = ui.interact(vertical, ui.id().with("splitter-columns"), Sense::drag());
+    let vertical_response = ui.interact(vertical, ui.id().with("splitter-columns"), Sense::drag().difference(Sense::FOCUSABLE));
     if vertical_response.hovered() || vertical_response.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
     }
@@ -953,7 +957,7 @@ fn split_layout(ui: &mut Ui, grid: Rect, state: &mut UiState, floating: bool) ->
     let viewport = Rect::from_min_max(left.min, Pos2::new(left.right(), row_split));
     let graph = Rect::from_min_max(Pos2::new(left.left(), row_split), left.max);
     let horizontal = Rect::from_center_size(Pos2::new(left.center().x, row_split), Vec2::new(left.width(), SPLITTER));
-    let horizontal_response = ui.interact(horizontal, ui.id().with("splitter-rows"), Sense::drag());
+    let horizontal_response = ui.interact(horizontal, ui.id().with("splitter-rows"), Sense::drag().difference(Sense::FOCUSABLE));
     if horizontal_response.hovered() || horizontal_response.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
     }
@@ -1137,11 +1141,23 @@ fn refuses_shift(command: &Command) -> bool {
     matches!(command, Command::ZoomReset | Command::ZoomSelection | Command::Graph(GraphCommand::LazyMenu))
 }
 
+/// Keep Tab from silently focusing shell widgets outside a text field.
+fn suppress_tab_focus(ctx: &egui::Context) {
+    // Outside text fields Tab belongs to node search or menu navigation.
+    // Egui has already queued its own focus move before we read the key.
+    let focused_layer = ctx.memory(|memory| memory.focused()).and_then(|id| ctx.read_response(id)).map(|response| response.layer_id);
+    let tool_has_focus = focused_layer.is_some_and(|layer| layer.order != egui::Order::Background);
+    let modal_open = ctx.memory(|memory| memory.top_modal_layer().is_some());
+    if !ctx.text_edit_focused() && !tool_has_focus && !modal_open && ctx.input(|input| input.key_pressed(Key::Tab)) {
+        ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    }
+}
+
 /// The keyboard shortcuts: none while a text field has the keyboard, and
 /// the node keys only when `node_keys` allows them.
 fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
     // `Shell_KeyUp` takes no keys while a text box has the keyboard.
-    if ctx.egui_wants_keyboard_input() {
+    if ctx.text_edit_focused() || ctx.any_popup_open() || menu_keys::bar_focus(ctx).is_some() {
         return;
     }
     let command = Modifiers::COMMAND;
@@ -1390,6 +1406,49 @@ mod tests {
         assert_eq!(pressed(search, false), vec![Command::Graph(GraphCommand::NodeSearch)]);
         let copy = vec![key(Key::C, Modifiers::COMMAND)];
         assert!(pressed(copy, false).is_empty());
+    }
+
+    #[test]
+    fn tab_outside_text_fields_keeps_shell_controls_unfocused() {
+        let context = egui::Context::default();
+        let mut state = UiState::default();
+        for frame in 0..3 {
+            let events = if frame == 1 { vec![key(Key::Tab, Modifiers::NONE)] } else { Vec::new() };
+            let input = egui::RawInput { events, ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                suppress_tab_focus(ui.ctx());
+                let grid = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+                split_layout(ui, grid, &mut state, false);
+                let _ = ui.button("Preview resolution");
+            });
+            output.drop_without_applying_deltas();
+            assert_eq!(context.memory(|memory| memory.focused()), None, "frame {frame}");
+        }
+    }
+
+    #[test]
+    fn button_focus_does_not_block_the_shell_shortcuts() {
+        let context = egui::Context::default();
+        let mut pending = Vec::new();
+        for frame in 0..2 {
+            let events = if frame == 1 {
+                vec![key(Key::Delete, Modifiers::NONE), key(Key::F12, Modifiers::NONE)]
+            } else {
+                Vec::new()
+            };
+            let input = egui::RawInput { events, ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                shortcuts(ui.ctx(), true, &mut pending);
+                tool_commands::shortcuts(ui.ctx(), &mut pending);
+                let response = ui.button("Button without text input");
+                if frame == 0 {
+                    response.request_focus();
+                }
+            });
+            output.drop_without_applying_deltas();
+        }
+        let expected = vec![Command::Delete, Command::Tools(tool_commands::ToolCommand::ShowConsole)];
+        assert_eq!(pending, expected);
     }
 
     #[test]

@@ -24,10 +24,7 @@ pub struct LocationTokens<'a> {
 
 /// The default `BuildRepo`: `Documents/Nerthus/Builds`.
 pub fn default_builds_root() -> PathBuf {
-    let user_dirs = directories::UserDirs::new();
-    let documents = user_dirs.as_ref().and_then(|dirs| dirs.document_dir());
-    let base = documents.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-    base.join("Nerthus").join("Builds")
+    nerthus_core::user_paths::default_storage_folder().join("Builds")
 }
 
 fn user_name() -> String {

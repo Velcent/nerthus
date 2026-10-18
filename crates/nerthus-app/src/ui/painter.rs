@@ -91,6 +91,15 @@ pub fn is_open(ctx: &egui::Context) -> bool {
     ctx.data(|data| data.get_temp::<bool>(painting_id()).is_some())
 }
 
+/// Drops the previous document's strokes and any unfinished brush gesture.
+pub fn reset(ctx: &egui::Context) {
+    ctx.data_mut(|data| {
+        data.remove::<PainterState>(window_id());
+        data.remove::<bool>(painting_id());
+    });
+    tool_window::close_requested(ctx, area_id());
+}
+
 /// `Editor_CommandExecuted("OpenPainter")`: the window for a Draw node.
 pub fn open(ctx: &egui::Context, editor: &Editor, node: i32) {
     tool_window::close_requested(ctx, area_id());
@@ -390,6 +399,30 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::ui::{tool_commands, UiState};
+
+    #[test]
+    fn document_reset_discards_stale_strokes_and_the_painting_gesture() {
+        let context = egui::Context::default();
+        let mut editor = Editor::new(Document::new());
+        editor.preview_resolution = 32;
+        let node = editor.document.add_node("Draw", [0.0, 0.0]).unwrap();
+        open(&context, &editor, node);
+        context.data_mut(|data| data.insert_temp(painting_id(), true));
+        let mut replacement = Document::new();
+        replacement.project = editor.document.project.clone();
+        replacement.dirty = false;
+        editor.set_document(replacement);
+        let before = editor.document.node(node).unwrap().values.clone();
+
+        reset(&context);
+        let output = context.run_ui(egui::RawInput::default(), |ui| show(ui.ctx(), &mut editor));
+        output.drop_without_applying_deltas();
+
+        assert!(!is_open(&context));
+        assert!(!painting(&context));
+        assert_eq!(editor.document.node(node).unwrap().values, before);
+        assert!(!editor.document.dirty);
+    }
 
     #[test]
     fn escape_closes_the_painter_and_clears_the_painting_flag() {

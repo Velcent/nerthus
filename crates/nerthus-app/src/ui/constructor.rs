@@ -626,10 +626,19 @@ fn terrain_list(ui: &mut Ui, editor: &mut Editor, window: &mut ConstructorWindow
             ui.painter().rect_filled(swatch, 2.0, transform_colour(transform));
             ui.painter().rect_stroke(swatch, 2.0, Stroke::new(1.0, Color32::from_black_alpha(0x66)), StrokeKind::Inside);
             let title = terrain_title(editor, window.node, transform, place);
-            let galley = ui.painter().layout_no_wrap(title, theme::semibold(12.0), theme::LABEL_DEFAULT);
-            ui.painter().galley(Pos2::new(swatch.right() + 10.0, rect.center().y - galley.size().y / 2.0), galley, theme::LABEL_DEFAULT);
             let blend = ui.painter().layout_no_wrap(transform.blend_mode.clone(), theme::interface(12.0), theme::ACCENT_GRAY);
-            ui.painter().galley(Pos2::new(rect.right() - 8.0 - blend.size().x, rect.center().y - blend.size().y / 2.0), blend, theme::ACCENT_GRAY);
+            let blend_position = Pos2::new(rect.right() - 8.0 - blend.size().x, rect.center().y - blend.size().y / 2.0);
+            let title_left = swatch.right() + 10.0;
+            let title_right = (blend_position.x - 8.0).max(title_left);
+            let title_rect = Rect::from_min_max(Pos2::new(title_left, rect.top()), Pos2::new(title_right, rect.bottom()));
+            let galley = editors::fitted_line(ui, &title, theme::semibold(12.0), theme::LABEL_DEFAULT, title_rect.width());
+            let elided = galley.elided;
+            let title_position = Pos2::new(title_left, rect.center().y - galley.size().y / 2.0);
+            ui.painter_at(title_rect).galley(title_position, galley, theme::LABEL_DEFAULT);
+            ui.painter_at(rect).galley(blend_position, blend, theme::ACCENT_GRAY);
+            if elided {
+                response.clone().tooltip(&title);
+            }
             if response.clicked() {
                 window.selected = place;
             }
@@ -808,6 +817,36 @@ mod tests {
         labels.sort_by(|one, other| one.1.left().total_cmp(&other.1.left()));
         icons.sort_by(|one, other| one.left().total_cmp(&other.left()));
         (labels, icons)
+    }
+
+    #[test]
+    fn terrain_titles_elide_before_every_blend_label() {
+        let context = themed_context();
+        let mut editor = Editor::new(crate::document::Document::new());
+        let construction = editor.document.add_node("Construction", [0.0, 0.0]).unwrap();
+        let source = editor.document.add_node("Constant", [0.0, 0.0]).unwrap();
+        editor.document.rename(source, "Mountain Range Generator Primary Peaks With Many More Descriptive Words");
+        editor.document.connect(source, "Out", construction, "Terrain1");
+        let mut window = ConstructorWindow::new(construction);
+        for mode in ["Max", "Min", "Add", "Subtract"] {
+            let values = vec![("Transforms".to_string(), json!([{"Index": 0, "BlendMode": mode}]))];
+            editor.document.set_values_quietly(construction, &values);
+            for width in [220.0, 300.0, 420.0] {
+                let input = egui::RawInput::default();
+                let mut output = context.run_ui(input, |ui| {
+                    let rect = Rect::from_min_size(Pos2::new(20.0, 0.0), Vec2::new(width, 300.0));
+                    let mut panel = ui.new_child(UiBuilder::new().max_rect(rect));
+                    terrain_list(&mut panel, &mut editor, &mut window);
+                });
+                let shapes = std::mem::take(&mut output.shapes);
+                output.drop_without_applying_deltas();
+                let (labels, _) = labels_and_icons(&shapes);
+                let title = labels.iter().find(|(text, _, _)| text.starts_with("1: Mountain")).expect("the terrain title shows");
+                let blend = labels.iter().find(|(text, _, _)| text == mode).expect("the blend label shows");
+                assert!(title.0.ends_with('…'), "at {width}, the title was not elided: {title:?}");
+                assert!(title.1.intersect(title.2).right() <= blend.1.left() - 6.0, "at {width}, {title:?} overlaps {blend:?}");
+            }
+        }
     }
 
     #[test]

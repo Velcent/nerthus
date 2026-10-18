@@ -881,7 +881,11 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
             }
         }
         Command::ShowOptions(tab) => {
-            if ui_state.options.is_none() {
+            if let Some(options) = &mut ui_state.options {
+                if let Some(tab) = tab {
+                    options.tab = tab;
+                }
+            } else {
                 let tab = tab.unwrap_or(ui_state.last_options_tab);
                 ui_state.options = Some(OptionsState::new(tab));
             }

@@ -180,6 +180,7 @@ pub fn draw(
     ctx.set_zoom_factor(editor.user.options.ui_scale());
     crate::theme::set_settings(&ctx, editor.user.options.interface_settings());
     crate::ui::formulas::publish(&ctx, &editor);
+    super::suppress_tab_focus(&ctx);
     crate::ui::menu_keys::begin(&ctx);
     let lighting = viewport_area::lighting_panel_id();
     if ui_state.sun_open && tool_window::take_escape(&ctx, &[lighting]).is_some() {
@@ -229,9 +230,9 @@ pub fn draw(
     // egui retains a field's focus while its native window is inactive.
     // Only the active main context can claim the shared keyboard.
     let main_focused = main_ctx.input(|state| state.focused);
-    let main_keys_blocked = main_focused && (main_ctx.egui_wants_keyboard_input() || main_ctx.any_popup_open());
+    let main_keys_blocked = main_focused && (main_ctx.text_edit_focused() || main_ctx.any_popup_open());
     let modifiers = ctx.input(|state| state.modifiers);
-    input.keys = window.focused && interface.viewport_focused && !main_keys_blocked && !dialog_open && !ctx.egui_wants_keyboard_input() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
+    input.keys = window.focused && interface.viewport_focused && !main_keys_blocked && !dialog_open && !ctx.text_edit_focused() && !ctx.any_popup_open() && !modifiers.command && !modifiers.ctrl;
 }
 
 #[cfg(test)]
@@ -278,8 +279,10 @@ mod focus_tests {
             ctx.begin_pass(input);
             let main_input = egui::RawInput { focused: main_focused, ..default() };
             main_ctx.begin_pass(main_input);
-            main_ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("main-text-field")));
-            assert!(main_ctx.egui_wants_keyboard_input());
+            let text_id = egui::Id::new("main-text-field");
+            egui::text_edit::TextEditState::default().store(&main_ctx, text_id);
+            main_ctx.memory_mut(|memory| memory.request_focus(text_id));
+            assert!(main_ctx.text_edit_focused());
 
             world.run_system(draw_system).unwrap();
             let input = world.resource::<ViewportInput>();

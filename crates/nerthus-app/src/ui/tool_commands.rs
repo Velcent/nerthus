@@ -205,7 +205,7 @@ pub fn proxy_settings(preferences: &Preferences) -> ProxySettings {
 /// The shell's keys for these commands (`Shell.OnPreviewKeyDown`); none
 /// while a text field has the keyboard.
 pub fn shortcuts(ctx: &egui::Context, pending: &mut Vec<Command>) {
-    if ctx.egui_wants_keyboard_input() || egui::Popup::is_any_open(ctx) {
+    if ctx.text_edit_focused() || egui::Popup::is_any_open(ctx) || super::menu_keys::bar_focus(ctx).is_some() {
         return;
     }
     // Windows take Esc before these shortcuts. In the shell it stops the
@@ -249,6 +249,22 @@ pub fn start(editor: &Editor, ui_state: &mut UiState) {
 /// rollback, the Painter's cleanup, and a running export's cancellation.
 /// The Artifact Explorer and console keep their source behavior and stay.
 pub fn take_escape(ctx: &egui::Context, editor: &mut Editor, ui_state: &mut UiState) {
+    // Help uses real modals. Route its Cancel key before the shell reads
+    // shortcuts, just as for the ordinary tool windows below. A popup
+    // above a modal still gets the first Escape.
+    let help_modals = [
+        (ui_state.help.shortcuts, egui::Id::new("shortcut-guide")),
+        (ui_state.help.whats_new.is_some(), egui::Id::new("whats-new")),
+        (ui_state.help.about, egui::Id::new("about-nerthus")),
+    ];
+    let top_modal = ctx.memory(|memory| memory.top_modal_layer()).map(|layer| layer.id);
+    let top_help = help_modals.into_iter().find(|(open, id)| *open && Some(*id) == top_modal);
+    if let Some((_, id)) = top_help {
+        if !egui::Popup::is_any_open(ctx) && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
+            tool_window::request_close(ctx, id);
+        }
+        return;
+    }
     let build_progress = editor.export_build.as_ref().is_some_and(|build| matches!(build.kind, crate::export_build::ExportKind::Build));
     let shown = [
         (ui_state.diagnostics.is_some(), diagnostics_window::window_id()),

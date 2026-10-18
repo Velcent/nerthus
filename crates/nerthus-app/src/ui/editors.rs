@@ -254,9 +254,18 @@ pub struct SliderSpec {
     pub modifier: bool,
 }
 
+/// Saved variables can carry reversed or non-finite limits. Keep every
+/// slider's range ordered before mapping values or passing it to `clamp`.
+fn slider_limits(min: f64, max: f64) -> (f64, f64) {
+    let min = if min.is_finite() { min } else { 0.0 };
+    let max = if max.is_finite() { max } else { 1.0 };
+    (min.min(max), min.max(max))
+}
+
 impl SliderSpec {
     /// A plain slider over `min..max`.
     pub fn linear(min: f64, max: f64) -> Self {
+        let (min, max) = slider_limits(min, max);
         SliderSpec {
             min,
             max,
@@ -465,8 +474,9 @@ fn irregular_tick_values(min: f32, max: f32, max_ticks: usize) -> Vec<f64> {
 /// Up 1 a hundredth, and the result is held to the range (`SetValue`).
 fn nudged(nudge: Nudge, value: f64, spec: &SliderSpec) -> f64 {
     let value = value as f32;
-    let min = spec.min as f32;
-    let max = spec.max as f32;
+    let (min, max) = slider_limits(spec.min, spec.max);
+    let min = min as f32;
+    let max = max as f32;
     let tenth = (max - min) / 10.0;
     let new_value = match nudge {
         Nudge::Half => value * 0.5,
@@ -492,7 +502,8 @@ fn typed_value(ctx: &egui::Context, text: &str, spec: &SliderSpec) -> Option<f64
     if number.is_nan() {
         return None;
     }
-    let clamped = number.clamp(spec.min as f32, spec.max as f32) as f64;
+    let (min, max) = slider_limits(spec.min, spec.max);
+    let clamped = number.clamp(min as f32, max as f32) as f64;
     Some(if spec.integer { clamped.round_ties_even() } else { clamped })
 }
 
@@ -671,6 +682,7 @@ pub struct RangeSpec {
 impl RangeSpec {
     /// A range over `min..max`.
     pub fn linear(min: f64, max: f64) -> Self {
+        let (min, max) = slider_limits(min, max);
         RangeSpec {
             min,
             max,
@@ -1021,8 +1033,9 @@ fn range_text(value: f64, integer: bool, precise: bool) -> String {
 /// `SetValue` (each end held to the range), then `UpdateUIElements`, which
 /// keeps the high thumb at or above the low one.
 fn held_range(low: f32, high: f32, spec: &RangeSpec) -> (f64, f64) {
-    let min = spec.min as f32;
-    let max = spec.max as f32;
+    let (min, max) = slider_limits(spec.min, spec.max);
+    let min = min as f32;
+    let max = max as f32;
     let low = low.clamp(min, max);
     let high = high.clamp(min, max).max(low);
     (low as f64, high as f64)
@@ -1046,8 +1059,9 @@ fn typed_range(ctx: &egui::Context, text: &str, low: f64, high: f64, spec: &Rang
 /// hundredth of the range, Down 1 and Up 1 a thousandth; Default puts the
 /// whole range back first.
 fn range_nudged(nudge: Nudge, low: f64, high: f64, spec: &RangeSpec, end: RangeEnd) -> (f64, f64) {
-    let min = spec.min as f32;
-    let max = spec.max as f32;
+    let (min, max) = slider_limits(spec.min, spec.max);
+    let min = min as f32;
+    let max = max as f32;
     let step = (max - min) / 100.0;
     let mut low = low as f32;
     let mut high = high as f32;
@@ -1519,7 +1533,13 @@ pub fn dropdown_box(ui: &mut Ui, id: Id, header: Option<&str>, column: f32, heig
     popup = popup.align(egui::RectAlign::BOTTOM_START);
     popup = popup.align_alternatives(&alternatives);
     popup = popup.width(popup_width);
+    let parent_layer = ui.layer_id();
     popup.show(|ui| {
+        // A modal is also Foreground and raises itself on pointer presses.
+        // Keep its open list directly above it after that layer ordering.
+        if parent_layer.order == ui.layer_id().order {
+            ui.ctx().set_sublayer(parent_layer, ui.layer_id());
+        }
         ui.set_min_width(popup_width - frame_width);
         let mut scroll = egui::ScrollArea::vertical();
         scroll = scroll.max_height(340.0);
@@ -1984,7 +2004,7 @@ pub fn curve_editor(ui: &mut Ui, id: Id, points: &[[f32; 2]]) -> Option<Vec<[f32
             && let Some(index) = drag.dragging.take() {
                 let still = pointer.is_some_and(|position| position.distance(drag.pressed_at) < 1.0);
                 let terminal = drag.terminal.get(index).copied().unwrap_or(false);
-                if still && !drag.just_added && !terminal {
+                if still && !drag.just_added && !terminal && points.len() > 2 {
                     points.remove(index);
                     drag.terminal.remove(index);
                     changed = true;
@@ -2413,6 +2433,77 @@ mod tests {
         assert_eq!(nudged(Nudge::Default, 5.0, &spec), 4.0);
         spec.integer = true;
         assert_eq!(nudged(Nudge::Half, 5.0, &spec), 2.0);
+    }
+
+    #[test]
+    fn variable_sliders_recover_from_reversed_and_nan_limits() {
+        let context = themed_context();
+        for (min, max) in [(5.0, 1.0), (f64::NAN, 1.0), (0.0, f64::NAN), (2.0, 2.0)] {
+            let mut scalar = SliderSpec::linear(min, max);
+            let mut range = RangeSpec::linear(min, max);
+            assert!(scalar.min <= scalar.max);
+            assert!(range.min <= range.max);
+            // Also protect callers that change the public limits directly.
+            scalar.min = min;
+            scalar.max = max;
+            scalar.default = Some(3.0);
+            range.min = min;
+            range.max = max;
+            range.default = Some((2.0, 4.0));
+            let nudges = [Nudge::Half, Nudge::Double, Nudge::Min, Nudge::Down10, Nudge::Down1, Nudge::Default, Nudge::Up1, Nudge::Up10, Nudge::Max];
+            let (ordered_min, ordered_max) = slider_limits(min, max);
+            for nudge in nudges {
+                let scalar_value = nudged(nudge, 2.0, &scalar);
+                assert!((ordered_min..=ordered_max).contains(&scalar_value));
+                for end in [RangeEnd::Low, RangeEnd::High] {
+                    let (low, high) = range_nudged(nudge, 2.0, 4.0, &range, end);
+                    assert!(ordered_min <= low && low <= high && high <= ordered_max);
+                }
+            }
+            let scalar_value = typed_value(&context, "9", &scalar).unwrap();
+            assert_eq!(scalar_value, ordered_max);
+            for end in [RangeEnd::Low, RangeEnd::High] {
+                let (low, high) = typed_range(&context, "9", 2.0, 4.0, &range, end).unwrap();
+                assert!(ordered_min <= low && low <= high && high <= ordered_max);
+            }
+        }
+    }
+
+    #[test]
+    fn curve_clicks_remove_points_until_two_remain() {
+        let context = themed_context();
+        let mut points = vec![[0.1, 0.1], [0.5, 0.5], [0.9, 0.8]];
+        let mut frame = |events| {
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+            let input = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                if let Some(updated) = curve_editor(ui, Id::new("curve-minimum"), &points) {
+                    points = updated;
+                }
+            });
+            let thumb_position = |shape: &egui::epaint::ClippedShape| match &shape.shape {
+                egui::Shape::Circle(circle) if circle.radius == 6.0 => Some(circle.center),
+                _ => None,
+            };
+            let thumbs: Vec<Pos2> = output.shapes.iter().filter_map(thumb_position).collect();
+            let count = points.len();
+            output.drop_without_applying_deltas();
+            (count, thumbs)
+        };
+        frame(Vec::new());
+        let (_, thumbs) = frame(Vec::new());
+        let middle = thumbs[1];
+        for event in [egui::Event::PointerMoved(middle), press(middle, egui::PointerButton::Primary, true)] {
+            frame(vec![event]);
+        }
+        let (count, thumbs) = frame(vec![press(middle, egui::PointerButton::Primary, false)]);
+        assert_eq!(count, 2, "a non-terminal point can still be removed");
+        for position in thumbs {
+            for event in [egui::Event::PointerMoved(position), press(position, egui::PointerButton::Primary, true), press(position, egui::PointerButton::Primary, false)] {
+                let (count, _) = frame(vec![event]);
+                assert_eq!(count, 2, "the final two points must stay");
+            }
+        }
     }
 
     const FILE_ROW: Rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(400.0, 32.0));

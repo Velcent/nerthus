@@ -119,7 +119,7 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         let selected = state.selected_note == Some(note.id);
         let links = draw(ui, painter, note, screen, zoom, selected);
         let response = ui.interact(screen, ui.id().with(("note", note.id)), Sense::click_and_drag());
-        let response = if note.icon_only && !note.markdown.is_empty() {
+        let response = if state.popup.is_none() && note.icon_only && !note.markdown.is_empty() {
             response.tooltip_ui_at_pointer(|ui| {
                 ui.set_max_width(400.0);
                 let mut scroll = egui::ScrollArea::vertical();

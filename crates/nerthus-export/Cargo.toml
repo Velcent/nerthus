@@ -7,13 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+nerthus-core.workspace = true
 nerthus-assimp.workspace = true
 nerthus-engine.workspace = true
 nerthus-image.workspace = true
 nerthus-nodes.workspace = true
 chrono.workspace = true
 crc32fast = "1.5.2"
-directories.workspace = true
 flate2.workspace = true
 half.workspace = true
 jpeg-encoder = "0.7.1"

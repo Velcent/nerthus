@@ -14,7 +14,7 @@ Help › Shortcut Reference shows these too.
 | Save                               |         `Ctrl + S` |
 | Save As                            | `Ctrl + Shift + S` |
 | Undo                               |         `Ctrl + Z` |
-| Redo                               |         `Ctrl + Y` |
+| Redo                               | `Ctrl + Y` `Ctrl + Shift + Z` |
 | Toggle 2D Viewport                 |               `F6` |
 | Floating Viewport for current node |        `Ctrl + F6` |
 | Floating Viewport or Map Viewer    |         `Ctrl + M` |
@@ -30,6 +30,7 @@ Help › Shortcut Reference shows these too.
 | Command                   |    Shortcut |
 | :------------------------ | ----------: |
 | Lazy Menu                 |        `F1` |
+| Open / close main menu    |       `F10` |
 | Data View - Terrain Tab   | `Ctrl + F1` |
 | Data View - Build Tab     | `Ctrl + F3` |
 | Property View - Modifiers |         `M` |
@@ -80,7 +81,7 @@ Click the viewport first: it keeps the keys until you click elsewhere.
 
 | Command                          |   Shortcut |
 | :------------------------------- | ---------: |
-| Delete node / connection         |      `Del` |
+| Delete node / connection         | `Del` `Backspace` |
 | Duplicate node                   | `Ctrl + D` |
 | Rename node                      |       `F2` |
 |                                  |            |
@@ -93,4 +94,5 @@ Click the viewport first: it keeps the keys until you click elsewhere.
 | Reset node to default settings   | `Ctrl + R` |
 | Cycle render intent              |        `T` |
 | Toggle gizmo (if available)      |        `Z` |
+| Toggle flat terrain preview      |        `V` |
 | Cycle node shape                 |      `F11` |

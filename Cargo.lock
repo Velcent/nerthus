@@ -4900,6 +4900,7 @@ name = "nerthus-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "directories",
  "log",
  "parking_lot",
  "rayon",
@@ -4940,13 +4941,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "crc32fast",
- "directories",
  "flate2",
  "gethostname",
  "half",
  "jpeg-encoder",
  "log",
  "nerthus-assimp",
+ "nerthus-core",
  "nerthus-engine",
  "nerthus-image",
  "nerthus-nodes",
@@ -4978,7 +4979,6 @@ dependencies = [
  "chrono",
  "crc",
  "crc32fast",
- "directories",
  "exr",
  "flate2",
  "gethostname",

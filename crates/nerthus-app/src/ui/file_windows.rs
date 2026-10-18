@@ -413,7 +413,6 @@ fn examples_window(ctx: &egui::Context, editor: &mut Editor, commands: &mut Vec<
     let mut window = egui::Window::new("Examples");
     window = window.collapsible(false);
     window = window.resizable(true);
-    window = window.anchor(Align2::CENTER_CENTER, Vec2::ZERO);
     window = tool_window::place(ctx, window, Id::new("examples-window"), EXAMPLES_SIZE);
     window = window.frame(egui::Frame::window(&ctx.global_style()).fill(theme::WINDOW_DARK));
     window = window.open(&mut open);

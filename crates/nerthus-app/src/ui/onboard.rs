@@ -478,11 +478,7 @@ fn refusal(ctx: &egui::Context, onboard: &mut Onboard) {
 /// A `ListBox-OptionsX` item `width` wide: a bold first line and a plain
 /// second, centred and wrapped in it, the selected one on the selection
 /// brush. It is 56 tall, or taller for lines that wrap.
-fn option_item(ui: &mut Ui, width: f32, title: &str, detail: &str, selected: bool) -> egui::Response {
-    let wrap_width = (width - 16.0).max(0.0);
-    let title_galley = centred_text(ui, title, theme::semibold(14.0), wrap_width);
-    let detail_galley = centred_text(ui, detail, theme::interface(14.0), wrap_width);
-    let height = title_galley.size().y + detail_galley.size().y;
+fn option_item(ui: &mut Ui, width: f32, title_galley: Arc<Galley>, detail_galley: Arc<Galley>, height: f32, selected: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, (height + 16.0).max(56.0)), Sense::click());
     if selected {
         ui.painter().rect_filled(rect, 2.0, theme::OPTIONS_SELECTION);
@@ -514,9 +510,20 @@ fn preferences_page(ui: &mut Ui, onboard: &mut Onboard) {
         ("Industry Standard", "Alt+LMB Orbit / Alt+MMB Pan / Alt+RMB Zoom"),
     ];
     let (beside, width) = list_items(ui.available_width().min(840.0), MIN_CHOICE_WIDTH, f32::INFINITY);
+    let wrap_width = (width - 16.0).max(0.0);
+    let mut choices = Vec::new();
+    let mut shared_height = 0.0_f32;
+    for (title, detail) in navigation_choices {
+        let title_galley = centred_text(ui, title, theme::semibold(14.0), wrap_width);
+        let detail_galley = centred_text(ui, detail, theme::interface(14.0), wrap_width);
+        let height = title_galley.size().y + detail_galley.size().y;
+        shared_height = shared_height.max(height);
+        choices.push((title_galley, detail_galley, height));
+    }
     list_frame(ui, beside, |ui| {
-        for (index, (title, detail)) in navigation_choices.iter().enumerate() {
-            if option_item(ui, width, title, detail, onboard.navigation == index).clicked() {
+        for (index, (title_galley, detail_galley, height)) in choices.into_iter().enumerate() {
+            let height = if beside { shared_height } else { height };
+            if option_item(ui, width, title_galley, detail_galley, height, onboard.navigation == index).clicked() {
                 onboard.navigation = index;
             }
         }

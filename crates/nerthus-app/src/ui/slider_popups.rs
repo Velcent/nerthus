@@ -170,6 +170,12 @@ fn show_typing_box(ui: &Ui, id: Id, look: &TypingLook, multiline: bool) -> Optio
         Vec2::new(width, height.min(screen.height()))
     };
     let size = outer_size(&typing.text);
+    // Tab accepts this transient editor. Cancel egui's queued focus move
+    // before TextEdit hands the keyboard to an unrelated property widget.
+    let tabbed = typing.focused && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+    if tabbed {
+        ui.ctx().memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    }
     // Consume the apply shortcut before the multiline TextEdit can see it.
     let applied = multiline && typing.focused && ui.input_mut(|input| {
         input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
@@ -209,7 +215,7 @@ fn show_typing_box(ui: &Ui, id: Id, look: &TypingLook, multiline: bool) -> Optio
         return None;
     }
     let pressed_elsewhere = pressed_outside(ui, shown.response.rect);
-    let outcome = if applied {
+    let outcome = if applied || tabbed {
         Some(true)
     } else if pressed_elsewhere {
         Some(theme::settings(ui.ctx()).accept_on_lost_focus)
@@ -560,6 +566,38 @@ pub fn value_font() -> FontId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_commits_typing_without_focusing_the_next_control() {
+        for multiline in [false, true] {
+            let context = egui::Context::default();
+            let id = Id::new("tab-typing");
+            let anchor = Rect::from_min_size(Pos2::new(40.0, 40.0), Vec2::new(160.0, 30.0));
+            let look = TypingLook { anchor, top_left: anchor.min, width: BoxWidth::Fixed(160.0), font: value_font() };
+            open_typing(&context, id, "0.3".to_string());
+            let mut accepted = None;
+            for frame in 0..3 {
+                let event = egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                let events = if frame == 2 { vec![event] } else { Vec::new() };
+                let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+                let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                let output = context.run_ui(input, |ui| {
+                    accepted = show_typing_box(ui, id, &look, multiline);
+                    let _ = ui.button("Parameter menu");
+                });
+                output.drop_without_applying_deltas();
+            }
+            assert_eq!(accepted.as_deref(), Some("0.3"));
+            assert!(!typing_open(&context, id));
+            assert_eq!(context.memory(|memory| memory.focused()), None);
+        }
+    }
 
     #[test]
     fn a_typing_box_closes_without_accepting_when_its_anchor_leaves_the_callers_clip() {

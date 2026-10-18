@@ -273,6 +273,15 @@ fn found_name(found: &Found) -> String {
 
 /// Shows the search; returns whether it stays open.
 pub fn show(ui: &mut Ui, editor: &mut Editor, popup: &mut SearchPopup, commands: &mut Vec<Command>) -> bool {
+    // Search owns typing and result navigation until it closes, including
+    // clicks on its frame and the overflow submenu.
+    let text_id = Id::new("graph-search-text");
+    ui.memory_mut(|memory| {
+        // Egui queued arrow/Tab traversal before we could consume these
+        // keys. Result navigation must not move focus at the pass's end.
+        memory.move_focus(egui::FocusDirection::None);
+        memory.request_focus(text_id);
+    });
     // `SearchTextBox_KeyDown`: a comma adds the first result to the list
     // instead of being typed; Enter takes one; the arrows walk them.
     let comma = ui.input_mut(|input| {
@@ -375,6 +384,9 @@ pub fn show(ui: &mut Ui, editor: &mut Editor, popup: &mut SearchPopup, commands:
         }
         return false;
     }
+    if open {
+        ui.memory_mut(|memory| memory.request_focus(text_id));
+    }
     open
 }
 
@@ -470,7 +482,9 @@ fn choose(editor: &Editor, popup: &SearchPopup, found: &Found, commands: &mut Ve
 fn search_box(ui: &mut Ui, popup: &mut SearchPopup) {
     let mut frame = Frame::new();
     frame = frame.fill(theme::TEXTBOX_BACKGROUND);
-    frame = frame.stroke(Stroke::new(1.0, theme::TEXTBOX_FOCUSED_BORDER));
+    let focused = ui.memory(|memory| memory.has_focus(Id::new("graph-search-text")));
+    let border = if focused { theme::TEXTBOX_FOCUSED_BORDER } else { theme::TEXTBOX_BORDER };
+    frame = frame.stroke(Stroke::new(1.0, border));
     frame = frame.corner_radius(3.0);
     frame = frame.inner_margin(Margin::same(4));
     frame = frame.outer_margin(Margin::symmetric(1, 2));
@@ -630,6 +644,7 @@ mod tests {
     fn search_frame(context: &egui::Context, editor: &mut Editor, popup: &mut SearchPopup, events: Vec<Event>) -> Vec<ClippedShape> {
         let input = RawInput { screen_rect: Some(SCREEN), events, ..Default::default() };
         let mut output = context.run_ui(input, |ui| {
+            crate::ui::menu_keys::begin(ui.ctx());
             show(ui, editor, popup, &mut Vec::new());
         });
         let shapes = std::mem::take(&mut output.shapes);
@@ -740,6 +755,30 @@ mod tests {
         assert!(overflow > 0, "nothing overflows");
         // Its rows and its frame, and no more.
         assert!(submenu.height() < overflow as f32 * RESULT_HEIGHT + 10.0, "{overflow} rows in {submenu:?}");
+    }
+
+    #[test]
+    fn clicking_more_keeps_typing_and_result_navigation_in_search() {
+        let (context, mut editor, mut popup, search, _) = more_open("ero");
+        let margin = Frame::popup(&context.global_style()).total_margin().bottom;
+        let point = Pos2::new(search.center().x, search.bottom() - margin - RESULT_HEIGHT / 2.0);
+        for pressed in [true, false] {
+            let event = Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            search_frame(&context, &mut editor, &mut popup, vec![event]);
+        }
+        search_frame(&context, &mut editor, &mut popup, vec![Event::Text("b".to_string())]);
+        assert_eq!(popup.text, "erob");
+        search_frame(&context, &mut editor, &mut popup, vec![key_event(Key::Backspace)]);
+        assert_eq!(popup.text, "ero");
+        search_frame(&context, &mut editor, &mut popup, vec![key_event(Key::ArrowDown)]);
+        assert_eq!(popup.highlighted, Some(0));
+        assert!(context.memory(|memory| memory.has_focus(Id::new("graph-search-text"))));
+        let shown = shown_types(&editor, &popup);
+        assert_eq!(made(&press(&context, &mut editor, &mut popup, Key::Enter)), shown[0]);
+    }
+
+    fn key_event(key: Key) -> Event {
+        Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
     }
 
     /// One frame of the search with `key` pressed: what it asked for.

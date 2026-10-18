@@ -4,7 +4,7 @@
 //! export defaults, the folders, the caches and whether results are
 //! clamped to 0–1.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nerthus_engine::format_names::PURE_RAW_FORMAT_JSON;
 use nerthus_export::build::ExportPreferences;
@@ -161,15 +161,18 @@ impl Preferences {
     }
 
     fn fill_missing_folders(&mut self) {
-        let builds_root = nerthus_export::destination::default_builds_root();
-        let storage_folder = builds_root.parent().map(PathBuf::from).unwrap_or_default();
+        let storage_folder = nerthus_core::user_paths::default_storage_folder();
         let Some(Value::Object(locations)) = self.values.get_mut("Locations") else {
             return;
         };
         for (name, child) in FOLDERS {
             let current = locations.get(name).and_then(Value::as_str).unwrap_or_default();
-            if !current.is_empty() {
+            let current_path = nerthus_export::build::project_path_text(current);
+            if Path::new(current).is_absolute() || current_path.is_absolute() {
                 continue;
+            }
+            if !current.is_empty() {
+                self.changed = true;
             }
             let folder = match child {
                 Some(child) => storage_folder.join(child),
@@ -276,6 +279,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn relative_saved_locations_are_repaired_and_scheduled_for_saving() {
+        let saved = json!({
+            "Locations": {
+                "Documents": "./Nerthus",
+                "Projects": "./Nerthus/Projects",
+                "Builds": "./Nerthus/Builds",
+                "Cache": "./Nerthus/Caches",
+                "NetworkJobs": "./Nerthus/NetworkJobs"
+            }
+        });
+        let preferences = Preferences::from_json(&saved);
+        let defaults = Preferences::new();
+        for (name, _) in FOLDERS {
+            assert_eq!(preferences.member("Locations", name), defaults.member("Locations", name));
+            let value = preferences.member("Locations", name);
+            assert!(PathBuf::from(value.as_str().unwrap()).is_absolute());
+        }
+        assert!(preferences.changed());
+        let written: Value = serde_json::from_str(&preferences.to_json()).unwrap();
+        let reloaded = Preferences::from_json(&written);
+        assert!(!reloaded.changed());
+        assert_eq!(reloaded.documents_folder(), preferences.documents_folder());
+    }
+
+    #[test]
     fn preferences_write_with_nested_ids() {
         let preferences = Preferences::new();
         let written: Value = serde_json::from_str(&preferences.to_json()).unwrap();
@@ -305,11 +333,12 @@ mod tests {
 
     #[test]
     fn saved_folders_and_formats_are_used() {
-        let saved = json!({"Defaults": {"FilenameDelimiter": "-", "HeightfieldFormat": "PNG16"}, "Locations": {"Builds": "/tmp/builds", "Projects": ""}});
+        let custom_builds = std::env::temp_dir().join("nerthus-builds");
+        let saved = json!({"Defaults": {"FilenameDelimiter": "-", "HeightfieldFormat": "PNG16"}, "Locations": {"Builds": custom_builds, "Projects": ""}});
         let preferences = Preferences::from_json(&saved);
         assert_eq!(preferences.export_preferences().filename_delimiter, "-");
         assert_eq!(preferences.heightfield_format(), FileFormat::Png16);
-        assert_eq!(preferences.builds_folder(), PathBuf::from("/tmp/builds"));
+        assert_eq!(preferences.builds_folder(), custom_builds);
         let projects = preferences.section("Locations").unwrap()["Projects"].as_str().unwrap().to_string();
         assert!(projects.ends_with("Projects"));
     }
