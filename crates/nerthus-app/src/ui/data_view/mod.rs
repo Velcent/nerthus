@@ -56,6 +56,7 @@ pub struct DataViewState {
     /// The panel's share of the width it splits with the graph (the
     /// splitter moves it).
     pub share: f32,
+    pub width_adjusted: bool,
     pub terrain: terrain::TerrainState,
     pub build: build::BuildState,
     pub stats: stats::StatsState,
@@ -68,6 +69,7 @@ impl Default for DataViewState {
             expanded: false,
             tab: DataTab::Terrain,
             share: DEFAULT_SHARE,
+            width_adjusted: false,
             terrain: terrain::TerrainState::default(),
             build: build::BuildState::default(),
             stats: stats::StatsState::default(),
@@ -98,7 +100,11 @@ impl DataViewState {
 }
 
 /// Draws the panel into `rect` (`DataViewArea` inside its margin).
-pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut DataViewState, graph: &mut GraphState, commands: &mut Vec<Command>) {
+pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut DataViewState, _graph: &mut GraphState, commands: &mut Vec<Command>) {
+    let advanced = editor.user.options.show_advanced_tools();
+    if !advanced && state.tab == DataTab::Vars {
+        state.tab = DataTab::Terrain;
+    }
     // `Root`: `Panel-Background`, its left corners rounded 8.
     let root_corners = egui::CornerRadius { nw: 8, ne: 0, sw: 8, se: 0 };
     ui.painter().rect_filled(rect, root_corners, theme::PANEL_BACKGROUND);
@@ -108,7 +114,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut DataViewSt
     let mut content_ui = ui.new_child(UiBuilder::new().max_rect(content));
     content_ui.set_clip_rect(content.intersect(ui.clip_rect()));
     match state.tab {
-        DataTab::Terrain => terrain::show(&mut content_ui, content, editor, &mut state.terrain, graph, commands),
+        DataTab::Terrain => terrain::show(&mut content_ui, content, editor, &mut state.terrain, commands),
         DataTab::Build => build::show(&mut content_ui, content, editor, &mut state.build, commands),
         DataTab::Stats => stats::show(&mut content_ui, content, editor, &mut state.stats, &state.terrain, commands),
         DataTab::Vars => variables::show(&mut content_ui, content, editor, &mut state.variables, commands),
@@ -116,13 +122,19 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut DataViewSt
     frame_border(ui, framed);
 
     let strip = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - TABS_HEIGHT), rect.max);
-    tab_strip(ui, strip, state);
+    tab_strip(ui, strip, state, advanced);
 }
 
 /// A tab's width: its name, at least `TAB_MIN_WIDTH`.
 fn tab_width(ui: &Ui, name: &str) -> f32 {
     let galley = ui.painter().layout_no_wrap(name.to_string(), theme::interface(12.0), theme::LABEL_DEFAULT);
     galley.size().x.max(TAB_MIN_WIDTH)
+}
+
+/// The complete tab strip is the panel's usable minimum when space is tight.
+pub(super) fn minimum_content_width(ui: &Ui) -> f32 {
+    let total: f32 = TABS.iter().map(|(_, name)| tab_width(ui, name)).sum();
+    total - TAB_OVERLAP * (TABS.len() - 1) as f32 + 2.0 * BORDER
 }
 
 /// The inner `Border`: 1.5 of `DataView-Border` down the sides and across
@@ -149,7 +161,7 @@ fn frame_border(ui: &Ui, framed: Rect) {
 /// outlined (the tab path flipped, `ScaleY=-1`) with its name in
 /// `Label-Emphasis`; the others under a line of `DataView-Border` with
 /// their names in `Label-Default`; `ExtraBorder` carries the line on.
-fn tab_strip(ui: &mut Ui, strip: Rect, state: &mut DataViewState) {
+fn tab_strip(ui: &mut Ui, strip: Rect, state: &mut DataViewState, advanced: bool) {
     // `Margin="0,-1.5,0,0"` on the list and `0,1,0,0` on its panel.
     let top = strip.top() - 0.5;
     let line_y = top + BORDER / 2.0;
@@ -159,6 +171,9 @@ fn tab_strip(ui: &mut Ui, strip: Rect, state: &mut DataViewState) {
     let mut selected_outline = None;
     let mut selected_hit_target = None;
     for (index, (tab, name)) in TABS.iter().enumerate() {
+        if *tab == DataTab::Vars && !advanced {
+            continue;
+        }
         let first = index == 0;
         let selected = selected_tab == *tab;
         let text_color = if selected { theme::LABEL_EMPHASIS } else { theme::LABEL_DEFAULT };
@@ -307,7 +322,7 @@ mod tests {
     fn tab_frame(context: &egui::Context, strip: Rect, state: &mut DataViewState, events: Vec<egui::Event>) {
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0));
         let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-        let output = context.run_ui(input, |ui| tab_strip(ui, strip, state));
+        let output = context.run_ui(input, |ui| tab_strip(ui, strip, state, true));
         output.drop_without_applying_deltas();
     }
 
@@ -321,6 +336,28 @@ mod tests {
         tab_frame(context, strip, state, vec![egui::Event::PointerMoved(position)]);
         tab_frame(context, strip, state, vec![button(true)]);
         tab_frame(context, strip, state, vec![button(false)]);
+    }
+
+    #[test]
+    fn expert_tools_controls_the_vars_tab_and_an_already_open_variables_view() {
+        for advanced in [true, false] {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            let mut editor = Editor::new(crate::document::Document::new());
+            editor.user.options.set_value("ShowAdvancedTools", serde_json::json!(advanced));
+            let mut state = DataViewState::default();
+            state.tab = DataTab::Vars;
+            let mut graph = GraphState::default();
+            let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 500.0));
+            let mut commands = Vec::new();
+            let output = context.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, area, &mut editor, &mut state, &mut graph, &mut commands);
+            });
+            let vars_visible = output.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == "Vars"));
+            assert_eq!(vars_visible, advanced);
+            assert_eq!(state.tab, if advanced { DataTab::Vars } else { DataTab::Terrain });
+            output.drop_without_applying_deltas();
+        }
     }
 
     #[test]

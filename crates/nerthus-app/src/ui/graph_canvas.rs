@@ -244,6 +244,7 @@ pub struct GraphState {
     pub zoom_request: Option<ZoomRequest>,
     /// Canvas point of the last right-click, where added nodes go.
     pub context_point: Option<Pos2>,
+    middle_panning: bool,
     /// The canvas widget's screen rectangle last frame.
     pub rect: Rect,
     /// Whether the views came from the document yet.
@@ -314,6 +315,7 @@ impl Default for GraphState {
             rename_start: None,
             zoom_request: None,
             context_point: None,
+            middle_panning: false,
             rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(400.0)),
             views_loaded: false,
             selected_note: None,
@@ -368,6 +370,52 @@ impl GraphState {
         self.group_drag = None;
         self.group_states.clear();
         self.snap_lines.clear();
+        self.context_point = None;
+        self.middle_panning = false;
+        self.toolbox_drag = None;
+        self.renaming_tab = None;
+        self.zoom_request = None;
+    }
+
+    /// Switches tabs with no selection or unfinished gesture from the old tab.
+    pub fn switch_tab(&mut self, editor: &mut Editor, tab: usize) {
+        if self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        self.clear_element_selection();
+        editor.select(None);
+        self.stop_renaming();
+        self.renaming_tab = None;
+        self.drag = None;
+        self.note_drag = None;
+        self.group_drag = None;
+        self.snap_lines.clear();
+        self.group_states.clear();
+        self.context_point = None;
+        self.middle_panning = false;
+        self.popup = None;
+        self.create_connection = None;
+        self.zoom_request = None;
+    }
+
+    /// A newly created tab must not inherit a deleted tab's cached view.
+    pub fn reset_tab_view(&mut self, tab: usize) {
+        self.views.remove(&tab);
+    }
+
+    /// Undo and redo can remove the shown tab. Choose its nearest predecessor.
+    pub fn reconcile_tabs(&mut self, editor: &mut Editor) {
+        let tabs = editor.document.graph_tabs();
+        self.views.retain(|index, _| tabs.iter().any(|tab| tab.index == *index));
+        if !tabs.iter().any(|tab| tab.index == self.tab) {
+            let previous = tabs.iter().filter(|tab| tab.index < self.tab).max_by_key(|tab| tab.index);
+            let fallback = previous.or_else(|| tabs.first());
+            if let Some(tab) = fallback {
+                self.switch_tab(editor, tab.index);
+            }
+        }
+        editor.selection.retain(|id| editor.document.node(*id).is_some_and(|node| node_tab(node) == self.tab));
     }
 
     /// Opens the rename popup (F2, `RenameNode`) on `node`, holding the
@@ -407,15 +455,16 @@ impl GraphState {
         self.selected_note = None;
     }
 
-    /// Where a node added without a position goes: the last right-click,
-    /// else the middle of the view.
+    /// Where actions outside the canvas menu add content: the current view.
     pub fn drop_position(&self) -> [f32; 2] {
-        if let Some(point) = self.context_point {
-            return [point.x, point.y];
-        }
         let view = self.view();
         let center = view.location + self.rect.size() / (2.0 * view.zoom);
         [center.x - STANDARD_WIDTH / 2.0, center.y - STANDARD_MIN_HEIGHT / 2.0]
+    }
+
+    /// Only a canvas menu choice uses its opening point.
+    pub fn context_position(&self) -> [f32; 2] {
+        self.context_point.map(|point| [point.x, point.y]).unwrap_or_else(|| self.drop_position())
     }
 
     /// An undo or redo that reopened the project brings its tabs' views
@@ -454,8 +503,10 @@ impl GraphState {
             };
             self.views.insert(tab.index, view);
         }
-        self.tab = tabs.first().map_or(0, |tab| tab.index);
-        if tabs.first().is_some_and(|tab| tab.location.is_none()) {
+        if !tabs.iter().any(|tab| tab.index == self.tab) {
+            self.tab = editor.document.opening_tab();
+        }
+        if tabs.iter().find(|tab| tab.index == self.tab).is_some_and(|tab| tab.location.is_none()) {
             self.zoom_request = Some(ZoomRequest::Extents);
         }
     }
@@ -877,6 +928,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     ui.shrink_clip_rect(rect);
     state.load_views(editor);
     state.follow_restored_views(editor);
+    state.reconcile_tabs(editor);
     state.rect = rect;
     take_shines(ui, editor, state);
     let hover = ui.input(|input| input.pointer.hover_pos());
@@ -894,6 +946,7 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     let shown_nodes = tab_nodes.filter(|node| !frame.hidden_in.contains_key(&node.id));
     let mut layouts: Vec<NodeLayout> = shown_nodes.map(|node| layout_node(node, &default_size)).collect();
     name_portals(&mut layouts, editor);
+    layouts.sort_by_key(|layout| editor.selection.contains(&layout.id));
     let by_id: HashMap<i32, usize> = layouts.iter().enumerate().map(|(index, layout)| (layout.id, index)).collect();
 
     apply_zoom_request(state, &layouts, &frame, editor, rect);
@@ -949,11 +1002,10 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
     crate::ui::graph_notes::show(ui, &painter, editor, state, origin, &hidden_elements, commands);
 
     // Nodes, selected ones on top.
-    let mut order: Vec<usize> = (0..layouts.len()).collect();
-    order.sort_by_key(|index| editor.selection.contains(&layouts[*index].id));
     let mut node_responses: Vec<(usize, Response)> = Vec::new();
-    for index in order.iter().copied() {
-        let layout = &layouts[index];
+    let mut port_responses: Vec<(usize, PortLayout, Response)> = Vec::new();
+    let snap_target = pointer_on_graph.and_then(|point| snapping_port(&layouts, &view, origin, state, point));
+    for (index, layout) in layouts.iter().enumerate() {
         let screen = view.rect_to_screen(origin, layout.rect);
         if !screen.intersects(rect.expand(40.0)) {
             continue;
@@ -969,12 +1021,6 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
             draw_node(ui, &painter, editor, layout, screen, zoom);
         }
         node_responses.push((index, response));
-    }
-
-    // Ports above their nodes.
-    let mut port_responses: Vec<(usize, PortLayout, Response)> = Vec::new();
-    for index in order.iter().copied() {
-        let layout = &layouts[index];
         for port in layout.ports() {
             let [element_area, grid_area] = port.hit.map(|area| view.rect_to_screen(origin, area));
             if !element_area.union(grid_area).intersects(rect) {
@@ -991,8 +1037,8 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &mut Editor, state: &mut GraphState
             let response = response.tooltip_at_pointer(tooltip);
             port_responses.push((index, port.clone(), response));
         }
+        draw_ports(&painter, layout, &view, origin, state, pointer_on_graph, snap_target.as_ref());
     }
-    draw_ports(&painter, &layouts, &view, origin, state, pointer_on_graph);
     draw_shines(ui, &painter, state, &layouts, &view, origin);
 
     handle_port_drags(ui, editor, state, &layouts, &frame.groups, &port_responses, origin, commands);
@@ -1085,6 +1131,7 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &Gr
         return;
     };
     let tab = state.tab;
+    let fit = fit_rect(state, rect);
     let view = state.view_mut();
     if request == ZoomRequest::Reset {
         let center = view.location + rect.size() / (2.0 * view.zoom);
@@ -1099,8 +1146,10 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &Gr
         _ => None,
     };
     if let Some(element) = centred {
-        let visible = rect.size() / view.zoom;
-        view.location = element.center().to_vec2() - visible / 2.0;
+        view.location = element.center().to_vec2() - (fit.center() - rect.min) / view.zoom;
+        return;
+    }
+    if matches!(request, ZoomRequest::Center(_) | ZoomRequest::CenterNote(_) | ZoomRequest::CenterGroup(_)) {
         return;
     }
     // `ZoomExtents` frames the tab's nodes, groups and notes, those
@@ -1123,15 +1172,21 @@ fn apply_zoom_request(state: &mut GraphState, layouts: &[NodeLayout], frame: &Gr
         return;
     }
     let framed = Rect::from_points(&corners).expand(EXTENTS_MARGIN + FIT_MARGIN);
-    // `FitRect` fits that to the whole graph, the toolbox floating over
-    // it or not. `ZoomAtPosition` leaves the zoom be when the fit would
-    // be under the least, and the view centres on it either way
-    // (`BringIntoView`). The zoom goes no further in than the wheel's.
-    let fitted = (rect.width() / framed.width()).min(rect.height() / framed.height());
+    // Fit the visible strip beside the toolbox so navigation leaves the
+    // framed elements in sight in narrow layouts too.
+    let fitted = (fit.width() / framed.width()).min(fit.height() / framed.height());
     if fitted >= MIN_ZOOM {
         view.zoom = fitted.min(MAX_ZOOM);
     }
-    view.location = framed.center().to_vec2() - rect.size() / (2.0 * view.zoom);
+    view.location = framed.center().to_vec2() - (fit.center() - rect.min) / view.zoom;
+}
+
+fn fit_rect(state: &GraphState, rect: Rect) -> Rect {
+    if !state.toolbox_rect.intersects(rect) {
+        return rect;
+    }
+    let left = (state.toolbox_rect.right() + 12.0).min(rect.right() - 40.0).max(rect.left());
+    Rect::from_min_max(Pos2::new(left, rect.top()), rect.max)
 }
 
 /// Pans with the middle button (anywhere on the graph) or a right drag on
@@ -1142,24 +1197,30 @@ fn handle_pan_and_zoom(ui: &Ui, background: &Response, state: &mut GraphState, r
     let pointer = ui.input(|input| input.pointer.hover_pos());
     let over = pointer.is_some_and(|point| rect.contains(point));
     let over_toolbox = pointer.is_some_and(|point| state.toolbox_rect.contains(point));
-    let on_graph_layer = pointer.and_then(|point| ui.ctx().layer_id_at(point)).is_none_or(|layer| layer.order == egui::Order::Background);
+    let on_graph_layer = ui.rect_contains_pointer(rect);
+    let blocked = ui.ctx().any_popup_open() || !ui.ctx().memory(|memory| memory.is_above_modal_layer(ui.layer_id()));
+    let accepts_input = over && !over_toolbox && on_graph_layer && !blocked;
     let middle_pressed = ui.input(|input| input.pointer.button_pressed(PointerButton::Middle));
-    let pan_started = (middle_pressed && over && !over_toolbox && on_graph_layer) || background.drag_started_by(PointerButton::Secondary);
-    let panning = background.dragged_by(PointerButton::Middle) || background.dragged_by(PointerButton::Secondary);
-    if panning {
-        let delta = background.drag_delta();
+    if middle_pressed {
+        state.middle_panning = accepts_input;
+    }
+    let middle_held = ui.input(|input| input.pointer.button_down(PointerButton::Middle));
+    if !middle_held || blocked {
+        state.middle_panning = false;
+    }
+    let secondary_panning = !blocked && background.dragged_by(PointerButton::Secondary);
+    let pan_started = (middle_pressed && state.middle_panning) || (!blocked && background.drag_started_by(PointerButton::Secondary));
+    if state.middle_panning || secondary_panning {
+        let delta = if state.middle_panning {
+            ui.input(|input| input.pointer.delta())
+        } else {
+            background.drag_delta()
+        };
         let view = state.view_mut();
         view.location -= delta / view.zoom;
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
     }
-    // Node drags pan too when the pointer is held with the middle button.
-    let middle_held = ui.input(|input| input.pointer.button_down(PointerButton::Middle));
-    if middle_held && over && !panning {
-        let delta = ui.input(|input| input.pointer.delta());
-        let view = state.view_mut();
-        view.location -= delta / view.zoom;
-    }
-    if !over || over_toolbox || ui.ctx().any_popup_open() {
+    if !accepts_input {
         return pan_started;
     }
     let (scroll, pinch) = ui.input(|input| (input.smooth_scroll_delta.y, input.zoom_delta()));
@@ -1244,25 +1305,27 @@ fn draw_grid(painter: &egui::Painter, rect: Rect, view: &GraphView) {
             continue;
         }
         let stroke = Stroke::new(1.0, color);
-        let first_x = (view.location.x / spacing).floor() * spacing;
-        let mut x = first_x;
-        loop {
-            let screen_x = rect.left() + (x - view.location.x) * view.zoom;
-            if screen_x > rect.right() {
-                break;
+        let spacing = spacing as f64;
+        let zoom = view.zoom as f64;
+        for axis in 0..2 {
+            let location = view.location[axis] as f64;
+            let extent = rect.size()[axis] as f64;
+            if !location.is_finite() || !extent.is_finite() || !zoom.is_finite() {
+                continue;
             }
-            painter.line_segment([Pos2::new(screen_x, rect.top()), Pos2::new(screen_x, rect.bottom())], stroke);
-            x += spacing;
-        }
-        let first_y = (view.location.y / spacing).floor() * spacing;
-        let mut y = first_y;
-        loop {
-            let screen_y = rect.top() + (y - view.location.y) * view.zoom;
-            if screen_y > rect.bottom() {
-                break;
+            let offset = -location.rem_euclid(spacing) * zoom;
+            let count = (extent / screen_spacing as f64).ceil() as usize + 2;
+            for index in 0..count {
+                let coordinate = offset + index as f64 * screen_spacing as f64;
+                let line = if axis == 0 {
+                    let x = rect.left() + coordinate as f32;
+                    [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())]
+                } else {
+                    let y = rect.top() + coordinate as f32;
+                    [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)]
+                };
+                painter.line_segment(line, stroke);
             }
-            painter.line_segment([Pos2::new(rect.left(), screen_y), Pos2::new(rect.right(), screen_y)], stroke);
-            y += spacing;
         }
     }
 }
@@ -1416,7 +1479,9 @@ fn draw_node(ui: &Ui, painter: &egui::Painter, editor: &Editor, layout: &NodeLay
         right -= icon_size + 2.0 * zoom;
     }
     let time_position = Pos2::new(right - 4.0 * zoom - time_galley.size().x, stack_center - time_galley.size().y / 2.0);
-    painter.galley(time_position, time_galley, BUILD_TIME_COLOR);
+    if time_position.x >= screen.left() + 3.0 * zoom {
+        painter.galley(time_position, time_galley, BUILD_TIME_COLOR);
+    }
 }
 
 /// `ParamsN-Color6`: a node's build time.
@@ -1590,52 +1655,51 @@ pub(crate) fn elided_galley(painter: &egui::Painter, text: &str, font: egui::Fon
     painter.layout_job(job)
 }
 
-fn draw_ports(painter: &egui::Painter, layouts: &[NodeLayout], view: &GraphView, origin: Pos2, state: &GraphState, pointer: Option<Pos2>) {
+#[allow(clippy::too_many_arguments)]
+fn draw_ports(painter: &egui::Painter, layout: &NodeLayout, view: &GraphView, origin: Pos2, state: &GraphState, pointer: Option<Pos2>, snap_target: Option<&(i32, String, bool)>) {
     let zoom = view.zoom;
     let simplified = zoom < SIMPLIFIED_ZOOM;
-    let snap_target = pointer.and_then(|point| snapping_port(layouts, view, origin, state, point));
-    for layout in layouts {
-        let mut painter = painter.clone();
-        if state.dimmed.contains(&layout.id) {
-            painter.multiply_opacity(0.5);
+
+    let mut painter = painter.clone();
+    if state.dimmed.contains(&layout.id) {
+        painter.multiply_opacity(0.5);
+    }
+    let painter = &painter;
+    for port in layout.ports() {
+        let dot = view.rect_to_screen(origin, port.dot);
+        let hovered = pointer.is_some_and(|point| port.takes(view.to_canvas(origin, point)));
+        let snapping = snap_target.is_some_and(|(node, name, is_input)| *node == layout.id && *name == port.name && *is_input == port.is_input);
+        let is_mask = layout.mask.as_ref().is_some_and(|mask| mask.name == port.name) && port.is_input;
+        let base = if is_mask { theme::ACCENT_MUTED_MAGENTA } else { layout.color };
+        let opacity = if port.connected {
+            1.0
+        } else if hovered || snapping {
+            0.8
+        } else {
+            0.4
+        };
+        let fill = base.gamma_multiply(opacity);
+        if let Some(portal) = port.portal {
+            draw_portal(painter, port, portal, base, view, origin, simplified);
         }
-        let painter = &painter;
-        for port in layout.ports() {
-            let dot = view.rect_to_screen(origin, port.dot);
-            let hovered = pointer.is_some_and(|point| port.takes(view.to_canvas(origin, point)));
-            let snapping = snap_target.as_ref().is_some_and(|(node, name, is_input)| *node == layout.id && *name == port.name && *is_input == port.is_input);
-            let is_mask = layout.mask.as_ref().is_some_and(|mask| mask.name == port.name) && port.is_input;
-            let base = if is_mask { theme::ACCENT_MUTED_MAGENTA } else { layout.color };
-            let opacity = if port.connected {
-                1.0
-            } else if hovered || snapping {
-                0.8
-            } else {
-                0.4
-            };
-            let fill = base.gamma_multiply(opacity);
-            if let Some(portal) = port.portal {
-                draw_portal(painter, port, portal, base, view, origin, simplified);
-            }
-            let dot_shape = if simplified { Rect::from_center_size(dot.center(), SIMPLIFIED_PORT * zoom) } else { dot };
-            let corner = if simplified { 0.0 } else { dot.width() / 2.0 };
-            painter.rect_filled(dot_shape, corner, fill);
-            if snapping {
-                let outline = if port.connected { theme::ACCENT_RED } else { theme::ACCENT_BLUE };
-                painter.rect_stroke(dot_shape, corner, Stroke::new(2.0, outline), StrokeKind::Outside);
-            }
-            // Compact and small nodes hide their port labels (`HideLabel`).
-            let label_hidden = layout.size != NodeSize::Standard || port.collapsed;
-            if simplified || label_hidden || port.portal.is_some() {
-                continue;
-            }
-            let label_color = if hovered || snapping { theme::LABEL_EMPHASIS } else { theme::PORT_LABEL };
-            let font = theme::semibold(10.0 * zoom);
-            let galley = painter.layout_no_wrap(port.label.clone(), font, label_color);
-            let y = dot.center().y - galley.size().y / 2.0;
-            let x = if port.is_input { dot.left() + 18.0 * zoom } else { dot.right() - 18.0 * zoom - galley.size().x };
-            painter.galley(Pos2::new(x, y), galley, label_color);
+        let dot_shape = if simplified { Rect::from_center_size(dot.center(), SIMPLIFIED_PORT * zoom) } else { dot };
+        let corner = if simplified { 0.0 } else { dot.width() / 2.0 };
+        painter.rect_filled(dot_shape, corner, fill);
+        if snapping {
+            let outline = if port.connected { theme::ACCENT_RED } else { theme::ACCENT_BLUE };
+            painter.rect_stroke(dot_shape, corner, Stroke::new(2.0, outline), StrokeKind::Outside);
         }
+        // Compact and small nodes hide their port labels (`HideLabel`).
+        let label_hidden = layout.size != NodeSize::Standard || port.collapsed;
+        if simplified || label_hidden || port.portal.is_some() {
+            continue;
+        }
+        let label_color = if hovered || snapping { theme::LABEL_EMPHASIS } else { theme::PORT_LABEL };
+        let font = theme::semibold(10.0 * zoom);
+        let galley = painter.layout_no_wrap(port.label.clone(), font, label_color);
+        let y = dot.center().y - galley.size().y / 2.0;
+        let x = if port.is_input { dot.left() + 18.0 * zoom } else { dot.right() - 18.0 * zoom - galley.size().x };
+        painter.galley(Pos2::new(x, y), galley, label_color);
     }
 }
 
@@ -1690,11 +1754,16 @@ fn snapping_port(layouts: &[NodeLayout], view: &GraphView, origin: Pos2, state: 
         _ => return None,
     };
     let mut best: Option<(f32, (i32, String, bool))> = None;
-    for layout in layouts {
+    for (index, layout) in layouts.iter().enumerate() {
         if layout.id == source_node {
             continue;
         }
         for port in layout.ports() {
+            let point_canvas = view.to_canvas(origin, point);
+            let covered = layouts[index + 1..].iter().any(|above| above.rect.contains(port.dot.center()) || above.rect.contains(point_canvas));
+            if covered {
+                continue;
+            }
             let anchor = view.to_screen(origin, port.dot.center());
             let distance = anchor.distance(point);
             let near = if state.snap_to_ports { distance <= SNAP_DISTANCE.max(12.0 * view.zoom) } else { port.takes(view.to_canvas(origin, point)) };
@@ -1777,7 +1846,7 @@ fn handle_port_drags(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layou
         let collapsed = port.collapsed;
         // A port has no menu of its own: a right-click on it goes on to
         // its node's.
-        node_menu(response, editor, node, commands);
+        node_menu(response, editor, state, node, commands);
         // `PortElement.OnMouseDoubleClick` (Double-Click Connect): a
         // connection follows the pointer until the next click.
         if double_click_connect && response.double_clicked() {
@@ -1910,7 +1979,7 @@ fn handle_node_interaction(ui: &Ui, editor: &mut Editor, state: &mut GraphState,
             let pointer_start = view.to_canvas(origin, pointer);
             start_element_drag(editor, state, id, pointer_start);
         }
-        node_menu(&response, editor, id, commands);
+        node_menu(&response, editor, state, id, commands);
     }
     drag_elements(ui, editor, state, layouts, groups, origin);
 }
@@ -1991,8 +2060,9 @@ fn selection_neighbours(terrain: &nerthus_engine::Terrain, start: i32, anchor: i
 
 /// The node's context menu on a right-click of the node or one of its
 /// ports, the node selected unless it already is.
-fn node_menu(response: &Response, editor: &mut Editor, id: i32, commands: &mut Vec<Command>) {
+fn node_menu(response: &Response, editor: &mut Editor, state: &mut GraphState, id: i32, commands: &mut Vec<Command>) {
     crate::ui::widgets::context_menu(response, |ui| {
+        state.clear_element_selection();
         if !editor.selection.contains(&id) {
             editor.select(Some(id));
         }
@@ -2033,7 +2103,8 @@ fn drag_elements(ui: &Ui, editor: &mut Editor, state: &mut GraphState, layouts: 
         return;
     };
     let view = state.view();
-    let dragging = ui.input(|input| input.pointer.primary_down());
+    let escaped = ui.input(|input| input.key_pressed(Key::Escape)) && !ui.ctx().egui_wants_keyboard_input();
+    let dragging = ui.input(|input| input.pointer.primary_down()) && !escaped;
     if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
         let current = view.to_canvas(origin, pointer);
         let delta = current - pointer_start;
@@ -2444,6 +2515,8 @@ fn handle_background(
     let over = ui.input(|input| input.pointer.hover_pos()).is_some_and(|point| state.rect.contains(point));
     if !typing && over && ui.input(|input| input.key_pressed(Key::Escape)) {
         state.drag = None;
+        state.snap_lines.clear();
+        state.group_states.clear();
         state.selected_connections.clear();
     }
 }
@@ -2501,7 +2574,7 @@ fn canvas_context_menu(ui: &mut Ui, editor: &Editor, state: &mut GraphState, com
     crate::ui::toolbox::add_node_menus(ui, editor, state, commands);
     menu_separator(ui);
     if menu_item(ui, Some("note"), Some(theme::ACCENT_STRONG_YELLOW), "Add Note", "").clicked() {
-        commands.push(Command::AddNote);
+        commands.push(Command::Graph(GraphCommand::AddNoteAt(state.context_position())));
     }
     if menu_item(ui, Some("zoom-scan"), None, "Zoom to Extents", "Ctrl 0").clicked() {
         commands.push(Command::ZoomExtents);
@@ -2536,7 +2609,7 @@ fn handle_drops(ui: &Ui, editor: &Editor, state: &mut GraphState, layouts: &[Nod
     let Some(type_name) = state.toolbox_drag.take() else {
         return;
     };
-    let Some(point) = latest.filter(|point| state.rect.contains(*point)) else {
+    let Some(point) = latest.filter(|point| state.rect.contains(*point) && !state.toolbox_rect.contains(*point) && ui.rect_contains_pointer(state.rect)) else {
         return;
     };
     let canvas = view.to_canvas(origin, point);
@@ -2554,6 +2627,9 @@ fn draw_drag_overlay(ui: &Ui, painter: &egui::Painter, state: &GraphState, layou
     }
     if let (Some(type_name), Some(point)) = (&state.toolbox_drag, pointer) {
         let label = Catalogue::get().node(type_name).map(|spec| spec.display_name.clone().unwrap_or_else(|| spec.name.clone())).unwrap_or_else(|| type_name.clone());
+        let layer = egui::LayerId::new(egui::Order::Tooltip, ui.id().with("toolbox-drag-tag"));
+        let overlay = ui.ctx().layer_painter(layer);
+        let painter = &overlay;
         let galley = painter.layout_no_wrap(label, theme::semibold(11.0), theme::LABEL_EMPHASIS);
         let tag = Rect::from_min_size(point + Vec2::new(12.0, 8.0), galley.size() + Vec2::new(12.0, 6.0));
         painter.rect_filled(tag, 3.0, theme::MENU_BACKGROUND);
@@ -2656,6 +2732,202 @@ fn rename_overlay(ui: &mut Ui, state: &mut GraphState, layouts: &[NodeLayout], o
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_toolbox_drag_tag_paints_above_later_canvas_widgets() {
+        let context = themed_context();
+        let mut state = GraphState::default();
+        state.toolbox_drag = Some("Plates".to_string());
+        let point = Pos2::new(50.0, 60.0);
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            draw_drag_overlay(ui, &painter, &state, &[], Pos2::ZERO, Some(point));
+            let toolbox = Rect::from_min_size(Pos2::ZERO, Vec2::splat(200.0));
+            painter.rect_filled(toolbox, 0.0, Color32::RED);
+        });
+        let label = output.shapes.iter().position(|clipped| matches!(&clipped.shape, Shape::Text(text) if text.galley.text() == "Plates")).unwrap();
+        let toolbox = output.shapes.iter().position(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == Color32::RED)).unwrap();
+        assert!(label > toolbox);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn a_small_locked_export_nodes_build_time_stays_inside_its_border() {
+        let context = themed_context();
+        let mut editor = Editor::new(Document::new());
+        let node = editor.document.add_node("Combine", [0.0, 0.0]).unwrap();
+        editor.document.apply_build_update(node, "NodeSize", serde_json::json!("Small"));
+        editor.document.apply_build_update(node, "SaveDefinition", serde_json::json!({}));
+        editor.preview_node = Some(node);
+        editor.preview_locked = true;
+        let status = crate::editor::NodeStatus { milliseconds: 123_450.0, ..Default::default() };
+        editor.statuses.insert(node, status);
+        let layout = layout_node(editor.document.node(node).unwrap(), "Standard");
+        for zoom in [0.5, 1.0, 2.0] {
+            let screen = Rect::from_min_size(Pos2::new(100.0, 100.0), layout.rect.size() * zoom);
+            let output = context.run_ui(egui::RawInput::default(), |ui| {
+                draw_node(ui, ui.painter(), &editor, &layout, screen, zoom);
+            });
+            for clipped in &output.shapes {
+                if let Shape::Text(text) = &clipped.shape
+                    && text.override_text_color == Some(BUILD_TIME_COLOR)
+                {
+                    let text_rect = Rect::from_min_size(text.pos, text.galley.size());
+                    assert!(screen.shrink(zoom).contains_rect(text_rect));
+                }
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn grids_at_extreme_coordinates_have_a_bounded_number_of_lines() {
+        let context = themed_context();
+        for coordinate in [268_435_456.0, -1_073_741_824.0, f32::MAX, f32::NAN] {
+            let view = GraphView { location: Vec2::splat(coordinate), zoom: 1.0 };
+            let output = context.run_ui(egui::RawInput::default(), |ui| {
+                draw_grid(ui.painter(), SCREEN, &view);
+            });
+            assert!(output.shapes.len() < 500, "coordinate {coordinate}");
+            for clipped in &output.shapes {
+                assert!(clipped.shape.visual_bounding_rect().is_finite());
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn a_reused_tab_starts_with_a_fresh_view_and_loading_keeps_the_requested_tab() {
+        let mut editor = Editor::new(Document::new());
+        let tab = editor.document.add_graph_tab();
+        let node = editor.document.place_node("Mountain", [26100.0, 26100.0], tab).unwrap();
+        editor.document.note_selected_tab(tab);
+        editor.select(Some(node));
+        let mut state = GraphState::default();
+        state.tab = editor.document.opening_tab();
+        let context = themed_context();
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        assert_eq!(state.tab, tab);
+        assert_eq!(editor.selection, vec![node]);
+        state.view_mut().location = Vec2::splat(1234.0);
+        state.view_mut().zoom = 0.2;
+        state.reset_tab_view(tab);
+        assert_eq!(state.view().zoom, 1.0);
+        assert_eq!(state.view().location, Vec2::splat(26000.0));
+        state.zoom_request = Some(ZoomRequest::Center(node));
+        state.reset();
+        assert_eq!(state.zoom_request, None);
+    }
+
+    #[test]
+    fn non_menu_additions_ignore_the_last_canvas_menu_position() {
+        let mut state = GraphState::default();
+        state.context_point = Some(Pos2::new(-10000.0, -20000.0));
+        assert_eq!(state.context_position(), [-10000.0, -20000.0]);
+        assert_eq!(state.drop_position(), [26085.0, 26160.0]);
+        state.reset();
+        assert_eq!(state.context_point, None);
+    }
+
+    #[test]
+    fn toolbox_drops_over_the_toolbox_are_cancelled() {
+        let context = themed_context();
+        let mut editor = Editor::new(Document::new());
+        let mut state = GraphState::default();
+        state.toolbox_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(150.0, 500.0));
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+        for (point, accepted) in [(Pos2::new(100.0, 200.0), false), (Pos2::new(400.0, 200.0), true)] {
+            graph_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(point)], egui::Modifiers::NONE);
+            state.toolbox_drag = Some("Mountain".to_string());
+            let commands = graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
+            assert_eq!(commands.len(), usize::from(accepted));
+            assert!(state.toolbox_drag.is_none());
+        }
+    }
+
+    #[test]
+    fn a_covered_port_cannot_take_a_click_or_snap_a_connection() {
+        let context = themed_context();
+        let mut editor = Editor::new(Document::new());
+        let bottom = editor.document.add_node("Blur", [26100.0, 26100.0]).unwrap();
+        let top = editor.document.add_node("Mountain", [26090.0, 26120.0]).unwrap();
+        let source = editor.document.add_node("Mountain", [26600.0, 26400.0]).unwrap();
+        let mut state = GraphState::default();
+        let none = egui::Modifiers::NONE;
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        let point = port_dot(&editor, &state, bottom, "In", true);
+        let button = |pressed| egui::Event::PointerButton { pos: point, button: PointerButton::Primary, pressed, modifiers: none };
+        graph_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(point)], none);
+        graph_frame(&context, &mut editor, &mut state, vec![button(true)], none);
+        graph_frame(&context, &mut editor, &mut state, vec![button(false)], none);
+        assert_eq!(editor.selection, vec![top]);
+        assert!(state.drag.is_none());
+        let layouts: Vec<NodeLayout> = [bottom, top, source].iter().map(|id| layout_node(editor.document.node(*id).unwrap(), "Standard")).collect();
+        state.drag = Some(Drag::FromOutput { node: source, port: "Out".to_string(), sticky: false, collapsed: false });
+        assert!(snapping_port(&layouts, &state.view(), state.rect.min, &state, point).is_none());
+    }
+
+    #[test]
+    fn escape_finishes_a_node_drop_and_clears_drag_feedback() {
+        let context = themed_context();
+        let mut editor = Editor::new(Document::new());
+        let node = editor.document.add_node("Mountain", [26100.0, 26100.0]).unwrap();
+        let group = editor.document.add_group(&[node], [26080.0, 26060.0], [280.0, 270.0], 0);
+        editor.select(Some(node));
+        let mut state = GraphState::default();
+        let none = egui::Modifiers::NONE;
+        graph_frame(&context, &mut editor, &mut state, Vec::new(), none);
+        let start = Pos2::new(26120.0, 26120.0);
+        start_element_drag(&mut editor, &mut state, node, start);
+        let moved = state.view().to_screen(state.rect.min, start + Vec2::new(400.0, 0.0));
+        let press = egui::Event::PointerButton { pos: moved, button: PointerButton::Primary, pressed: true, modifiers: none };
+        graph_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(moved), press], none);
+        state.snap_lines = vec![[start, start + Vec2::splat(100.0)]];
+        state.group_states.insert(group, GroupState::Outgoing);
+        let escape = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: none };
+        graph_frame(&context, &mut editor, &mut state, vec![escape], none);
+        assert!(state.drag.is_none());
+        assert!(state.snap_lines.is_empty());
+        assert!(state.group_states.is_empty());
+        assert_eq!(editor.document.group_of(node), None);
+    }
+
+    #[test]
+    fn modal_and_window_layers_keep_the_graphs_wheel_and_middle_button() {
+        for modal in [false, true] {
+            let context = themed_context();
+            let mut editor = Editor::new(Document::new());
+            let mut state = GraphState::default();
+            let covered = std::cell::Cell::new(Rect::NOTHING);
+            let frame = |events: Vec<egui::Event>, editor: &mut Editor, state: &mut GraphState| {
+                let input = egui::RawInput { screen_rect: Some(SCREEN), events, ..Default::default() };
+                let output = context.run_ui(input, |ui| {
+                    show(ui, SCREEN, editor, state, &mut Vec::new());
+                    if modal {
+                        egui::Modal::new(egui::Id::new("blocking-modal")).show(ui.ctx(), |ui| { ui.label("Modal"); });
+                    } else {
+                        let mut window = egui::Window::new("Covering window");
+                        window = window.fixed_pos(Pos2::new(200.0, 200.0));
+                        window = window.fixed_size(Vec2::new(400.0, 400.0));
+                        if let Some(shown) = window.show(ui.ctx(), |ui| { ui.label("Window"); }) {
+                            covered.set(shown.response.rect);
+                        }
+                    }
+                });
+                output.drop_without_applying_deltas();
+            };
+            frame(Vec::new(), &mut editor, &mut state);
+            frame(Vec::new(), &mut editor, &mut state);
+            let point = if modal { Pos2::new(50.0, 600.0) } else { covered.get().center() };
+            frame(vec![egui::Event::PointerMoved(point)], &mut editor, &mut state);
+            let before = state.view();
+            let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, phase: egui::TouchPhase::Move, delta: Vec2::new(0.0, 120.0), modifiers: egui::Modifiers::NONE };
+            let press = egui::Event::PointerButton { pos: point, button: PointerButton::Middle, pressed: true, modifiers: egui::Modifiers::NONE };
+            frame(vec![wheel, press], &mut editor, &mut state);
+            frame(vec![egui::Event::PointerMoved(point + Vec2::new(80.0, 0.0))], &mut editor, &mut state);
+            assert_view_near(state.view(), before);
+        }
+    }
 
     #[test]
     fn shift_click_selects_connecting_nodes_in_both_directions() {
@@ -2865,21 +3137,23 @@ mod tests {
     }
 
     #[test]
-    fn extents_fit_the_corners_to_the_whole_graph() {
+    fn extents_fit_the_corners_beside_the_toolbox() {
         let mut document = Document::new();
         document.add_node("Mountain", [20000.0, 26000.0]).unwrap();
         document.add_node("ErosionPro", [32000.0, 30000.0]).unwrap();
         let mut editor = Editor::new(document);
         let mut state = GraphState::default();
         let context = themed_context();
-        // The toolbox floats over the graph's left edge: the fit takes no
-        // notice of it.
+        // The floating toolbox leaves its footprint out of the fit.
         state.toolbox_rect = Rect::from_min_size(Pos2::new(10.0, 45.0), Vec2::new(36.0, 400.0));
         state.zoom_request = Some(ZoomRequest::Extents);
         graph_frame(&context, &mut editor, &mut state, Vec::new(), egui::Modifiers::NONE);
         // The nodes' top-left corners, 200 and then 30 round them.
         let corners = Rect::from_min_max(Pos2::new(20000.0, 26000.0), Pos2::new(32000.0, 30000.0));
-        assert_view_near(state.view(), fitted_view(corners.expand(230.0), SCREEN, 1.0));
+        let fit = fit_rect(&state, SCREEN);
+        let mut expected = fitted_view(corners.expand(230.0), fit, 1.0);
+        expected.location -= (fit.min - SCREEN.min) / expected.zoom;
+        assert_view_near(state.view(), expected);
     }
 
     #[test]

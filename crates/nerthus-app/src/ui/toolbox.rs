@@ -19,7 +19,7 @@ use crate::editor::Editor;
 use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::graph_canvas::GraphState;
+use crate::ui::graph_canvas::{drag_origin, GraphState};
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::widgets::{check_item, checked_icon_item, header_submenu, menu_caption, menu_item, menu_row_width, menu_rows_beside, menu_separator, menu_style, submenu, Tooltips};
 use crate::user::{ToolboxMode, ToolboxStyle, UserOptions};
@@ -53,7 +53,13 @@ const SPLITTER_STEP: f32 = 10.0;
 #[derive(Clone, Debug, Default)]
 pub struct ToolboxState {
     collapsed: HashSet<&'static str>,
-    resizing: Option<f32>,
+    resizing: Option<ToolboxResize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ToolboxResize {
+    pointer_start: f32,
+    width_start: f32,
 }
 
 /// Where a menu of nodes was opened from.
@@ -172,7 +178,7 @@ fn node_entry(ui: &mut Ui, spec: &'static NodeSpec, look: &EntryLook, origin: Or
     }
     let command = match origin {
         Origin::Toolbox => Command::Graph(GraphCommand::ToolboxCreate(spec.key().to_string())),
-        Origin::Canvas => Command::AddNode { type_name: spec.key().to_string(), position: None },
+        Origin::Canvas => Command::AddNode { type_name: spec.key().to_string(), position: Some(state.context_position()) },
     };
     commands.push(command);
 }
@@ -183,7 +189,7 @@ fn node_entry(ui: &mut Ui, spec: &'static NodeSpec, look: &EntryLook, origin: Or
 fn category_menu(ui: &mut Ui, category: &str, look: &EntryLook, origin: Origin, state: &mut GraphState, commands: &mut Vec<Command>) {
     menu_style(ui);
     if category == "Macro" {
-        macro_menu(ui, commands);
+        macro_menu(ui, origin, state, commands);
         return;
     }
     let color = theme::toolbox_color(category);
@@ -226,7 +232,7 @@ fn family_caption(ui: &mut Ui, icon: &str, color: Color32, family: &str) {
 /// The Macro category: the installed macros by author
 /// (`NodeMetadata.Family`), each by name with the `x-macro` icon and its
 /// description as the tooltip.
-fn macro_menu(ui: &mut Ui, commands: &mut Vec<Command>) {
+fn macro_menu(ui: &mut Ui, origin: Origin, state: &GraphState, commands: &mut Vec<Command>) {
     let color = theme::toolbox_color("Macro");
     let authors = crate::files::installed_macros();
     if authors.is_empty() {
@@ -241,7 +247,12 @@ fn macro_menu(ui: &mut Ui, commands: &mut Vec<Command>) {
                     response = response.tooltip(&entry.metadata.description);
                 }
                 if response.clicked() {
-                    commands.push(Command::File(crate::files::FileCommand::AddMacro(entry.metadata.id())));
+                    let id = entry.metadata.id();
+                    let command = match origin {
+                        Origin::Toolbox => Command::File(crate::files::FileCommand::AddMacro(id)),
+                        Origin::Canvas => Command::Graph(GraphCommand::AddMacro { id, at: state.context_position() }),
+                    };
+                    commands.push(command);
                 }
             }
         });
@@ -306,6 +317,13 @@ pub fn place(ui: &Ui, area: Rect, options: &UserOptions) -> Rect {
     }
 }
 
+/// Keeps a usable 160 point strip of canvas beside the floating toolbox.
+pub fn minimum_graph_width(ui: &Ui, editor: &Editor) -> f32 {
+    let area = Rect::from_min_size(Pos2::ZERO, Vec2::splat(10_000.0));
+    let toolbox = place(ui, area, &editor.user.options);
+    160.0 + toolbox.right() + SPLITTER
+}
+
 /// The menus' column at the top-left of `area` (margin 10), as much of it
 /// as shows (no lower than the margin above the area's bottom), a
 /// button's size and how many buttons share a row.
@@ -339,17 +357,9 @@ fn resize_menus(ui: &mut Ui, column: Rect, mode: ToolboxMode, options: &mut User
     if response.hovered() || response.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
     }
-    if !response.dragged() {
-        state.toolbox.resizing = None;
+    let Some(width) = resized_width(ui, &response, column.width(), &mut state.toolbox) else {
         return;
-    }
-    let travelled = state.toolbox.resizing.unwrap_or(0.0) + response.drag_delta().x;
-    if travelled.abs() <= SPLITTER_STEP {
-        state.toolbox.resizing = Some(travelled);
-        return;
-    }
-    state.toolbox.resizing = Some(0.0);
-    let width = column.width() + travelled;
+    };
     let next = match mode {
         ToolboxMode::Single if width > BUTTON_SIZE * 2.0 => ToolboxMode::Double,
         ToolboxMode::Double if width < BUTTON_SIZE => ToolboxMode::Single,
@@ -548,19 +558,32 @@ fn resize_panel(ui: &mut Ui, panel: Rect, options: &mut UserOptions, state: &mut
     if response.hovered() || response.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
     }
-    if !response.dragged() {
-        state.toolbox.resizing = None;
+    let initial_width = options.toolbox_columns() as f32 * PANEL_COLUMN;
+    let Some(width) = resized_width(ui, &response, initial_width, &mut state.toolbox) else {
         return;
-    }
-    let travelled = state.toolbox.resizing.unwrap_or(0.0) + response.drag_delta().x;
-    if travelled.abs() <= SPLITTER_STEP {
-        state.toolbox.resizing = Some(travelled);
-        return;
-    }
-    state.toolbox.resizing = Some(0.0);
-    let width = options.toolbox_columns() as f32 * PANEL_COLUMN + travelled;
+    };
     let columns = ((width / PANEL_COLUMN) as usize).clamp(1, 6);
     options.set_toolbox_columns(columns);
+}
+
+/// The width at the press plus the entire pointer movement. Quantizing a
+/// toolbox's visible width must not discard the distance between steps.
+fn resized_width(ui: &Ui, response: &egui::Response, initial_width: f32, state: &mut ToolboxState) -> Option<f32> {
+    if !response.dragged_by(egui::PointerButton::Primary) {
+        state.resizing = None;
+        return None;
+    }
+    let pointer = response.interact_pointer_pos()?;
+    if state.resizing.is_none() {
+        let start = drag_origin(ui, response)?;
+        state.resizing = Some(ToolboxResize { pointer_start: start.x, width_start: initial_width });
+    }
+    let drag = state.resizing?;
+    let travelled = pointer.x - drag.pointer_start;
+    if travelled.abs() <= SPLITTER_STEP {
+        return None;
+    }
+    Some(drag.width_start + travelled)
 }
 
 /// A setting the toolbox's menu changed.
@@ -770,6 +793,27 @@ mod tests {
             commands
         }
 
+        fn drag_edge(&mut self, distance: f32) {
+            let mut toolbox = Rect::NOTHING;
+            let context = themed_context(self.screen);
+            let output = context.run_ui(input(self.screen, Vec::new()), |ui| {
+                toolbox = place(ui, graph_area(self.screen), &self.editor.user.options);
+            });
+            output.drop_without_applying_deltas();
+            let offset = if self.editor.user.options.toolbox_style() == ToolboxStyle::Panel { 0.0 } else { SPLITTER / 2.0 };
+            let start = Pos2::new(toolbox.right() + offset, toolbox.center().y);
+            let pointer_button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            self.frame(vec![egui::Event::PointerMoved(start)]);
+            self.frame(vec![pointer_button(start, true)]);
+            let steps = (distance.abs() / 5.0).ceil() as usize;
+            for step in 1..=steps {
+                let point = start + Vec2::new(distance * step as f32 / steps as f32, 0.0);
+                self.frame(vec![egui::Event::PointerMoved(point)]);
+            }
+            let end = start + Vec2::new(distance, 0.0);
+            self.frame(vec![pointer_button(end, false)]);
+        }
+
         /// The menus open, as their areas were laid out: a menu before its
         /// submenu.
         fn open_menus(&self) -> Vec<Rect> {
@@ -877,7 +921,7 @@ mod tests {
             window.scroll_down(primitive);
             let last = window.last_node("Primitive");
             let commands = window.click_last_row(primitive);
-            assert_eq!(commands, [Command::AddNode { type_name: last.to_string(), position: None }], "at {screen:?}");
+            assert_eq!(commands, [Command::AddNode { type_name: last.to_string(), position: Some(window.state.context_position()) }], "at {screen:?}");
         }
     }
 
@@ -910,5 +954,34 @@ mod tests {
         assert!(drawn.iter().any(|text| text.eq_ignore_ascii_case(first)), "{first} missing from {drawn:?}");
         assert!(!drawn.iter().any(|text| text == "Pin To Top"), "{drawn:?}");
         assert!(!drawn.iter().any(|text| text.contains("widget ID")), "{drawn:?}");
+    }
+
+    #[test]
+    fn slow_panel_resize_keeps_the_distance_between_column_changes() {
+        let mut window = Window::new(WINDOWS[0], Drawn::Toolbox);
+        window.editor.user.options.set_toolbox_style(ToolboxStyle::Panel);
+        window.editor.user.options.set_toolbox_columns(2);
+        window.frame(Vec::new());
+        window.drag_edge(100.0);
+        assert_eq!(window.editor.user.options.toolbox_columns(), 3);
+        window.drag_edge(-85.0);
+        assert_eq!(window.editor.user.options.toolbox_columns(), 1);
+        window.drag_edge(100.0);
+        assert_eq!(window.editor.user.options.toolbox_columns(), 2);
+    }
+
+    #[test]
+    fn slow_menus_resize_passes_each_mode_threshold() {
+        let mut window = Window::new(WINDOWS[0], Drawn::Toolbox);
+        window.editor.user.options.set_toolbox_mode(ToolboxMode::Single);
+        window.frame(Vec::new());
+        window.drag_edge(45.0);
+        assert_eq!(window.editor.user.options.toolbox_mode(), ToolboxMode::Double);
+        window.drag_edge(70.0);
+        assert_eq!(window.editor.user.options.toolbox_mode(), ToolboxMode::Expanded);
+        window.drag_edge(-20.0);
+        assert_eq!(window.editor.user.options.toolbox_mode(), ToolboxMode::Double);
+        window.drag_edge(-50.0);
+        assert_eq!(window.editor.user.options.toolbox_mode(), ToolboxMode::Single);
     }
 }

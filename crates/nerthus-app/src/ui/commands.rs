@@ -298,6 +298,7 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
         editor.report(crate::web::unavailable(feature));
         return;
     }
+    ui_state.graph.reconcile_tabs(editor);
     match command {
         Command::NewProject => crate::ui::file_commands::run(crate::files::FileCommand::New, editor, ui_state),
         Command::Open => crate::ui::file_commands::run(crate::files::FileCommand::Open, editor, ui_state),
@@ -307,7 +308,7 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
         Command::Undo => {
             let label = editor.document.undo_label().map(str::to_string);
             if editor.document.undo() {
-                editor.selection.retain(|id| editor.document.terrain().nodes.contains_key(id));
+                ui_state.graph.reconcile_tabs(editor);
                 ui_state.graph.clear_element_selection();
                 editor.changed();
                 if let Some(label) = label {
@@ -317,27 +318,30 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
         }
         Command::Redo => {
             if editor.document.redo() {
-                editor.selection.retain(|id| editor.document.terrain().nodes.contains_key(id));
+                ui_state.graph.reconcile_tabs(editor);
                 ui_state.graph.clear_element_selection();
                 editor.changed();
             }
         }
         Command::NewGraphTab => {
             let index = editor.document.add_graph_tab();
-            ui_state.graph.tab = index;
+            ui_state.graph.reset_tab_view(index);
+            ui_state.graph.switch_tab(editor, index);
         }
         Command::RenameGraphTab(index, name) => editor.document.rename_graph_tab(index, &name),
         Command::SetGraphTabColor(index, color) => editor.document.set_graph_tab_color(index, color),
         Command::DeleteGraphTab(index) => {
             let next = editor.document.delete_graph_tab(index);
-            ui_state.graph.tab = next;
-            editor.selection.retain(|id| editor.document.terrain().nodes.contains_key(id));
+            ui_state.graph.reset_tab_view(index);
+            ui_state.graph.switch_tab(editor, next);
+            ui_state.graph.reconcile_tabs(editor);
             editor.changed();
         }
         Command::AddNote => {
             let position = ui_state.graph.drop_position();
             let tab = ui_state.graph.tab;
             let id = editor.document.add_note(position, tab);
+            editor.select(None);
             ui_state.graph.clear_element_selection();
             ui_state.graph.selected_note = Some(id);
         }
@@ -383,11 +387,7 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
             editor.refresh_nodes(&nodes);
         }
         Command::Bypass => {
-            for node in editor.selection.clone() {
-                let bypassed = editor.document.node(node).and_then(|data| data.base.get("StateOverride")).and_then(Value::as_str) == Some("Bypassed");
-                let state = if bypassed { "None" } else { "Bypassed" };
-                editor.document.set_member(node, "StateOverride", Value::from(state), "Bypass", true);
-            }
+            editor.document.toggle_bypass_nodes(&editor.selection);
             editor.changed();
         }
         // `LockNodePreview`: the selected node's.
@@ -495,9 +495,7 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
         }
         Command::ToggleExpansion => {
             let default_size = editor.user.options.default_node_size().to_string();
-            for node in editor.selection.clone() {
-                editor.document.cycle_node_size(node, &default_size);
-            }
+            editor.document.cycle_node_sizes(&editor.selection, &default_size);
         }
         Command::SetRenderIntent(intent) => {
             if let Some(node) = editor.active_node() {
@@ -514,6 +512,8 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
                     editor.document.apply_build_update(id, "GraphIndex", Value::from(tab as i64));
                 }
                 editor.document.apply_node_display(&[id], &editor.user.options);
+                crate::ui::graph_commands::settle(editor, &[id], tab);
+                ui_state.graph.clear_element_selection();
                 editor.select(Some(id));
                 editor.changed();
             }
@@ -554,7 +554,7 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
             window.set_maximized(ui_state.maximized);
         }
         Command::WindowDrag => window.start_drag_move(),
-        Command::SelectNode(id) => editor.select(Some(id)),
+        Command::SelectNode(id) => crate::ui::graph_commands::select_node(editor, ui_state, id, None),
         Command::ShowDataTab(tab) => ui_state.data_view.show_tab(tab),
         Command::ToggleBookmark => {
             let Some(node) = editor.active_node() else { return };
@@ -570,10 +570,8 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
             }
         }
         Command::GoToBookmark(id) => {
-            let Some(tab) = editor.document.node(id).map(crate::document::node_tab) else { return };
-            ui_state.graph.tab = tab;
+            crate::ui::graph_commands::select_node(editor, ui_state, id, Some(crate::ui::graph_canvas::ZoomRequest::Selection));
             ui_state.graph.bookmark_removing = None;
-            editor.select(Some(id));
             // `GoToBookmark`: the node shines as the view goes to it.
             editor.shines.push(id);
             ui_state.graph.zoom_request = Some(crate::ui::graph_canvas::ZoomRequest::Selection);
@@ -847,10 +845,8 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
             editor.set_overlay(overlay);
         }
         Command::GoToNode(id) => {
-            let Some(node) = editor.document.node(id) else { return };
-            ui_state.graph.tab = crate::document::node_tab(node);
-            ui_state.graph.zoom_request = Some(crate::ui::graph_canvas::ZoomRequest::Center(id));
-            editor.select(Some(id));
+            let zoom = crate::ui::graph_canvas::ZoomRequest::Center(id);
+            crate::ui::graph_commands::select_node(editor, ui_state, id, Some(zoom));
         }
         Command::ApplyPreset(name) => editor.apply_preset(&name),
         Command::Toggle2DViewport => ui_state.viewport_2d.toggle_docked(),
@@ -991,6 +987,7 @@ fn duplicate_selection(editor: &mut Editor, ui_state: &mut UiState) {
     }
     let tab = ui_state.graph.tab;
     let copies = editor.document.duplicate_selection(&selected, tab);
+    editor.document.apply_node_display(&copies, &editor.user.options);
     ui_state.graph.clear_element_selection();
     editor.set_selection(copies);
     editor.changed();
@@ -1058,6 +1055,170 @@ mod tests {
 
     use super::*;
     use crate::document::Document;
+    use crate::ui::graph_canvas::GraphView;
+
+    #[test]
+    fn creating_a_graph_tab_clears_selections_and_the_pending_rename() {
+        let mut document = Document::new();
+        let source = document.add_node("Constant", [26000.0, 26000.0]).unwrap();
+        let target = document.add_node("Blur", [26300.0, 26000.0]).unwrap();
+        document.connect(source, "Out", target, "In");
+        let group = document.add_group(&[source], [25980.0, 25980.0], [300.0, 300.0], 0);
+        let note = document.add_note([26000.0, 26400.0], 0);
+        let mut editor = Editor::new(document);
+        editor.select(Some(source));
+        let mut ui_state = UiState::default();
+        ui_state.graph.selected_connections = vec![(target, "In".to_string())];
+        ui_state.graph.selected_groups = vec![group];
+        ui_state.graph.selected_note = Some(note);
+        ui_state.graph.start_renaming(&editor, source);
+        let mut window = Window::default();
+
+        run(vec![Command::NewGraphTab], &mut editor, &mut ui_state, &mut window);
+
+        assert_eq!(ui_state.graph.tab, 1);
+        assert!(editor.selection.is_empty());
+        assert!(ui_state.graph.selected_connections.is_empty());
+        assert!(ui_state.graph.selected_groups.is_empty());
+        assert!(ui_state.graph.selected_note.is_none());
+        assert!(ui_state.graph.renaming().is_none());
+        let history = editor.document.undo_labels();
+        run(vec![Command::Delete], &mut editor, &mut ui_state, &mut window);
+        assert_eq!(editor.document.undo_labels(), history);
+        assert!(editor.document.node(source).is_some());
+        assert!(editor.document.group(group).is_some());
+        assert!(editor.document.notes().iter().any(|(id, _)| *id == note));
+    }
+
+    #[test]
+    fn undoing_a_new_tab_adds_the_next_node_on_an_existing_tab() {
+        let mut editor = Editor::new(Document::new());
+        let mut ui_state = UiState::default();
+        let mut window = Window::default();
+        run(vec![Command::NewGraphTab, Command::Undo], &mut editor, &mut ui_state, &mut window);
+        assert_eq!(ui_state.graph.tab, 0);
+        assert_eq!(editor.document.graph_tabs().len(), 1);
+
+        let command = Command::AddNode { type_name: "Constant".to_string(), position: Some([26100.0, 26100.0]) };
+        run(vec![command], &mut editor, &mut ui_state, &mut window);
+        let node = editor.document.node(editor.active_node().unwrap()).unwrap();
+        assert_eq!(crate::document::node_tab(node), 0);
+        assert!(editor.document.graph_tabs().iter().any(|tab| tab.index == crate::document::node_tab(node)));
+    }
+
+    #[test]
+    fn redoing_a_tab_deletion_falls_back_before_the_next_node_is_added() {
+        let mut editor = Editor::new(Document::new());
+        let mut ui_state = UiState::default();
+        let mut window = Window::default();
+        run(vec![Command::NewGraphTab, Command::DeleteGraphTab(1), Command::Undo], &mut editor, &mut ui_state, &mut window);
+        assert!(editor.document.graph_tabs().iter().any(|tab| tab.index == 1));
+        ui_state.graph.switch_tab(&mut editor, 1);
+
+        run(vec![Command::Redo], &mut editor, &mut ui_state, &mut window);
+        assert_eq!(ui_state.graph.tab, 0);
+        let command = Command::AddNode { type_name: "Constant".to_string(), position: Some([26100.0, 26100.0]) };
+        run(vec![command], &mut editor, &mut ui_state, &mut window);
+        let node = editor.document.node(editor.active_node().unwrap()).unwrap();
+        assert_eq!(crate::document::node_tab(node), 0);
+    }
+
+    #[test]
+    fn reusing_a_deleted_tab_index_starts_with_the_default_view() {
+        let mut editor = Editor::new(Document::new());
+        let mut ui_state = UiState::default();
+        let mut window = Window::default();
+        run(vec![Command::NewGraphTab], &mut editor, &mut ui_state, &mut window);
+        let deleted_view = GraphView { location: egui::Vec2::new(25055.0, 25603.0), zoom: 0.3 };
+        ui_state.graph.views.insert(1, deleted_view);
+        editor.document.store_view_quietly(1, [25055.0, 25603.0], 0.3);
+        run(vec![Command::DeleteGraphTab(1), Command::NewGraphTab], &mut editor, &mut ui_state, &mut window);
+
+        assert_eq!(ui_state.graph.tab, 1);
+        assert_eq!(ui_state.graph.view(), GraphView::default());
+        let tab = editor.document.graph_tabs().into_iter().find(|tab| tab.index == 1).unwrap();
+        assert_eq!(tab.location, Some([26000.0, 26000.0]));
+        assert_eq!(tab.zoom, 1.0);
+    }
+
+    #[test]
+    fn canvas_add_joins_its_group_and_replaces_the_previous_element_selection() {
+        let mut document = Document::new();
+        let source = document.add_node("Constant", [26050.0, 26050.0]).unwrap();
+        let target = document.add_node("Blur", [27000.0, 26050.0]).unwrap();
+        document.connect(source, "Out", target, "In");
+        let group = document.add_group(&[source], [26000.0, 26000.0], [500.0, 500.0], 0);
+        let note = document.add_note([27000.0, 26400.0], 0);
+        let mut editor = Editor::new(document);
+        let mut ui_state = UiState::default();
+        ui_state.graph.selected_groups = vec![group];
+        ui_state.graph.selected_note = Some(note);
+        ui_state.graph.selected_connections = vec![(target, "In".to_string())];
+        let mut window = Window::default();
+        let command = Command::AddNode { type_name: "Constant".to_string(), position: Some([26100.0, 26200.0]) };
+        run(vec![command], &mut editor, &mut ui_state, &mut window);
+
+        let added = editor.active_node().unwrap();
+        assert_eq!(editor.selection, [added]);
+        assert!(editor.document.group(group).unwrap().children.contains(&added));
+        assert!(ui_state.graph.selected_groups.is_empty());
+        assert!(ui_state.graph.selected_note.is_none());
+        assert!(ui_state.graph.selected_connections.is_empty());
+        run(vec![Command::Delete], &mut editor, &mut ui_state, &mut window);
+        assert!(editor.document.node(added).is_none());
+        assert!(editor.document.group(group).is_some());
+        assert!(editor.document.node(source).is_some());
+        assert!(editor.document.notes().iter().any(|(id, _)| *id == note));
+        let input = editor.document.node(target).unwrap().port("In").unwrap();
+        assert_eq!(input.record.as_ref().unwrap().from, source);
+    }
+
+    #[test]
+    fn new_and_duplicated_nodes_follow_the_always_show_mask_option() {
+        for enabled in [false, true] {
+            let mut editor = Editor::new(Document::new());
+            editor.user.options.set_value("AlwaysShowMaskPort", json!(enabled));
+            let mut ui_state = UiState::default();
+            let mut window = Window::default();
+            for type_name in ["Thermal", "Constant"] {
+                let command = Command::AddNode { type_name: type_name.to_string(), position: Some([26100.0, 26100.0]) };
+                run(vec![command], &mut editor, &mut ui_state, &mut window);
+                let original = editor.active_node().unwrap();
+                let needs_mask = enabled && type_name == "Thermal";
+                assert_eq!(editor.document.node(original).unwrap().port("Mask").is_some(), needs_mask, "new {type_name}, enabled: {enabled}");
+
+                run(vec![Command::Duplicate], &mut editor, &mut ui_state, &mut window);
+                let copy = editor.active_node().unwrap();
+                assert_ne!(copy, original);
+                let mask_count = editor.document.node(copy).unwrap().ports.iter().filter(|port| port.name == "Mask").count();
+                assert_eq!(mask_count, usize::from(needs_mask), "duplicated {type_name}, enabled: {enabled}");
+            }
+        }
+    }
+
+    #[test]
+    fn duplicating_an_existing_maskable_node_adds_its_missing_mask_input() {
+        let mut document = Document::new();
+        let original = document.add_node("Thermal", [26100.0, 26100.0]).unwrap();
+        assert!(document.node(original).unwrap().port("Mask").is_none());
+        let mut editor = Editor::new(document);
+        editor.select(Some(original));
+        editor.user.options.set_value("AlwaysShowMaskPort", json!(true));
+        let mut ui_state = UiState::default();
+        let mut window = Window::default();
+        let history = editor.document.undo_labels().len();
+
+        run(vec![Command::Duplicate], &mut editor, &mut ui_state, &mut window);
+
+        let copy = editor.active_node().unwrap();
+        assert_ne!(copy, original);
+        assert!(editor.document.node(copy).unwrap().port("Mask").is_some());
+        assert!(editor.document.node(original).unwrap().port("Mask").is_none());
+        assert_eq!(editor.document.undo_labels().len(), history + 1);
+        run(vec![Command::Undo], &mut editor, &mut ui_state, &mut window);
+        assert!(editor.document.node(copy).is_none());
+        assert!(editor.document.node(original).unwrap().port("Mask").is_none());
+    }
 
     #[test]
     fn refresh_marks_every_selected_node_stale_and_reports_each_name() {

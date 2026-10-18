@@ -57,6 +57,13 @@ pub enum GraphCommand {
     LazyAction(&'static str),
     /// A node picked to go to: its tab shown, it selected and framed.
     Navigate(i32),
+    /// A tab or note chosen without a node selection.
+    SelectTab(usize),
+    SelectNote { id: i32, go_to: bool },
+    /// The connection menu deletes only connections, even in a mixed selection.
+    DeleteConnections,
+    AddNoteAt([f32; 2]),
+    AddMacro { id: String, at: [f32; 2] },
     /// Results taken in the node search.
     CreateNodes { picks: Vec<SearchPick>, at: [f32; 2], source: NodeSource },
     /// Ctrl Q, or Replace in the node's menu: the search, to replace the
@@ -159,6 +166,22 @@ pub enum GraphCommand {
     ToggleSnapToItems,
 }
 
+/// Navigation from every view reveals a selected node before commands can act on it.
+pub(super) fn select_node(editor: &mut Editor, ui_state: &mut UiState, id: i32, zoom: Option<ZoomRequest>) {
+    let Some(tab) = editor.document.node(id).map(node_tab) else {
+        return;
+    };
+    let revealed = editor.document.reveal_node(id);
+    ui_state.graph.switch_tab(editor, tab);
+    ui_state.graph.clear_element_selection();
+    editor.select(Some(id));
+    if let Some(zoom) = zoom {
+        ui_state.graph.zoom_request = Some(zoom);
+    } else if revealed {
+        ui_state.graph.zoom_request = Some(ZoomRequest::Center(id));
+    }
+}
+
 /// A standard node's size, for nodes the map does not have.
 const STANDARD_EXTENT: [f32; 2] = [230.0, 80.0];
 
@@ -175,6 +198,7 @@ fn extent_of(sizes: &HashMap<i32, [f32; 2]>, id: i32) -> [f32; 2] {
 }
 
 pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
+    ui_state.graph.reconcile_tabs(editor);
     match command {
         GraphCommand::NudgeSelection(delta) => {
             let mut moves = Vec::new();
@@ -211,16 +235,7 @@ pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
             };
             let tab = ui_state.graph.tab;
             let pasted = editor.document.paste_nodes(&clipboard, tab, Some("Paste Selection"));
-            // `CopyNodes`: with Always Show Mask Port, maskable copies take
-            // a mask port.
-            if editor.user.options.always_show_mask_port() {
-                for id in &pasted {
-                    let maskable = editor.document.node(*id).and_then(|node| Catalogue::get().node(&node.type_name)).is_some_and(|spec| spec.is_maskable());
-                    if maskable {
-                        editor.document.add_mask_port(*id);
-                    }
-                }
-            }
+            editor.document.apply_node_display(&pasted, &editor.user.options);
             ui_state.graph.clear_element_selection();
             editor.set_selection(pasted);
             editor.changed();
@@ -262,14 +277,35 @@ pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
             ui_state.graph.popup = Some(GraphPopup::Lazy { at: pointer });
         }
         GraphCommand::LazyAction(tag) => lazy_action(tag, editor, ui_state),
-        GraphCommand::Navigate(id) => {
-            let Some(tab) = editor.document.node(id).map(node_tab) else {
-                return;
-            };
-            ui_state.graph.tab = tab;
+        GraphCommand::Navigate(id) => select_node(editor, ui_state, id, Some(ZoomRequest::Selection)),
+        GraphCommand::SelectTab(tab) => ui_state.graph.switch_tab(editor, tab),
+        GraphCommand::SelectNote { id, go_to } => {
+            let tab = editor.document.notes().iter().find(|(note, _)| *note == id).map(|(_, fields)| fields.get("GraphIndex").and_then(Value::as_u64).unwrap_or(0) as usize);
+            if let Some(tab) = tab {
+                ui_state.graph.switch_tab(editor, tab);
+                ui_state.graph.clear_element_selection();
+                editor.select(None);
+                ui_state.graph.selected_note = Some(id);
+                if go_to {
+                    ui_state.graph.zoom_request = Some(ZoomRequest::CenterNote(id));
+                }
+            }
+        }
+        GraphCommand::DeleteConnections => {
+            let connections = std::mem::take(&mut ui_state.graph.selected_connections);
+            let request = DeleteRequest { connections, ..Default::default() };
+            editor.document.delete_elements(&request);
+            editor.changed();
+        }
+        GraphCommand::AddNoteAt(position) => {
+            let id = editor.document.add_note(position, ui_state.graph.tab);
             ui_state.graph.clear_element_selection();
-            editor.select(Some(id));
-            ui_state.graph.zoom_request = Some(ZoomRequest::Selection);
+            editor.select(None);
+            ui_state.graph.selected_note = Some(id);
+        }
+        GraphCommand::AddMacro { id, at } => {
+            crate::files::add_macro(editor, &id, at, ui_state.graph.tab);
+            ui_state.graph.clear_element_selection();
         }
         GraphCommand::CreateNodes { picks, at, source } => create_nodes(editor, ui_state, &picks, at, source),
         GraphCommand::ReplaceSearch => {
@@ -287,7 +323,8 @@ pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
             let Some(group) = editor.document.group(id) else {
                 return;
             };
-            ui_state.graph.tab = group.graph_index;
+            let tab = group.graph_index;
+            ui_state.graph.switch_tab(editor, tab);
             ui_state.graph.clear_element_selection();
             editor.select_group();
             ui_state.graph.selected_groups = vec![id];
@@ -346,8 +383,10 @@ pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
         }
         GraphCommand::GroupToTabConfirmed(id) => {
             if let Some(tab) = editor.document.group_to_tab(id) {
-                ui_state.graph.tab = tab;
-                ui_state.graph.selected_groups.clear();
+                ui_state.graph.reset_tab_view(tab);
+                ui_state.graph.switch_tab(editor, tab);
+                ui_state.graph.clear_element_selection();
+                ui_state.graph.zoom_request = Some(ZoomRequest::Extents);
                 editor.changed();
             }
         }
@@ -363,7 +402,9 @@ pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
             let sizes = extents(editor);
             let extent = |id: i32| extent_of(&sizes, id);
             let tab = editor.document.tab_to_group(from, target, &extent);
-            ui_state.graph.tab = tab;
+            ui_state.graph.reset_tab_view(tab);
+            ui_state.graph.switch_tab(editor, tab);
+            ui_state.graph.zoom_request = Some(ZoomRequest::Extents);
             ui_state.graph.clear_element_selection();
             editor.select_group();
             editor.changed();
@@ -490,6 +531,7 @@ pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
             if let Some(combined) = editor.document.combine_nodes(&selected, kind, &extent) {
                 let type_name = editor.document.node(combined).map(|node| node.type_name.clone()).unwrap_or_default();
                 editor.user.usage.record_node(&type_name);
+                prepare_added_node(editor, combined, None);
                 ui_state.graph.clear_element_selection();
                 editor.select(Some(combined));
                 editor.changed();
@@ -539,7 +581,9 @@ pub fn run(command: GraphCommand, editor: &mut Editor, ui_state: &mut UiState) {
                 return;
             }
             let tab = editor.document.move_elements_to_tab(&nodes, &notes, &groups, target);
-            ui_state.graph.tab = tab;
+            ui_state.graph.reset_tab_view(tab);
+            ui_state.graph.switch_tab(editor, tab);
+            ui_state.graph.zoom_request = Some(ZoomRequest::Extents);
             editor.changed();
         }
         GraphCommand::ToolboxCreate(type_name) => toolbox_create(editor, ui_state, &type_name),
@@ -976,7 +1020,7 @@ fn display_name(type_name: &str) -> String {
 }
 
 /// Added nodes join the group whose box holds their corner (`AddNode`).
-fn settle(editor: &mut Editor, nodes: &[i32], tab: usize) {
+pub(super) fn settle(editor: &mut Editor, nodes: &[i32], tab: usize) {
     let mut corners: Vec<(i32, [f32; 2], usize)> = Vec::new();
     for id in nodes {
         if let Some(node) = editor.document.node(*id) {
@@ -1195,6 +1239,90 @@ fn lazy_action(tag: &str, editor: &mut Editor, ui_state: &mut UiState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_reveals_collapsed_nodes_and_discards_other_element_selections() {
+        let commands = [Command::SelectNode(0), Command::GoToNode(0), Command::GoToBookmark(0)];
+        for command in commands {
+            let mut editor = Editor::new(crate::document::Document::new());
+            let node = editor.document.add_node("Mountain", [10000.0, 10000.0]).unwrap();
+            let group = editor.document.add_group(&[node], [9980.0, 9960.0], [280.0, 270.0], 0);
+            editor.document.toggle_group_collapsed(group);
+            let mut ui_state = UiState::default();
+            ui_state.graph.selected_groups = vec![group];
+            ui_state.graph.selected_connections = vec![(node, "In".to_string())];
+            let command = match command {
+                Command::SelectNode(_) => Command::SelectNode(node),
+                Command::GoToNode(_) => Command::GoToNode(node),
+                _ => Command::GoToBookmark(node),
+            };
+            let mut window = bevy::prelude::Window::default();
+            crate::ui::commands::run(vec![command], &mut editor, &mut ui_state, &mut window);
+            assert_eq!(editor.selection, vec![node]);
+            assert!(!editor.document.group(group).unwrap().collapsed);
+            assert!(ui_state.graph.selected_groups.is_empty());
+            assert!(ui_state.graph.selected_connections.is_empty());
+            assert!(ui_state.graph.zoom_request.is_some());
+            editor.document.toggle_group_collapsed(group);
+            run(GraphCommand::Navigate(node), &mut editor, &mut ui_state);
+            assert!(!editor.document.group(group).unwrap().collapsed);
+        }
+    }
+
+    #[test]
+    fn deleting_connections_keeps_the_nodes_groups_and_notes_in_a_mixed_selection() {
+        let mut editor = Editor::new(crate::document::Document::new());
+        let from = editor.document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let to = editor.document.add_node("Blur", [26400.0, 26000.0]).unwrap();
+        editor.document.connect(from, "Out", to, "In");
+        let group = editor.document.add_group(&[], [27000.0, 26000.0], [280.0, 270.0], 0);
+        let note = editor.document.add_note([27000.0, 26500.0], 0);
+        editor.set_selection(vec![from, to]);
+        let mut ui_state = UiState::default();
+        ui_state.graph.selected_connections = vec![(to, "In".to_string())];
+        ui_state.graph.selected_groups = vec![group];
+        ui_state.graph.selected_note = Some(note);
+        run(GraphCommand::DeleteConnections, &mut editor, &mut ui_state);
+        assert_eq!(editor.document.terrain().nodes.len(), 2);
+        assert!(editor.document.node(to).unwrap().port("In").unwrap().record.is_none());
+        assert!(editor.document.group(group).is_some());
+        assert!(editor.document.notes().iter().any(|(id, _)| *id == note));
+        assert!(editor.document.undo());
+        assert!(editor.document.node(to).unwrap().port("In").unwrap().record.is_some());
+    }
+
+    #[test]
+    fn moving_elements_to_a_new_tab_requests_extents() {
+        for grouped in [false, true] {
+            let mut editor = Editor::new(crate::document::Document::new());
+            let node = editor.document.add_node("Mountain", [10000.0, 10000.0]).unwrap();
+            let mut ui_state = UiState::default();
+            editor.select(Some(node));
+            let command = if grouped {
+                let group = editor.document.add_group(&[node], [9980.0, 9960.0], [280.0, 270.0], 0);
+                GraphCommand::GroupToTabConfirmed(group)
+            } else {
+                GraphCommand::MoveToTab(TabTarget::New)
+            };
+            run(command, &mut editor, &mut ui_state);
+            assert_ne!(ui_state.graph.tab, 0);
+            assert_eq!(node_tab(editor.document.node(node).unwrap()), ui_state.graph.tab);
+            assert_eq!(ui_state.graph.zoom_request, Some(ZoomRequest::Extents));
+        }
+    }
+
+    #[test]
+    fn combined_nodes_honor_the_mask_display_option() {
+        let mut editor = Editor::new(crate::document::Document::new());
+        editor.user.options.set_value("AlwaysShowMaskPort", Value::Bool(true));
+        let first = editor.document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let second = editor.document.add_node("Mountain", [26400.0, 26000.0]).unwrap();
+        editor.set_selection(vec![first, second]);
+        let mut ui_state = UiState::default();
+        run(GraphCommand::Combine(CombineKind::Inputs), &mut editor, &mut ui_state);
+        let combined = editor.active_node().unwrap();
+        assert!(editor.document.node(combined).unwrap().port("Mask").is_some());
+    }
 
     #[test]
     fn nudging_moves_the_whole_selection_ten_units_and_undoes_together() {

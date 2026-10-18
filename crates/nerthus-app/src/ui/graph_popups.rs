@@ -16,7 +16,7 @@ use crate::ui::commands::Command;
 use crate::ui::graph_canvas::GraphState;
 use crate::ui::graph_commands::GraphCommand;
 use crate::ui::graph_search::SearchPopup;
-use crate::ui::widgets::{menu_caption, menu_item, menu_item_enabled, menu_rows_beside, menu_rows_below, menu_separator, menu_style, submenu, Tooltips};
+use crate::ui::widgets::{menu_caption, menu_item, menu_item_enabled, menu_rows_beside, menu_rows_below, menu_separator, menu_style, menu_width, submenu, Tooltips};
 
 /// A menu's least width (`Default-Menu-Item`'s menus).
 const MENU_WIDTH: f32 = 190.0;
@@ -133,7 +133,7 @@ fn connection_menu(ui: &mut Ui, editor: &Editor, state: &GraphState, to: i32, to
     }
     menu_separator(ui);
     if menu_item(ui, Some("square-rounded-x"), Some(theme::ACCENT_RED), "Delete Connection", "Del").clicked() {
-        commands.push(Command::Delete);
+        commands.push(Command::Graph(GraphCommand::DeleteConnections));
     }
 }
 
@@ -241,10 +241,8 @@ fn portals_menu(ui: &mut Ui, editor: &Editor, node: i32, commands: &mut Vec<Comm
     };
     let shift = ui.input(|input| input.modifiers.shift);
     ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width(PORTALS_COLUMN);
+        ui.vertical(|ui| menu_width(ui, PORTALS_COLUMN, |ui| {
             menu_style(ui);
-            ui.set_min_width(PORTALS_COLUMN);
             let inputs: Vec<&nerthus_engine::PortData> = data.ports.iter().filter(|port| port.is_input()).collect();
             if !inputs.is_empty() {
                 menu_caption(ui, "Connect to Portal");
@@ -260,13 +258,11 @@ fn portals_menu(ui: &mut Ui, editor: &Editor, node: i32, commands: &mut Vec<Comm
                 }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    ui.set_min_width(PORTALS_COLUMN);
-                    let width = ui.available_width() - 32.0;
-                    let row = ui.allocate_ui(Vec2::new(width, 23.0), |ui| {
-                        ui.set_min_width(width);
+                    let width = PORTALS_COLUMN - 32.0;
+                    let clicked = menu_width(ui, width, |ui| {
                         menu_item(ui, Some("port-connect"), Some(accent), &port.name, "").clicked()
                     });
-                    if row.inner {
+                    if clicked {
                         commands.push(Command::Graph(GraphCommand::PortalSearch { node, port: port.name.clone() }));
                     }
                     let disconnect = disconnect_button(ui).tooltip("Disconnect");
@@ -276,11 +272,9 @@ fn portals_menu(ui: &mut Ui, editor: &Editor, node: i32, commands: &mut Vec<Comm
                     }
                 });
             }
-        });
-        ui.vertical(|ui| {
-            ui.set_width(PORTALS_COLUMN);
+        }));
+        ui.vertical(|ui| menu_width(ui, PORTALS_COLUMN, |ui| {
             menu_style(ui);
-            ui.set_min_width(PORTALS_COLUMN);
             let outputs: Vec<&nerthus_engine::PortData> = data.ports.iter().filter(|port| port.is_output()).collect();
             let plain: Vec<&&nerthus_engine::PortData> = outputs.iter().filter(|port| PortalState::of(port) != PortalState::Publishing).collect();
             let publishing: Vec<&&nerthus_engine::PortData> = outputs.iter().filter(|port| PortalState::of(port) == PortalState::Publishing).collect();
@@ -305,7 +299,7 @@ fn portals_menu(ui: &mut Ui, editor: &Editor, node: i32, commands: &mut Vec<Comm
                     commands.push(Command::Graph(GraphCommand::RemovePortal { node, port: port.name.clone() }));
                 }
             }
-        });
+        }));
     });
 }
 
@@ -411,6 +405,9 @@ fn lazy_menu(ui: &mut Ui, editor: &Editor, state: &GraphState, commands: &mut Ve
         let mut shown = false;
         for index in band.iter().copied() {
             let entry = &entries[index];
+            if entry.tag == "variables" && !editor.user.options.show_advanced_tools() {
+                continue;
+            }
             let entry_level = level(entry);
             if entry_level <= 0 {
                 continue;
@@ -562,6 +559,84 @@ mod tests {
     use super::*;
     use crate::editor::RenderMode;
     use crate::ui::UiState;
+
+    fn portal_layout(editor: &mut Editor, node: i32) -> (Rect, Pos2) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut state = GraphState::default();
+        let at = Pos2::new(200.0, 200.0);
+        state.popup = Some(GraphPopup::Portals { node, at });
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0));
+        let mut caption = None;
+        let mut input_caption = None;
+        for _ in 0..5 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let output = context.run_ui(input, |ui| {
+                let mut commands = Vec::new();
+                show(ui, editor, &mut state, &mut commands);
+                assert!(commands.is_empty());
+            });
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(text) = &clipped.shape {
+                    match text.galley.text() {
+                        "Convert to Portal..." => caption = Some(text.pos),
+                        "Connect to Portal" => input_caption = Some(text.pos),
+                        _ => {}
+                    }
+                }
+            }
+            output.drop_without_applying_deltas();
+        }
+        let popup_id = Id::new(("graph-popup", "portals"));
+        let bounds = context.memory(|memory| memory.area_rect(popup_id)).unwrap();
+        let caption = caption.expect("the output column is visible");
+        let input_caption = input_caption.expect("the input column is visible");
+        assert!((caption.x - input_caption.x - PORTALS_COLUMN).abs() < 0.5);
+        (bounds, caption)
+    }
+
+    #[test]
+    fn consuming_input_disconnect_stays_inside_the_portals_column() {
+        let mut editor = Editor::new(crate::document::Document::new());
+        let source = editor.document.add_node("Constant", [0.0, 0.0]).unwrap();
+        let target = editor.document.add_node("Combine", [100.0, 0.0]).unwrap();
+        let (before, before_caption) = portal_layout(&mut editor, target);
+        editor.document.publish_port(source, "Out", false);
+        editor.document.connect_to_portal(source, "Out", target, "In");
+        let (after, after_caption) = portal_layout(&mut editor, target);
+        assert!((after.width() - before.width()).abs() < 0.5, "before: {before:?}, after: {after:?}");
+        assert!((after_caption.x - before_caption.x).abs() < 0.5, "before: {before_caption:?}, after: {after_caption:?}");
+    }
+
+    #[test]
+    fn lazy_menu_variables_entry_follows_the_expert_tools_option() {
+        for enabled in [false, true] {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            let mut editor = Editor::new(crate::document::Document::new());
+            editor.user.options.set_value("ShowAdvancedTools", serde_json::json!(enabled));
+            let state = GraphState::default();
+            let mut labels = Vec::new();
+            for _ in 0..2 {
+                let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0));
+                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+                let output = context.run_ui(input, |ui| {
+                    let mut commands = Vec::new();
+                    lazy_menu(ui, &editor, &state, &mut commands);
+                    assert!(commands.is_empty());
+                });
+                labels.clear();
+                for clipped in &output.shapes {
+                    if let egui::Shape::Text(text) = &clipped.shape {
+                        labels.push(text.galley.text().to_string());
+                    }
+                }
+                output.drop_without_applying_deltas();
+            }
+            assert_eq!(labels.iter().any(|label| label == "Variables View"), enabled);
+            assert!(labels.iter().any(|label| label == "Build View"));
+        }
+    }
 
     /// The same order as the main UI: menus take keys, shell shortcuts
     /// follow, popups are drawn, then their commands run.

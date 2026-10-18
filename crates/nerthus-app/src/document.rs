@@ -746,6 +746,29 @@ impl Document {
         }
     }
 
+    /// A single Bypass gesture toggles every selected node together.
+    pub fn toggle_bypass_nodes(&mut self, ids: &[i32]) {
+        let mut changes = Vec::new();
+        for id in ids {
+            let Some(node) = self.node(*id) else {
+                continue;
+            };
+            let bypassed = node.base.get("StateOverride").and_then(Value::as_str) == Some("Bypassed");
+            let next = if bypassed { "None" } else { "Bypassed" };
+            changes.push((*id, next));
+        }
+        if changes.is_empty() {
+            return;
+        }
+        self.checkpoint("Bypass");
+        for (id, next) in changes {
+            if let Some(node) = self.project.terrain_mut().nodes.get_mut(&id) {
+                node.set_member("StateOverride", json!(next));
+            }
+            self.mark_stale(id);
+        }
+    }
+
     /// A member a build changed (`Engine::take_member_updates`): saved with
     /// the project, not an edit of its own.
     pub fn apply_build_update(&mut self, node: i32, name: &str, value: Value) {
@@ -939,12 +962,17 @@ impl Document {
 
     /// `NodeElement.DetermineScale`: a node without a size of its own whose
     /// name the user's `NodeDisplay` lists takes that size, kept on the
-    /// node. Not an edit to undo.
+    /// node. `OnApplyTemplate` also adds the optional mask input to every
+    /// maskable node. These are part of opening or creating the node.
     pub fn apply_node_display(&mut self, ids: &[i32], options: &crate::user::UserOptions) {
         for id in ids {
             let Some(node) = self.project.terrain_mut().nodes.get_mut(id) else {
                 continue;
             };
+            let maskable = Catalogue::get().node(&node.type_name).is_some_and(|spec| spec.is_maskable());
+            if options.always_show_mask_port() && maskable && node.port("Mask").is_none() {
+                node.add_port("Mask", "In");
+            }
             let current = node.base.get("NodeSize").and_then(Value::as_str).unwrap_or("Default");
             if current != "Default" {
                 continue;
@@ -961,24 +989,42 @@ impl Document {
     /// Small and round again. A node without a size starts from the user's
     /// `DefaultNodeSize`.
     pub fn cycle_node_size(&mut self, id: i32, default_size: &str) {
-        let Some(node) = self.node(id) else {
+        self.cycle_node_sizes(&[id], default_size);
+    }
+
+    /// F11 changes the whole selection as one undo step, without filling
+    /// the history for nodes whose current size cannot be cycled.
+    pub fn cycle_node_sizes(&mut self, ids: &[i32], default_size: &str) {
+        let mut changes = Vec::new();
+        let default_size = if default_size == "Default" { "Standard" } else { default_size };
+        for id in ids {
+            let Some(node) = self.node(*id) else {
+                continue;
+            };
+            let saved = node.base.get("NodeSize").and_then(Value::as_str).unwrap_or("Default");
+            let current = if saved == "Default" { default_size } else { saved };
+            let inputs = node.ports.iter().filter(|port| port.is_input()).count();
+            let outputs = node.ports.iter().filter(|port| port.is_output()).count();
+            let big = inputs > 2 || outputs > 2;
+            let next = match (big, current) {
+                (false, "Small") => "Standard",
+                (false, "Standard") => "Small",
+                (true, "Compact") => "Standard",
+                (true, "Standard") => "Small",
+                (true, "Small") => "Compact",
+                (_, _) => continue,
+            };
+            changes.push((*id, next));
+        }
+        if changes.is_empty() {
             return;
-        };
-        let saved = node.base.get("NodeSize").and_then(Value::as_str).unwrap_or("Default");
-        let current = if saved == "Default" { default_size } else { saved };
-        let inputs = node.ports.iter().filter(|port| port.is_input()).count();
-        let outputs = node.ports.iter().filter(|port| port.is_output()).count();
-        let big = inputs > 2 || outputs > 2;
-        let next = match (big, current) {
-            (false, "Small") => "Standard",
-            (false, "Standard") => "Small",
-            (true, "Compact") => "Standard",
-            (true, "Standard") => "Small",
-            (true, "Small") => "Compact",
-            (_, other) => other,
-        };
-        let next = next.to_string();
-        self.set_member(id, "NodeSize", json!(next), "Node size", false);
+        }
+        self.checkpoint("Node size");
+        for (id, next) in changes {
+            if let Some(node) = self.project.terrain_mut().nodes.get_mut(&id) {
+                node.set_member("NodeSize", json!(next));
+            }
+        }
     }
 
     /// `TerrainState.NodeBookmarks`, in the order they were added.
@@ -1199,23 +1245,15 @@ impl Document {
         }
         self.checkpoint("Graph tab deleted");
         let doomed: Vec<i32> = self.terrain().nodes.values().filter(|node| node_tab(node) == index).map(|node| node.id).collect();
-        let terrain = self.project.terrain_mut();
-        terrain.nodes.retain(|id, _| !doomed.contains(id));
-        for node in terrain.nodes.values_mut() {
-            for port in node.ports.iter_mut() {
-                if port.record.as_ref().is_some_and(|record| doomed.contains(&record.from)) {
-                    port.record = None;
-                }
-            }
+        for id in doomed {
+            self.take_out_node(id);
         }
+        let terrain = self.project.terrain_mut();
         if let Some(Value::Object(notes)) = terrain.extra.get_mut("Notes") {
             notes.retain(|_, note| note.get("GraphIndex").and_then(Value::as_u64).unwrap_or(0) as usize != index);
         }
         if let Some(Value::Array(list)) = terrain.extra.get_mut("GraphTabs") {
             list.retain(|tab| tab.as_object().map(tab_index) != Some(index));
-        }
-        for id in doomed {
-            self.mark_stale(id);
         }
         // The tab's groups go too (`DeleteGroupElement` for each).
         self.remove_tab_groups(index);
@@ -2260,6 +2298,57 @@ mod tests {
     }
 
     #[test]
+    fn selection_sizes_and_bypass_each_undo_in_one_step() {
+        let (mut document, mountain, erosion) = chain();
+        let selected = [mountain, erosion];
+        let initial_history = document.undo_labels().len();
+        document.cycle_node_sizes(&selected, "Default");
+        assert_eq!(document.undo_labels().len(), initial_history + 1);
+        for id in selected {
+            assert_eq!(document.node(id).unwrap().base.get("NodeSize"), Some(&json!("Small")));
+        }
+        assert!(document.undo());
+        for id in selected {
+            assert!(!document.node(id).unwrap().base.contains_key("NodeSize"));
+        }
+
+        document.toggle_bypass_nodes(&selected);
+        assert_eq!(document.undo_labels().len(), initial_history + 1);
+        for id in selected {
+            assert_eq!(document.node(id).unwrap().base.get("StateOverride"), Some(&json!("Bypassed")));
+        }
+        assert!(document.undo());
+        for id in selected {
+            let state = nerthus_engine::StateOverride::of(document.node(id).unwrap());
+            assert_eq!(state, nerthus_engine::StateOverride::None);
+        }
+    }
+
+    #[test]
+    fn cycling_an_unsupported_size_leaves_history_and_dirty_state_alone() {
+        let mut document = Document::new();
+        let mountain = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        document.apply_build_update(mountain, "NodeSize", json!("Compact"));
+        document.dirty = false;
+        let initial_history = document.undo_labels();
+        document.cycle_node_sizes(&[mountain], "Standard");
+        assert_eq!(document.undo_labels(), initial_history);
+        assert!(!document.dirty);
+    }
+
+    #[test]
+    fn display_options_add_mask_inputs_only_to_maskable_nodes() {
+        let (mut document, mountain, erosion) = chain();
+        let mut options = crate::user::UserOptions::new();
+        options.set_value("AlwaysShowMaskPort", json!(true));
+        document.apply_node_display(&[mountain, erosion], &options);
+        document.apply_node_display(&[erosion], &options);
+        assert!(document.node(mountain).unwrap().port("Mask").is_none());
+        let mask_inputs = document.node(erosion).unwrap().ports.iter().filter(|port| port.name == "Mask" && port.is_input()).count();
+        assert_eq!(mask_inputs, 1);
+    }
+
+    #[test]
     fn bookmarks_and_pasted_properties() {
         let (mut document, mountain, erosion) = chain();
         document.add_bookmark(erosion);
@@ -2613,10 +2702,17 @@ mod tests {
         assert_eq!((tabs[1].name.as_str(), tabs[1].color.as_str()), ("Graph 2", "Brass"));
         document.move_nodes_to_tab(&[mountain], index);
         assert_eq!(node_tab(document.node(mountain).unwrap()), 1);
+        document.add_bookmark(mountain);
+        document.take_stale();
         let next = document.delete_graph_tab(index);
         assert_eq!(next, 0);
         assert!(document.node(mountain).is_none());
         assert!(document.node(erosion).unwrap().port("In").unwrap().record.is_none());
+        assert_eq!(document.portal_state(erosion, "In"), PortalState::None);
+        assert!(!document.bookmarks().contains(&mountain));
+        let (stale, _) = document.take_stale();
+        assert!(stale.contains(&mountain));
+        assert!(stale.contains(&erosion));
         assert_eq!(document.graph_tabs().len(), 1);
         assert_eq!(document.delete_graph_tab(0), 0);
         assert_eq!(document.graph_tabs().len(), 1);

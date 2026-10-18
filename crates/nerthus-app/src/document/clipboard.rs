@@ -23,6 +23,23 @@ impl NodeClipboard {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+
+    /// A different document can reuse the originals' ids. Only links
+    /// between the copied nodes belong to that document too.
+    pub fn disconnect_external_inputs(&mut self) {
+        let originals: HashSet<i32> = self.ids.iter().map(|(original, _)| *original).collect();
+        for node in &mut self.nodes {
+            for port in node.ports.iter_mut().filter(|port| port.is_input()) {
+                let external = port.record.as_ref().is_some_and(|record| !originals.contains(&record.from));
+                if external {
+                    port.record = None;
+                    if PortalState::of(port) == PortalState::Consuming {
+                        port.extra.shift_remove("PortalState");
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// `PasteNodes` puts the copies 50 below their originals.
@@ -111,7 +128,8 @@ impl Document {
                     record.from = *mapped;
                     continue;
                 }
-                let source_exists = self.project.terrain().nodes.contains_key(&record.from);
+                let source_port = self.node(record.from).and_then(|source| source.port(&record.from_port));
+                let source_exists = source_port.is_some_and(|source| source.is_output());
                 if !source_exists {
                     port.record = None;
                     if PortalState::of(port) == PortalState::Consuming {
@@ -217,6 +235,22 @@ mod tests {
         // Between the copies: follows them.
         let blur_copy = document.node(pasted[1]).unwrap();
         assert_eq!(blur_copy.port("In").unwrap().record.as_ref().unwrap().from, pasted[0]);
+    }
+
+    #[test]
+    fn pasting_drops_an_external_output_that_no_longer_exists() {
+        let mut document = Document::new();
+        let mountain = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let blur = document.add_node("Blur", [300.0, 0.0]).unwrap();
+        document.connect(mountain, "Out", blur, "In");
+        document.convert_connections_to_portals(&[(blur, "In".to_string())]);
+        let clipboard = document.copy_nodes(&[blur]);
+        document.project.terrain_mut().nodes.get_mut(&mountain).unwrap().ports.clear();
+
+        let pasted = document.paste_nodes(&clipboard, 0, Some("Paste Selection"));
+
+        assert!(document.node(pasted[0]).unwrap().port("In").unwrap().record.is_none());
+        assert_eq!(document.portal_state(pasted[0], "In"), PortalState::None);
     }
 
     #[test]

@@ -167,6 +167,13 @@ pub enum BuildEvent {
         /// The lowest and highest value of a one-channel main output.
         range: Option<(f32, f32)>,
     },
+    /// Cache state changed without rebuilding the node (unbaking).
+    NodeStateChanged {
+        generation: u64,
+        node: i32,
+        state: NodeState,
+        range: Option<(f32, f32)>,
+    },
     /// Members builds changed, to save with the project.
     MemberUpdates(Vec<(i32, String, Value)>),
     Finished {
@@ -697,6 +704,10 @@ fn run_bakes(engine: &mut Engine, terrain: &mut Arc<Terrain>, request: &mut Buil
             engine.load_baked(id, fitted);
         }
         engine.unbake(id);
+        let state = engine.state(id);
+        let range = main_range(engine, id);
+        let event = BuildEvent::NodeStateChanged { generation: request.generation, node: id, state, range };
+        let _ = events.send(event);
         store.delete_node(node);
         changed = true;
     }
@@ -947,6 +958,32 @@ fn node_caches(engine: &Engine) -> HashMap<i32, NodeCache> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unbaking_reports_cached_and_missing_results_without_rebuilding() {
+        let (mountain, blur, mut request) = mountain_and_blur(7);
+        let mut engine = Engine::new(Arc::new(nerthus_nodes::registry()));
+        let map = Map::filled(Resolution::square(32), 0.25);
+        engine.load_baked(mountain, vec![("Out".to_string(), map)]);
+        engine.offload_baked(blur);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let folder = std::env::temp_dir().join(format!("nerthus-unbake-state-{nanos}"));
+        request.bakes = Some(BakeStore::new(&folder.join("project.terrain"), "test", None));
+        request.unbake = vec![mountain, blur];
+        let mut terrain = request.terrain.clone();
+        let resolution = request.resolution;
+        let (sender, receiver) = unbounded();
+
+        assert!(run_bakes(&mut engine, &mut terrain, &mut request, resolution, &sender));
+
+        let states: Vec<(i32, NodeState)> = receiver.try_iter().filter_map(|event| match event {
+            BuildEvent::NodeStateChanged { generation: 7, node, state, .. } => Some((node, state)),
+            _ => None,
+        }).collect();
+        assert_eq!(states, vec![(mountain, NodeState::Built), (blur, NodeState::Unbuilt)]);
+        assert_eq!(engine.state(mountain), NodeState::Built);
+        assert_eq!(engine.state(blur), NodeState::Unbuilt);
+    }
 
     /// A Mountain into a Blur, and a request to build the Blur at 32 by 32.
     fn mountain_and_blur(generation: u64) -> (i32, i32, BuildRequest) {

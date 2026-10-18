@@ -177,7 +177,7 @@ impl UserOptions {
         self.flag("HideBookmarkShortcuts")
     }
 
-    /// `AlwaysShowMaskPort`: copies of maskable nodes get a mask port.
+    /// `AlwaysShowMaskPort`: every maskable node shows its mask input.
     pub fn always_show_mask_port(&self) -> bool {
         self.flag("AlwaysShowMaskPort")
     }

@@ -35,6 +35,7 @@ pub struct NoteDrag {
     resizing: bool,
     pointer_start: Pos2,
     start: [f32; 2],
+    checkpointed: bool,
 }
 
 impl NoteDrag {
@@ -163,25 +164,23 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         }
         crate::ui::widgets::context_menu(response, |ui| note_menu(ui, *id, commands));
         if let (Some(thumb), Some(note)) = (thumb, notes.iter().find(|note| note.id == *id))
-            && thumb.drag_started()
+            && thumb.drag_started_by(egui::PointerButton::Primary)
         {
             let start = [note.rect.width(), note.rect.height()];
             let pointer_start = drag_origin(ui, thumb).map(|point| view.to_canvas(origin, point)).unwrap_or_default();
-            editor.document.set_note_vector(*id, "Size", start, true);
-            state.note_drag = Some(NoteDrag { id: *id, resizing: true, pointer_start, start });
+            state.note_drag = Some(NoteDrag { id: *id, resizing: true, pointer_start, start, checkpointed: false });
         }
         if response.drag_started_by(egui::PointerButton::Primary)
             && state.note_drag.is_none()
             && let (Some(point), Some(note)) = (drag_origin(ui, response), notes.iter().find(|note| note.id == *id))
         {
             let start = [note.rect.left(), note.rect.top()];
-            editor.document.set_note_vector(*id, "Position", start, true);
             state.selected_note = Some(*id);
-            state.note_drag = Some(NoteDrag { id: *id, resizing: false, pointer_start: view.to_canvas(origin, point), start });
+            state.note_drag = Some(NoteDrag { id: *id, resizing: false, pointer_start: view.to_canvas(origin, point), start, checkpointed: false });
         }
     }
 
-    let Some(drag) = state.note_drag else {
+    let Some(mut drag) = state.note_drag else {
         return;
     };
     let held = ui.input(|input| input.pointer.primary_down());
@@ -189,15 +188,20 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
     let pointer = ui.input(|input| input.pointer.interact_pos());
     if let Some(point) = pointer {
         let delta = view.to_canvas(origin, point) - drag.pointer_start;
-        if drag.resizing {
+        let (member, value) = if drag.resizing {
             let size = [(drag.start[0] + delta.x).max(MIN_TEXT_WIDTH), (drag.start[1] + delta.y).max(MIN_HEIGHT)];
-            editor.document.set_note_vector(drag.id, "Size", size, false);
+            ("Size", size)
         } else {
             corner = [drag.start[0] + delta.x, drag.start[1] + delta.y];
-            editor.document.set_note_vector(drag.id, "Position", corner, false);
+            ("Position", corner)
+        };
+        if drag.checkpointed || value != drag.start {
+            editor.document.set_note_vector(drag.id, member, value, !drag.checkpointed);
+            drag.checkpointed = true;
         }
     }
     if held {
+        state.note_drag = Some(drag);
         return;
     }
     // `NoteElement_MoveCompleted`: in or out of a group by its corner.
@@ -272,6 +276,7 @@ fn draw(ui: &mut Ui, painter: &egui::Painter, note: &NoteLayout, screen: Rect, z
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::Document;
 
     struct NoteFrame {
         links: Vec<markdown::LinkRegion>,
@@ -296,6 +301,74 @@ mod tests {
 
     fn pointer_button(pos: Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    fn resize_frame(context: &egui::Context, editor: &mut Editor, state: &mut GraphState, events: Vec<egui::Event>) {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        state.rect = screen;
+        context.run_ui(input, |ui| {
+            let painter = ui.painter_at(screen);
+            let hidden = HashSet::new();
+            let mut commands = Vec::new();
+            show(ui, &painter, editor, state, Pos2::ZERO, &hidden, &mut commands);
+        }).drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn only_primary_resize_changes_the_note_or_its_history() {
+        let buttons = [egui::PointerButton::Secondary, egui::PointerButton::Middle, egui::PointerButton::Primary];
+        for button in buttons {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            let mut editor = Editor::new(Document::new());
+            let note = editor.document.add_note([26100.0, 26100.0], 0);
+            let history = editor.document.undo_labels();
+            editor.document.dirty = false;
+            let mut state = GraphState::default();
+            let start = Pos2::new(295.0, 295.0);
+            let end = start + Vec2::new(30.0, 20.0);
+            let click = |pos, pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE };
+            resize_frame(&context, &mut editor, &mut state, Vec::new());
+            resize_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(start)]);
+            resize_frame(&context, &mut editor, &mut state, vec![click(start, true)]);
+            resize_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(end)]);
+            resize_frame(&context, &mut editor, &mut state, vec![click(end, false)]);
+            let rect = note_rect(&editor, 0, note).unwrap();
+            if button == egui::PointerButton::Primary {
+                assert_eq!(rect.size(), Vec2::new(230.0, 220.0));
+                assert_eq!(editor.document.undo_labels().len(), history.len() + 1);
+                assert!(editor.document.dirty);
+                assert!(editor.document.undo());
+                assert_eq!(note_rect(&editor, 0, note).unwrap().size(), Vec2::splat(200.0));
+            } else {
+                assert_eq!(rect.size(), Vec2::splat(200.0));
+                assert_eq!(editor.document.undo_labels(), history);
+                assert!(!editor.document.dirty);
+            }
+            assert!(state.note_drag.is_none());
+        }
+    }
+
+    #[test]
+    fn resizing_a_note_against_its_minimum_adds_no_empty_edit() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let mut editor = Editor::new(Document::new());
+        let note = editor.document.add_note([26100.0, 26100.0], 0);
+        editor.document.set_note_vector(note, "Size", [MIN_TEXT_WIDTH, MIN_HEIGHT], false);
+        editor.document.dirty = false;
+        let history = editor.document.undo_labels();
+        let mut state = GraphState::default();
+        let start = Pos2::new(195.0, 155.0);
+        let end = start - Vec2::splat(30.0);
+        resize_frame(&context, &mut editor, &mut state, Vec::new());
+        resize_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(start)]);
+        resize_frame(&context, &mut editor, &mut state, vec![pointer_button(start, true)]);
+        resize_frame(&context, &mut editor, &mut state, vec![egui::Event::PointerMoved(end)]);
+        resize_frame(&context, &mut editor, &mut state, vec![pointer_button(end, false)]);
+        assert_eq!(editor.document.undo_labels(), history);
+        assert!(!editor.document.dirty);
     }
 
     #[test]

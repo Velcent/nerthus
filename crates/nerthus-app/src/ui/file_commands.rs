@@ -327,7 +327,7 @@ pub fn take_requests(editor: &mut Editor, ui_state: &mut UiState, commands: &mut
         ui_state.prompt = Some(prompt);
     }
     if let Some((tab, frame)) = editor.files.show_tab.take() {
-        ui_state.graph.tab = tab;
+        ui_state.graph.switch_tab(editor, tab);
         if frame {
             ui_state.graph.zoom_request = Some(ZoomRequest::Extents);
         }

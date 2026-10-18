@@ -47,7 +47,13 @@ pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut U
     // The star columns: the graph `5*`, the Data View `1.05*` (at least
     // 340) while open.
     let stars = (toolbar_column.left() - graph_grid.left()).max(0.0);
-    let data_width = if data_shown { data_view_width(stars, ui_state.data_view.share) } else { 0.0 };
+    let graph_min = toolbox::minimum_graph_width(ui, editor);
+    let data_min = data_view::minimum_content_width(ui);
+    let data_width = if data_shown {
+        data_view_width(stars, ui_state.data_view.share, graph_min, data_min, ui_state.data_view.width_adjusted)
+    } else {
+        0.0
+    };
 
     let split = (toolbar_column.left() - data_width).round();
     let graph_column = Rect::from_min_max(graph_grid.min, Pos2::new(split, graph_grid.bottom()));
@@ -119,11 +125,13 @@ pub fn show(ui: &mut Ui, graph_grid: Rect, editor: &mut Editor, ui_state: &mut U
     graph_toolbar(ui, toolbar_rect, data_shown, editor, ui_state, commands);
 }
 
-/// The Data View's width in the star space: its share, at least 340
-/// (`DataViewColumn.MinWidth`); the graph column has no least width. In
-/// stars narrower than that it takes them all.
-fn data_view_width(stars: f32, share: f32) -> f32 {
-    (stars * share).max(data_view::MIN_WIDTH).min(stars)
+/// Keep the usual Data View width while room allows, then give its spare
+/// width to the canvas. A splitter drag can shrink it to its tab strip.
+fn data_view_width(stars: f32, share: f32, graph_min: f32, data_min: f32, adjusted: bool) -> f32 {
+    let least = data_min.min(stars * 0.5);
+    let preferred = if adjusted { least } else { data_view::MIN_WIDTH };
+    let largest = (stars - graph_min).max(least);
+    (stars * share).max(preferred).min(largest).max(0.0)
 }
 
 /// `gsVertical1` (enabled while the Data View is open): dragging it moves
@@ -139,6 +147,7 @@ fn data_view_splitter(ui: &mut Ui, graph_column: Rect, stars: f32, current: f32,
     }
     let wanted = current - response.drag_delta().x;
     ui_state.data_view.share = (wanted / stars).clamp(0.0, 1.0);
+    ui_state.data_view.width_adjusted = true;
 }
 
 /// `GraphBorder` without tabs: 1.5 all round, corners 3, in
@@ -226,7 +235,7 @@ fn tabs(ui: &mut Ui, area: Rect, editor: &Editor, ui_state: &mut UiState, select
         let tab_rect = Rect::from_min_size(Pos2::new(x, strip.top() + 1.0), Vec2::new(width, TAB_HEIGHT));
         let response = ui.interact(tab_rect, ui.id().with(("graph-tab", tab.index)), Sense::click());
         if response.clicked() {
-            ui_state.graph.tab = tab.index;
+            commands.push(Command::Graph(GraphCommand::SelectTab(tab.index)));
         }
         if response.double_clicked() {
             ui_state.graph.renaming_tab = Some((tab.index, tab.name.clone()));
@@ -799,17 +808,13 @@ mod tests {
 
 
     #[test]
-    fn the_data_view_keeps_its_least_width() {
+    fn the_data_view_leaves_canvas_beside_the_toolbox() {
         let share = data_view::DEFAULT_SHARE;
-        // Its share, at least 340; the graph has the rest.
-        assert_eq!(data_view_width(1000.0, share), data_view::MIN_WIDTH);
-        assert_eq!(data_view_width(3000.0, share), 3000.0 * share);
-        assert_eq!(data_view_width(800.0, 0.9), 720.0);
-        assert_eq!(data_view_width(450.0, share), data_view::MIN_WIDTH);
-        // Dragged all the way, it takes every star; narrower stars than
-        // 340, all there are.
-        assert_eq!(data_view_width(800.0, 1.0), 800.0);
-        assert_eq!(data_view_width(300.0, share), 300.0);
+        assert_eq!(data_view_width(1000.0, share, 260.0, 231.0, false), 340.0);
+        assert_eq!(data_view_width(550.0, share, 260.0, 231.0, false), 290.0);
+        assert_eq!(data_view_width(1000.0, 0.1, 260.0, 231.0, true), 231.0);
+        assert_eq!(data_view_width(800.0, 1.0, 260.0, 231.0, true), 540.0);
+        assert_eq!(data_view_width(300.0, share, 260.0, 231.0, false), 150.0);
     }
 
     #[test]
@@ -821,7 +826,11 @@ mod tests {
             grid_frame(&context, grid, &mut editor, &mut ui_state, Vec::new());
             let data = ui_state.graph.areas.data_view.expect("the Data View shows while open");
             let stars = grid.width() - (toolbar_width(theme::sizes(&context)) + AREA_MARGIN);
-            let expected = data_view_width(stars, ui_state.data_view.share);
+            let mut minimums = (0.0, 0.0);
+            context.run_ui(egui::RawInput::default(), |ui| {
+                minimums = (toolbox::minimum_graph_width(ui, &editor), data_view::minimum_content_width(ui));
+            }).drop_without_applying_deltas();
+            let expected = data_view_width(stars, ui_state.data_view.share, minimums.0, minimums.1, ui_state.data_view.width_adjusted);
             assert!((data.width() + AREA_MARGIN - expected).abs() < 1.0, "{width}: the Data View is {} wide, not {expected}", data.width() + AREA_MARGIN);
             if stars > data_view::MIN_WIDTH {
                 assert!(data.left() >= ui_state.graph.rect.left() - 0.5, "{width}");

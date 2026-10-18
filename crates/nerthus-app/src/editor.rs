@@ -412,6 +412,9 @@ impl Editor {
     /// Replaces the document (File > New, Open).
     pub fn set_document(&mut self, document: Document) {
         self.freeze_on_close();
+        if let Some(clipboard) = self.node_clipboard.as_mut() {
+            clipboard.disconnect_external_inputs();
+        }
         self.generation += 1;
         self.cancel_build |= self.building;
         self.building = false;
@@ -1424,6 +1427,20 @@ impl Editor {
                     self.report(text);
                 }
             }
+            BuildEvent::NodeStateChanged { generation, node, state, range } => {
+                if generation != self.generation {
+                    return;
+                }
+                let status = self.statuses.entry(node).or_default();
+                status.state = state;
+                status.building = false;
+                status.progress = if state == NodeState::Built { 1.0 } else { 0.0 };
+                status.range = range;
+                if state == NodeState::Unbuilt {
+                    status.built_at = None;
+                    status.milliseconds = 0.0;
+                }
+            }
             BuildEvent::NodeFinished { generation, node, milliseconds, state, error, range } => {
                 if generation != self.generation {
                     return;
@@ -2320,6 +2337,57 @@ fn copy_folder(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cross_project_paste_keeps_only_connections_within_the_clipboard() {
+        let mut document = Document::new();
+        let source = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let erosion = document.add_node("ErosionPro", [300.0, 0.0]).unwrap();
+        let blur = document.add_node("Blur", [600.0, 0.0]).unwrap();
+        document.connect(source, "Out", erosion, "In");
+        document.connect(erosion, "Out", blur, "In");
+        document.convert_connections_to_portals(&[(erosion, "In".to_string())]);
+        let clipboard = document.copy_nodes(&[erosion, blur]);
+        let unrelated = document.node(source).unwrap().clone();
+        let mut editor = Editor::new(document);
+        editor.node_clipboard = Some(clipboard);
+
+        let mut destination = Document::new();
+        destination.project.terrain_mut().nodes.insert(source, unrelated);
+        editor.set_document(destination);
+        let clipboard = editor.node_clipboard.as_ref().unwrap().clone();
+        let pasted = editor.document.paste_nodes(&clipboard, 0, Some("Paste Selection"));
+
+        let erosion_copy = editor.document.node(pasted[0]).unwrap();
+        assert!(erosion_copy.port("In").unwrap().record.is_none());
+        assert_eq!(editor.document.portal_state(pasted[0], "In"), crate::document::PortalState::None);
+        let blur_copy = editor.document.node(pasted[1]).unwrap();
+        assert_eq!(blur_copy.port("In").unwrap().record.as_ref().unwrap().from, pasted[0]);
+    }
+
+    #[test]
+    fn unbake_state_events_preserve_build_statistics_without_counting_a_build() {
+        let mut document = Document::new();
+        let node = document.add_node("Mountain", [0.0, 0.0]).unwrap();
+        let mut editor = Editor::new(document);
+        let built_at = Instant::now();
+        let status = NodeStatus { state: NodeState::Baked, milliseconds: 123.0, built_at: Some(built_at), ..NodeStatus::default() };
+        editor.statuses.insert(node, status);
+        let event = BuildEvent::NodeStateChanged { generation: editor.generation, node, state: NodeState::Built, range: Some((0.25, 0.75)) };
+        editor.handle_event(event);
+
+        let status = editor.status(node);
+        assert_eq!(status.state, NodeState::Built);
+        assert_eq!(status.built_at, Some(built_at));
+        assert_eq!(status.milliseconds, 123.0);
+        assert_eq!(status.range, Some((0.25, 0.75)));
+        assert_eq!(editor.build_done, 0);
+
+        let stale_event = BuildEvent::NodeStateChanged { generation: editor.generation.saturating_sub(1), node, state: NodeState::Unbuilt, range: None };
+        editor.generation += 1;
+        editor.handle_event(stale_event);
+        assert_eq!(editor.status(node).state, NodeState::Built);
+    }
 
     #[test]
     fn refresh_builds_every_requested_node_with_no_active_preview() {

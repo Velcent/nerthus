@@ -188,6 +188,24 @@ impl Document {
         owner.map(|group| group.id)
     }
 
+    /// Navigation reveals its target before the canvas frames it. This
+    /// changes the saved view without adding a separate undo step.
+    pub fn reveal_node(&mut self, id: i32) -> bool {
+        if self.node(id).is_none() {
+            return false;
+        }
+        let mut revealed = false;
+        let groups = self.groups();
+        for mut group in groups {
+            if group.collapsed && group.children.contains(&id) {
+                group.collapsed = false;
+                self.store_group(&group);
+                revealed = true;
+            }
+        }
+        revealed
+    }
+
     /// Writes a group back, made when missing. Not an edit of its own.
     pub(crate) fn store_group(&mut self, group: &GroupData) {
         let extra = &mut self.project.terrain_mut().extra;
@@ -421,6 +439,22 @@ fn note_position(fields: &Map<String, Value>) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_reveals_a_node_without_adding_an_undo_step() {
+        let mut document = Document::new();
+        let mountain = document.add_node("Mountain", [26000.0, 26000.0]).unwrap();
+        let group = document.add_group(&[mountain], [25980.0, 25960.0], [280.0, 270.0], 0);
+        document.toggle_group_collapsed(group);
+        document.set_group_locked(group, true);
+        let initial_history = document.undo_labels();
+
+        document.reveal_node(mountain);
+
+        assert!(!document.group(group).unwrap().collapsed);
+        assert!(document.group(group).unwrap().locked);
+        assert_eq!(document.undo_labels(), initial_history);
+    }
 
     #[test]
     fn groups_save_their_members_in_order() {

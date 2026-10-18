@@ -15,7 +15,7 @@ use crate::icons;
 use crate::theme;
 use crate::ui::commands::Command;
 use crate::ui::data_view::{toolbar, toolbar_divider, toolbar_row};
-use crate::ui::graph_canvas::{node_color, node_context_menu, node_icon, GraphState, ZoomRequest};
+use crate::ui::graph_canvas::{node_color, node_context_menu, node_icon};
 use crate::ui::widgets::{icon_menu, menu_item, menu_separator, Tooltips};
 use crate::user::IconState;
 
@@ -270,11 +270,11 @@ pub fn matching_nodes(editor: &Editor, criteria: FilterCriteria) -> Vec<i32> {
     matched.map(|node| node.id).collect()
 }
 
-pub fn show(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut TerrainState, graph: &mut GraphState, commands: &mut Vec<Command>) {
+pub fn show(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut TerrainState, commands: &mut Vec<Command>) {
     let (inner, page_top) = toolbar(ui, area);
     let mut left = toolbar_row(ui, inner, false);
-    lock_button(&mut left, editor, graph, commands);
-    underlay_button(&mut left, editor, graph, commands);
+    lock_button(&mut left, editor, commands);
+    underlay_button(&mut left, editor, commands);
     let mut right = toolbar_row(ui, inner, true);
     criteria_menu(&mut right, state);
     toolbar_divider(&mut right, 8.0, 2.0);
@@ -288,13 +288,13 @@ pub fn show(ui: &mut Ui, area: Rect, editor: &mut Editor, state: &mut TerrainSta
     scroll = scroll.auto_shrink([false, false]);
     scroll.show(&mut tree_ui, |ui| {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
-        tree(ui, editor, state, graph, commands);
+        tree(ui, editor, state, commands);
     });
 }
 
 /// `btnLocked`: `photo-sensor-3` in `Accent-Green`, at half strength
 /// until a node's preview is locked; then it goes to that node.
-fn lock_button(ui: &mut Ui, editor: &Editor, graph: &mut GraphState, commands: &mut Vec<Command>) {
+fn lock_button(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     let locked = if editor.preview_locked { editor.preview_node } else { None };
     let locked_name = locked.and_then(|id| editor.document.node(id)).map(|node| node.name.clone());
     let tooltip = match &locked_name {
@@ -306,7 +306,7 @@ fn lock_button(ui: &mut Ui, editor: &Editor, graph: &mut GraphState, commands: &
         return;
     }
     match locked {
-        Some(id) => go_to_node(editor, graph, id, commands),
+        Some(id) => go_to_node(id, commands),
         None => {
             if editor.active_node().is_some() {
                 commands.push(Command::LockPreview);
@@ -317,7 +317,7 @@ fn lock_button(ui: &mut Ui, editor: &Editor, graph: &mut GraphState, commands: &
 
 /// `btnUnderlay`: `focus-centered` in `Accent-Magenta`, at half strength
 /// until a node is the underlay; then it goes to that node.
-fn underlay_button(ui: &mut Ui, editor: &Editor, graph: &mut GraphState, commands: &mut Vec<Command>) {
+fn underlay_button(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     let underlay = editor.document.underlay_node();
     let underlay_name = editor.document.node(underlay).map(|node| node.name.clone());
     let tooltip = match &underlay_name {
@@ -329,7 +329,7 @@ fn underlay_button(ui: &mut Ui, editor: &Editor, graph: &mut GraphState, command
         return;
     }
     if underlay_name.is_some() {
-        go_to_node(editor, graph, underlay, commands);
+        go_to_node(underlay, commands);
     } else if let Some(node) = editor.active_node() {
         commands.push(Command::SetUnderlay(node));
     }
@@ -349,13 +349,8 @@ fn toolbar_icon(ui: &mut Ui, icon: &str, color: Color32, active: bool, tooltip: 
 }
 
 /// `NodeElement.GoToLocation` and `Select`: the node's tab, centred.
-fn go_to_node(editor: &Editor, graph: &mut GraphState, id: i32, commands: &mut Vec<Command>) {
-    let Some(node) = editor.document.node(id) else {
-        return;
-    };
-    graph.tab = node_tab(node);
-    graph.zoom_request = Some(ZoomRequest::Center(id));
-    commands.push(Command::SelectNode(id));
+fn go_to_node(id: i32, commands: &mut Vec<Command>) {
+    commands.push(Command::GoToNode(id));
 }
 
 /// `miCriteriaMenu`: `filter`, or with a filter on `xmark-circle` in red.
@@ -389,7 +384,7 @@ fn criteria_item(ui: &mut Ui, checked: bool, icon: Option<&str>, accent: Option<
 /// `RecreateTree`: each graph tab with its groups (their nodes, then
 /// notes, by position), then its other nodes by position, then its other
 /// notes.
-fn tree(ui: &mut Ui, editor: &Editor, state: &mut TerrainState, graph: &mut GraphState, commands: &mut Vec<Command>) {
+fn tree(ui: &mut Ui, editor: &Editor, state: &mut TerrainState, commands: &mut Vec<Command>) {
     let average = average_build_milliseconds(editor);
     let icon_state = editor.user.options.data_view_icons();
     let bookmarked = bookmarks(editor);
@@ -542,7 +537,7 @@ fn tree(ui: &mut Ui, editor: &Editor, state: &mut TerrainState, graph: &mut Grap
     }
 
     if let Some((target, double)) = clicked {
-        row_clicked(editor, graph, target, double, commands);
+        row_clicked(target, double, commands);
     }
     // `OnMouseRightButtonUp`: selects the node and opens the graph's node
     // menu where the pointer is.
@@ -724,29 +719,23 @@ fn trimmed_galley(ui: &Ui, text: &str, color: Color32, width: f32) -> std::sync:
 }
 
 /// `OnMouseLeftButtonUp` and `OnMouseDoubleClick` of the tree's items.
-fn row_clicked(editor: &Editor, graph: &mut GraphState, target: RowTarget, double: bool, commands: &mut Vec<Command>) {
+fn row_clicked(target: RowTarget, double: bool, commands: &mut Vec<Command>) {
     match target {
         // `TVIGraph`: `SelectGraphTab`.
-        RowTarget::Graph(index) => graph.tab = index,
+        RowTarget::Graph(index) => commands.push(Command::Graph(crate::ui::graph_commands::GraphCommand::SelectTab(index))),
         // `TVINode`: selects the node (and shows it); a double click goes
         // to it.
         RowTarget::Node(id) => {
             if double {
-                go_to_node(editor, graph, id, commands);
+                go_to_node(id, commands);
             } else {
                 commands.push(Command::SelectNode(id));
             }
         }
         // `TVINote`: selects the note; a double click goes to it.
         RowTarget::Note(id) => {
-            let tab = editor.document.notes().iter().find(|(note, _)| *note == id).map(|(_, fields)| note_tab(fields));
-            if let Some(tab) = tab {
-                graph.tab = tab;
-            }
-            graph.selected_note = Some(id);
-            if double {
-                graph.zoom_request = Some(ZoomRequest::CenterNote(id));
-            }
+            let select = crate::ui::graph_commands::GraphCommand::SelectNote { id, go_to: double };
+            commands.push(Command::Graph(select));
         }
         // `TVIGroup`: selects the group; a double click goes to it.
         RowTarget::Group(id) => {

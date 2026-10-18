@@ -104,6 +104,10 @@ pub fn show(ui: &mut Ui, painter: &egui::Painter, editor: &mut Editor, state: &m
         if header_response.clicked() {
             select_group(editor, state, group.id, modifiers.command || modifiers.shift);
         }
+        if header_response.secondary_clicked() {
+            select_group(editor, state, group.id, false);
+        }
+        crate::ui::widgets::context_menu(&header_response, |ui| group_menu(ui, group, commands));
         if header_response.double_clicked() {
             commands.push(Command::Graph(GraphCommand::ToggleGroupCollapsed(group.id)));
         }
@@ -287,28 +291,30 @@ fn group_menu_popup(button: &Response, group: &GroupData, commands: &mut Vec<Com
     let mut popup = egui::Popup::menu(button);
     popup = popup.align(egui::RectAlign::BOTTOM_START);
     popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    popup.show(|ui| crate::ui::widgets::menu_rows_below(ui, button.interact_rect, |ui| {
-        if menu_item(ui, Some("stack-pop"), None, "Group to Tab", "").clicked() {
-            commands.push(Command::Graph(GraphCommand::GroupToTab(group.id)));
-        }
-        menu_separator(ui);
-        if menu_item(ui, None, None, "Rename", "F2").clicked() {
-            commands.push(Command::Graph(GraphCommand::RenameGroup(group.id)));
-        }
-        if check_item(ui, group.locked, "Lock", "Ctrl L").clicked() {
-            commands.push(Command::Graph(GraphCommand::SetGroupLocked(group.id, !group.locked)));
-        }
-        menu_caption(ui, "Color");
-        if let Some(color) = swatch_grid(ui) {
-            commands.push(Command::Graph(GraphCommand::SetGroupColor(group.id, color)));
-            ui.close();
-        }
-        menu_caption(ui, "Icon");
-        if let Some(icon) = icon_grid(ui, &GROUP_ICONS) {
-            commands.push(Command::Graph(GraphCommand::SetGroupIcon(group.id, icon)));
-            ui.close();
-        }
-    }));
+    popup.show(|ui| crate::ui::widgets::menu_rows_below(ui, button.interact_rect, |ui| group_menu(ui, group, commands)));
+}
+
+fn group_menu(ui: &mut Ui, group: &GroupData, commands: &mut Vec<Command>) {
+    if menu_item(ui, Some("stack-pop"), None, "Group to Tab", "").clicked() {
+        commands.push(Command::Graph(GraphCommand::GroupToTab(group.id)));
+    }
+    menu_separator(ui);
+    if menu_item(ui, None, None, "Rename", "F2").clicked() {
+        commands.push(Command::Graph(GraphCommand::RenameGroup(group.id)));
+    }
+    if check_item(ui, group.locked, "Lock", "Ctrl L").clicked() {
+        commands.push(Command::Graph(GraphCommand::SetGroupLocked(group.id, !group.locked)));
+    }
+    menu_caption(ui, "Color");
+    if let Some(color) = swatch_grid(ui) {
+        commands.push(Command::Graph(GraphCommand::SetGroupColor(group.id, color)));
+        ui.close();
+    }
+    menu_caption(ui, "Icon");
+    if let Some(icon) = icon_grid(ui, &GROUP_ICONS) {
+        commands.push(Command::Graph(GraphCommand::SetGroupIcon(group.id, icon)));
+        ui.close();
+    }
 }
 
 /// `RenameGroup`: the rename popup on the group it is open on
@@ -329,5 +335,56 @@ pub fn rename_overlay(ui: &mut Ui, editor: &mut Editor, state: &mut GraphState, 
     };
     if !text.trim().is_empty() {
         editor.document.rename_group(id, &text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::ui::graph_canvas::GraphView;
+
+    #[test]
+    fn group_header_context_menu_is_available_when_the_menu_button_is_hidden() {
+        let cases = [(false, 1.0, 270.0), (true, 1.0, 270.0), (false, 0.3, 270.0), (false, 1.0, 60.0)];
+        for (collapsed, zoom, width) in cases {
+            let context = egui::Context::default();
+            theme::apply(&context);
+            let mut editor = Editor::new(Document::new());
+            let id = editor.document.add_group(&[], [26100.0, 26100.0], [width, 270.0], 0);
+            if collapsed {
+                editor.document.toggle_group_collapsed(id);
+            }
+            let mut state = GraphState::default();
+            let view = GraphView { zoom, ..Default::default() };
+            state.views.insert(0, view);
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0));
+            state.rect = screen;
+            let group = editor.document.group(id).unwrap();
+            let bounds = view.rect_to_screen(Pos2::ZERO, group.bounds());
+            let point = Pos2::new(bounds.right() - 4.0 * zoom, bounds.top() + 15.0 * zoom);
+            let mut draw_frame = |events| {
+                let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                let mut commands = Vec::new();
+                let output = context.run_ui(input, |ui| {
+                    let painter = ui.painter_at(screen);
+                    let groups = editor.document.groups();
+                    show(ui, &painter, &mut editor, &mut state, &groups, Pos2::ZERO, &mut commands);
+                });
+                assert!(commands.is_empty());
+                output.drop_without_applying_deltas();
+            };
+            draw_frame(Vec::new());
+            draw_frame(vec![egui::Event::PointerMoved(point)]);
+            for pressed in [true, false] {
+                let click = egui::Event::PointerButton { pos: point, button: PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE };
+                draw_frame(vec![click]);
+            }
+            for _ in 0..3 {
+                draw_frame(Vec::new());
+            }
+            assert_eq!(state.selected_groups, [id], "collapsed: {collapsed}, zoom: {zoom}, width: {width}");
+            assert!(egui::Popup::is_any_open(&context), "collapsed: {collapsed}, zoom: {zoom}, width: {width}");
+        }
     }
 }

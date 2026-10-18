@@ -199,6 +199,17 @@ pub fn menu_style(ui: &mut Ui) {
     ui.set_min_width(MENU_MIN_WIDTH.min(menu_width_limit(ui)));
 }
 
+/// Menu rows in a fixed column, including columns narrower than the
+/// normal menu minimum. The usual row styling and text truncation apply.
+pub fn menu_width<R>(ui: &mut Ui, width: f32, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let info = egui::UiStackInfo::default().with_tag_value(MENU_WIDTH_TAG, width);
+    let builder = egui::UiBuilder::new().ui_stack_info(info);
+    ui.scope_builder(builder, |ui| {
+        ui.set_width(width);
+        contents(ui)
+    }).inner
+}
+
 /// The rows of a menu dropped from the main menu (`menu_rows_within`),
 /// in at most the window's height under the title bar. The menu then
 /// opens under the bar, rather than egui moving it up over the bar (and
