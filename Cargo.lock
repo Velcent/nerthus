@@ -4809,7 +4809,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4855,7 +4855,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-assimp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "flate2",
@@ -4864,7 +4864,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4881,7 +4881,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-compute"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bytemuck",
  "env_logger",
@@ -4897,7 +4897,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -4912,7 +4912,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-engine"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.23.1",
  "directories",
@@ -4928,7 +4928,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-erosion"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "nerthus-noise",
  "rayon",
@@ -4937,7 +4937,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-export"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "crc32fast",
@@ -4958,11 +4958,11 @@ dependencies = [
 
 [[package]]
 name = "nerthus-hevc"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "nerthus-image"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "nerthus-core",
  "rayon",
@@ -4971,7 +4971,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-io"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -5013,7 +5013,7 @@ dependencies = [
 
 [[package]]
 name = "nerthus-nodes"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.23.1",
  "bytemuck",
@@ -5036,14 +5036,14 @@ dependencies = [
 
 [[package]]
 name = "nerthus-noise"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "nerthus-render"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bevy",
  "half",
