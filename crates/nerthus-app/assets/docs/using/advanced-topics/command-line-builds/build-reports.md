@@ -6,7 +6,7 @@ Nerthus shows a post-action screen when a build finishes. It saves a copy in the
 
 ```
 
-───────────────────────────────────────────────────────────── NERTHUS BUILD  0.1.0 ──
+───────────────────────────────────────────────────────────── NERTHUS BUILD  1.0.0 ──
 
           Filename:  │ C:/Users/you/Documents/Nerthus/Projects/mesher2.terrain  
     Build Location:  │ C:\Users\you\Documents\Nerthus\Builds\mesher2\001        

@@ -1047,7 +1047,7 @@ mod tests {
         let lines: Vec<&str> = text.split(NEWLINE).collect();
         assert_eq!(lines[0], "");
         assert_eq!(lines[1].chars().count(), CONSOLE_WIDTH);
-        assert!(lines[1].ends_with(" NERTHUS BUILD  0.1.0 ──"));
+        assert!(lines[1].ends_with(" NERTHUS BUILD  1.0.0 ──"));
         assert_eq!(lines[3], " ".repeat(80));
         assert_eq!(lines[4], "          Filename:  │ /…/scratchpad/report/basic.terrain                       ");
         assert_eq!(lines[5], "    Build Location:  │ /tmp/nerthus-report-example/builds/0042-8a2c-4e2b-9f61-  ");

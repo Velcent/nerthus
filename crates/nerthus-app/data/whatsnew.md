@@ -1,4 +1,4 @@
-# Nerthus 0.1.0
+# Nerthus 1.0.0
 
 Nerthus is a node-based terrain generator. It opens and saves `.terrain` projects and builds them into heightfields, masks and colour maps.
 
