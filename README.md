@@ -77,6 +77,25 @@ builds are untested.
 cargo build --release
 ```
 
+On macOS (Apple Silicon), the [Build workflow](.github/workflows/build.yml)
+uploads `nerthus-macos-arm64.zip`, containing `Nerthus.app` with the
+command-line builder, app icon and licences. Extract it and move the app to
+Applications. The app is ad-hoc signed; it is not notarized with an Apple
+developer certificate.
+
+To package an existing release build locally on macOS:
+
+```sh
+brew install librsvg
+packaging/package-macos.sh
+```
+
+The script takes optional binary and output directories, defaulting to
+`target/release` and `target/packages`. It packages the existing binaries
+without rebuilding them.
+
+The builder in a macOS bundle is `Nerthus.app/Contents/MacOS/nerthus-build`.
+
 ## Running
 
 The editor:

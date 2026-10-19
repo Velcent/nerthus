@@ -1,6 +1,6 @@
 # Builds the editor (nerthus) and the command-line builder (nerthus-build)
 # for release on Linux, macOS and Windows, and uploads each platform's
-# binaries as an artifact of the run.
+# binaries as an artifact of the run, with a zipped .app bundle on macOS.
 name: Build
 
 on:
@@ -56,6 +56,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y pkg-config libasound2-dev libudev-dev
 
+      - name: Install macOS packaging dependencies
+        if: runner.os == 'macOS'
+        run: brew install librsvg
+
       - uses: dtolnay/rust-toolchain@stable
 
       # Only builds of main save the cache; builds of other branches start
@@ -67,12 +71,18 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
-      # A tar keeps the executables executable, which zipped artifacts don't;
-      # Windows gets a zip.
+      # macOS gets a zipped app bundle. A tar keeps Linux's executables
+      # executable; Windows gets a zip of its binaries.
       - name: Package
         id: package
         shell: bash
         run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            packaging/package-macos.sh
+            echo "archive=target/packages/nerthus-${{ matrix.platform }}.zip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           package="nerthus-${{ matrix.platform }}"
           extension=""
           if [ "$RUNNER_OS" = "Windows" ]; then
@@ -97,6 +107,12 @@ jobs:
             tar -czf "$archive" "$package"
           fi
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test the macOS package
+        if: runner.os == 'macOS'
+        # The editor's --help opens a modal dialog; the builder's is suitable
+        # for an unattended check of the packaged executable.
+        run: target/packages/Nerthus.app/Contents/MacOS/nerthus-build --help
 
       - name: Upload
         uses: actions/upload-artifact@v7
