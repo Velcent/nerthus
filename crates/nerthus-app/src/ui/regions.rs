@@ -237,6 +237,13 @@ fn header(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
 /// `Shell.PopulateRegionsMenu`: Whole Terrain; then, with a node
 /// previewed, the regions, "Save Current Node preview" and (when asked)
 /// "Edit Regions".
+#[cfg(target_os = "macos")]
+pub fn regions_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>, edit_regions: bool) {
+    let entries = crate::ui::main_menu::region_entries(editor, edit_regions);
+    crate::ui::main_menu::show_entries(ui, &entries, commands);
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn regions_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>, edit_regions: bool) {
     menu_style(ui);
     let previewed = editor.preview_region.as_deref();

@@ -42,6 +42,15 @@ mod help_windows;
 mod input_box;
 mod markdown;
 mod math_editor;
+#[cfg(target_os = "macos")]
+#[path = "main-menu.rs"]
+mod main_menu;
+#[cfg(target_os = "macos")]
+#[path = "macos-menu.rs"]
+mod macos_menu;
+#[cfg(target_os = "macos")]
+#[path = "macos-window.rs"]
+mod macos_window;
 mod memory_dialogs;
 mod menu_keys;
 mod menus;
@@ -174,6 +183,9 @@ pub struct UiState {
     /// What the floating viewport's window asked for, run with the main
     /// window's commands.
     floating_commands: Vec<Command>,
+    /// A native or in-app menu requested the Create Preset dialog.
+    #[cfg(target_os = "macos")]
+    preset_to_create: Option<i32>,
     /// The 3D view was clicked last, so its keys move the camera.
     viewport_focused: bool,
     /// The navigation settings have gone to the view (`SetInputOptions`),
@@ -244,6 +256,8 @@ impl Default for UiState {
             tools_at_launch: Vec::new(),
             commands_at_launch: Vec::new(),
             floating_commands: Vec::new(),
+            #[cfg(target_os = "macos")]
+            preset_to_create: None,
             viewport_focused: false,
             navigation_sent: false,
             navigation_hint_until: None,
@@ -421,6 +435,7 @@ const MIN_ROW: f32 = 120.0;
 /// (`crate::crash`); until that is answered, only the question shows.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
+    #[cfg(target_os = "macos")] _main_thread: bevy::ecs::system::NonSendMarker,
     mut contexts: EguiContexts,
     mut editor: ResMut<Editor>,
     mut ui_state: ResMut<UiState>,
@@ -429,10 +444,15 @@ pub fn draw(
     mut link: ViewportLink,
     camera: Single<(&mut Camera, &StrategyCamera), With<ViewportCamera>>,
     mut window: Single<&mut Window, With<PrimaryWindow>>,
+    #[cfg(target_os = "macos")] window_handles: Single<&bevy::window::RawHandleWrapper, With<PrimaryWindow>>,
     diagnostics: Res<DiagnosticsStore>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
+    #[cfg(target_os = "macos")]
+    title_bar::update_native_metrics(&ctx, &window_handles);
     if ui_state.crash.is_some() {
+        #[cfg(target_os = "macos")]
+        macos_menu::disable();
         crate::crash::show(&ctx, &mut ui_state.crash);
         return Ok(());
     }
@@ -448,6 +468,8 @@ pub fn draw(
             result
         }
         Err(payload) => {
+            #[cfg(target_os = "macos")]
+            macos_menu::disable();
             let starting = ui_state.startup.starting();
             ui_state.crash = Some(crate::crash::Crash::caught(payload.as_ref(), starting));
             ctx.request_repaint();
@@ -543,7 +565,7 @@ fn draw_editor(
     let builder = UiBuilder::new().layer_id(LayerId::background()).max_rect(full);
     let mut root = Ui::new(ctx.clone(), "nerthus-root".into(), builder);
 
-    let title_rect = Rect::from_min_size(full.min, Vec2::new(full.width(), title_bar::HEIGHT));
+    let title_rect = Rect::from_min_size(full.min, Vec2::new(full.width(), title_bar::height(ctx)));
     let status_rect = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - status_bar::HEIGHT), full.max);
     // Where the tool windows stay too.
     let body = tool_window::body(ctx);
@@ -691,8 +713,24 @@ fn draw_editor(
         editor.show_preview();
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        let menus = main_menu::build_menus(editor, ui_state);
+        let menu_enabled = !tool_commands::modal_open(ctx, ui_state) && ui_state.graph.popup.is_none() && !ctx.any_popup_open();
+        let node_keys = !editor.user.options.confine_shortcuts() || pointer_over_graph(ctx, &ui_state.graph);
+        // The floating viewport has its own egui context. Only the focused
+        // editor window can give its text and graph shortcuts to this menu.
+        let text_input = !window.focused || ctx.text_edit_focused();
+        let native_commands = macos_menu::sync(&menus, menu_enabled, text_input, node_keys);
+        pending.extend(native_commands);
+    }
+
     gradient_editor::flush_pending(ctx, editor, !pending.is_empty());
     commands::run(pending, editor, ui_state, window);
+    #[cfg(target_os = "macos")]
+    if let Some(node) = ui_state.preset_to_create.take() {
+        presets::open_create_window(ctx, node);
+    }
     if finishes_value_edit {
         editor.document.finish_value_edit();
     }
@@ -984,7 +1022,10 @@ fn min_window_points() -> Vec2 {
 /// `scale`, but no more than the `screen` it is on (logical pixels too):
 /// a window that cannot be made that small is at least shown whole.
 fn min_window_size(scale: f32, screen: Option<Vec2>) -> Vec2 {
-    let least = min_window_points() * scale;
+    let mut least = min_window_points() * scale;
+    if cfg!(target_os = "macos") {
+        least.y += title_bar::HEIGHT * (1.0 - scale);
+    }
     match screen {
         Some(screen) => least.min(screen),
         None => least,
@@ -1209,7 +1250,10 @@ fn shortcuts(ctx: &egui::Context, node_keys: bool, pending: &mut Vec<Command>) {
         (KeyboardShortcut::new(command, Key::G), GraphCommand::GroupSelection),
         (KeyboardShortcut::new(command, Key::T), GraphCommand::FindNode),
         (KeyboardShortcut::new(command, Key::P), GraphCommand::ConvertConnectionsToPortals),
+        #[cfg(not(target_os = "macos"))]
         (KeyboardShortcut::new(command, Key::Q), GraphCommand::ReplaceSearch),
+        #[cfg(target_os = "macos")]
+        (KeyboardShortcut::new(Modifiers::CTRL, Key::Q), GraphCommand::ReplaceSearch),
         (KeyboardShortcut::new(command_shift, Key::F8), GraphCommand::Combine(CombineKind::Layers)),
         (KeyboardShortcut::new(command, Key::F8), GraphCommand::Combine(CombineKind::Mixer)),
         (KeyboardShortcut::new(Modifiers::NONE, Key::F8), GraphCommand::Combine(CombineKind::Inputs)),
@@ -1498,6 +1542,14 @@ mod tests {
         assert!(console(Modifiers::ALT).is_empty());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_quit_shortcut_leaves_graph_replace_on_control_q() {
+        assert!(pressed(vec![key(Key::Q, Modifiers::COMMAND)], true).is_empty());
+        let replace = Command::Graph(GraphCommand::ReplaceSearch);
+        assert_eq!(pressed(vec![key(Key::Q, Modifiers::CTRL)], true), vec![replace]);
+    }
+
     #[test]
     fn modals_keep_the_keys() {
         let context = egui::Context::default();
@@ -1563,12 +1615,18 @@ mod tests {
     fn the_least_window_grows_with_the_scale_up_to_the_screen() {
         // As tall as the property area needs, more than the two rows.
         let at_one = min_window_size(1.0, None);
-        assert_eq!(at_one, Vec2::new(568.0, 332.0));
+        let expected_height = if cfg!(target_os = "macos") { 336.0 } else { 332.0 };
+        assert_eq!(at_one, Vec2::new(568.0, expected_height));
         // 120%, the scale Nerthus starts at: the 517 by 403 of the issue
         // is too narrow.
         let at_default = min_window_size(1.2, None);
-        assert!((at_default.x - 681.6).abs() < 0.01 && (at_default.y - 398.4).abs() < 0.01);
-        assert_eq!(min_window_size(1.75, None), at_one * 1.75);
+        let expected_default_height = if cfg!(target_os = "macos") { 395.2 } else { 398.4 };
+        assert!((at_default.x - 681.6).abs() < 0.01 && (at_default.y - expected_default_height).abs() < 0.01);
+        let mut expected_scaled = at_one * 1.75;
+        if cfg!(target_os = "macos") {
+            expected_scaled.y = 558.0;
+        }
+        assert_eq!(min_window_size(1.75, None), expected_scaled);
         // A screen too small for it keeps the window to its own size.
         let small_screen = Vec2::new(1366.0, 768.0);
         assert_eq!(min_window_size(3.0, Some(small_screen)), small_screen);
@@ -1606,7 +1664,8 @@ mod tests {
         run(&mut world);
         let shown = window_of(&world);
         assert_eq!(shown.resize_constraints.min_width, min_window_size(1.75, None).x);
-        assert_eq!((shown.physical_width(), shown.physical_height()), (994, 581));
+        let expected_height = if cfg!(target_os = "macos") { 558 } else { 581 };
+        assert_eq!((shown.physical_width(), shown.physical_height()), (994, expected_height));
 
         // Then no larger than the screen it is on.
         world.resource_mut::<Editor>().user.options.set_ui_scale(3.0);

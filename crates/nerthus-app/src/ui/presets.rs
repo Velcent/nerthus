@@ -8,11 +8,20 @@ use crate::editor::Editor;
 use crate::presets;
 use crate::theme;
 use crate::ui::commands::Command;
-use crate::ui::widgets::{dialog, dialog_button, menu_item, menu_item_enabled, menu_separator, Tooltips};
+use crate::ui::widgets::{dialog, dialog_button};
+#[cfg(not(target_os = "macos"))]
+use crate::ui::widgets::{menu_item, menu_item_enabled, menu_separator, Tooltips};
 
 /// `LoadNodePresets`: Create Preset, then the presets for the selected
 /// node's type (each with its description as the tooltip) or "No presets
 /// found...".
+#[cfg(target_os = "macos")]
+pub fn presets_menu(ui: &mut egui::Ui, editor: &Editor, commands: &mut Vec<Command>) {
+    let entries = crate::ui::main_menu::preset_entries(editor);
+    crate::ui::main_menu::show_entries(ui, &entries, commands);
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn presets_menu(ui: &mut egui::Ui, editor: &Editor, commands: &mut Vec<Command>) {
     let node = editor.active_node().and_then(|id| editor.document.node(id));
     let spec = node.and_then(|node| nerthus_engine::Catalogue::get().node(&node.type_name));

@@ -199,6 +199,8 @@ pub enum Command {
     File(crate::files::FileCommand),
     /// A preset applied to the selected node (Presets menus).
     ApplyPreset(String),
+    #[cfg(target_os = "macos")]
+    CreatePreset(i32),
     /// The 2D viewport: docked (F6), floating for the selected node
     /// (Ctrl F6), Ctrl M's floating view (`Show2DView`: of the selected
     /// node, else the Map Viewer shown or hidden), its port (`RenderPort`,
@@ -849,6 +851,8 @@ fn run_one(command: Command, editor: &mut Editor, ui_state: &mut UiState, window
             crate::ui::graph_commands::select_node(editor, ui_state, id, Some(zoom));
         }
         Command::ApplyPreset(name) => editor.apply_preset(&name),
+        #[cfg(target_os = "macos")]
+        Command::CreatePreset(node) => ui_state.preset_to_create = Some(node),
         Command::Toggle2DViewport => ui_state.viewport_2d.toggle_docked(),
         Command::ShowLocked2DViewport => {
             if let Some(node) = editor.active_node() {

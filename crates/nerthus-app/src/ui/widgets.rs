@@ -124,9 +124,11 @@ pub fn icon_menu(ui: &mut Ui, icon: &str, tooltip: &str, tint: Option<Color32>, 
 
 pub fn icon_menu_sized(ui: &mut Ui, icon: &str, tooltip: &str, tint: Option<Color32>, size: Vec2, contents: impl FnOnce(&mut Ui)) -> Response {
     let response = icon_menu_button(ui, icon, tint, size, contents);
-    // `_iconMenuArrow`: 8 square, margin 1, bottom right.
-    let arrow_origin = response.rect.right_bottom() - Vec2::splat(1.0 + 8.0);
-    let arrow = Rect::from_min_size(arrow_origin, Vec2::splat(8.0));
+    // `_iconMenuArrow`: 8 square, margin 1, bottom right. Compact macOS
+    // title bar slots shrink the arrow to fit at high interface zoom.
+    let arrow_size = if cfg!(target_os = "macos") { 8.0_f32.min(size.min_elem() / 2.0) } else { 8.0 };
+    let arrow_origin = response.rect.right_bottom() - Vec2::splat(1.0 + arrow_size);
+    let arrow = Rect::from_min_size(arrow_origin, Vec2::splat(arrow_size));
     icons::paint(ui, arrow, "chevron-down-right", theme::ICON_DEFAULT);
     response.tooltip(tooltip)
 }
@@ -140,9 +142,12 @@ pub fn icon_dropdown(ui: &mut Ui, icon: &str, tooltip: &str, tint: Option<Color3
 
 fn icon_menu_button(ui: &mut Ui, icon: &str, tint: Option<Color32>, size: Vec2, contents: impl FnOnce(&mut Ui)) -> Response {
     let color = tint.unwrap_or(theme::ICON_DEFAULT);
-    let image = icons::image(icon, icons::DEFAULT_SIZE, color);
+    let icon_size = if cfg!(target_os = "macos") { icons::DEFAULT_SIZE.min(size.min_elem()) } else { icons::DEFAULT_SIZE };
+    let image = icons::image(icon, icon_size, color);
     let mut button = match image {
         Some(image) => Button::image(image),
+        #[cfg(target_os = "macos")]
+        None if icon.is_empty() => Button::new(egui::Atoms::default()),
         None => Button::new(icon.to_string()),
     };
     button = button.frame_when_inactive(false);
@@ -152,7 +157,11 @@ fn icon_menu_button(ui: &mut Ui, icon: &str, tint: Option<Color32>, size: Vec2, 
     let scope = ui.scope(|ui| {
         // Gaea fixes both the minimum and maximum to Toolbar.ButtonSize.
         // The global 8px padding would make compact 28px slots 32px wide.
-        let icon_size = Vec2::splat(icons::DEFAULT_SIZE);
+        let icon_size = Vec2::splat(icon_size);
+        #[cfg(target_os = "macos")]
+        {
+            ui.spacing_mut().interact_size = ui.spacing().interact_size.min(size);
+        }
         ui.spacing_mut().button_padding = ((size - icon_size) / 2.0).max(Vec2::ZERO);
         let widgets = &mut ui.visuals_mut().widgets;
         widgets.hovered.weak_bg_fill = theme::MENU_BACKGROUND_HOVER;
@@ -215,7 +224,7 @@ pub fn menu_width<R>(ui: &mut Ui, width: f32, contents: impl FnOnce(&mut Ui) -> 
 /// opens under the bar, rather than egui moving it up over the bar (and
 /// its own title there) with its last rows cut off at the window's bottom.
 pub fn menu_rows<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
-    let room = ui.ctx().content_rect().height() - title_bar::HEIGHT;
+    let room = ui.ctx().content_rect().height() - title_bar::height(ui.ctx());
     menu_rows_within(ui, room, contents)
 }
 
@@ -224,7 +233,7 @@ pub fn menu_rows<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
 pub fn menu_rows_below<R>(ui: &mut Ui, anchor: Rect, contents: impl FnOnce(&mut Ui) -> R) -> R {
     let window = ui.ctx().content_rect();
     let below = window.bottom() - anchor.bottom();
-    let above = anchor.top() - (window.top() + title_bar::HEIGHT);
+    let above = anchor.top() - (window.top() + title_bar::height(ui.ctx()));
     let room = below.max(above) - 1.0;
     menu_rows_within(ui, room, contents)
 }
@@ -488,7 +497,7 @@ fn submenu_room(ui: &Ui, row: &Response) -> f32 {
 fn room_beside(ui: &Ui, anchor: Rect) -> f32 {
     let window = ui.ctx().content_rect();
     let below = window.bottom() - anchor.top();
-    let above = anchor.bottom() - (window.top() + title_bar::HEIGHT);
+    let above = anchor.bottom() - (window.top() + title_bar::height(ui.ctx()));
     below.max(above) - 1.0
 }
 
@@ -1143,7 +1152,11 @@ mod tests {
         assert!(shown.menu.is_some(), "a scroll bar click closed the menu");
         assert!(!shown.clicked);
 
-        let row = shown.rows.iter().find(|row| shown.menu.unwrap().contains(row.center())).expect("a row is visible").center();
+        // A partially clipped row can have its center in the popup's
+        // frame padding. Choose a row fully inside the menu for the click.
+        let menu = shown.menu.unwrap();
+        let visible_row = shown.rows.iter().find(|row| menu.contains_rect(**row)).expect("a full row is visible");
+        let row = visible_row.center();
         icon_menu_frame(&context, vec![egui::Event::PointerMoved(row), click(row, true)]);
         let clicked = icon_menu_frame(&context, vec![click(row, false)]);
         assert!(clicked.clicked, "a visible command activates");

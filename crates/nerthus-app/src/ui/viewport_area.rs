@@ -18,6 +18,8 @@ use crate::ui::editors::{self, SliderSpec};
 use crate::ui::property_area::group_panel;
 use crate::ui::viewport_2d::Viewport2DState;
 use crate::ui::widgets::{check_item, checked_icon_item, icon_button, icon_menu, icon_toggle, menu_caption, menu_item, menu_separator, toolbar_background, toolbar_button, toolbar_separator, vertical_toolbar};
+#[cfg(target_os = "macos")]
+use crate::ui::widgets::icon_menu_sized;
 use crate::viewport_render::{MaskGradient, MASK_GRADIENTS};
 
 /// The frame (`Border`: 2 of #212121 on #050505, corners 6) and, inside
@@ -164,6 +166,13 @@ pub fn show(ui: &mut Ui, rect: Rect, editor: &Editor, settings: &mut ViewportSet
 
 /// `TglEmbed_OnClick`, `TglFloat_OnClick`, also reachable from the main
 /// window's Preview menu when the floating window's toolbar is hidden.
+#[cfg(target_os = "macos")]
+pub fn viewport_layout_items(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
+    let entries = crate::ui::main_menu::viewport_entries(editor);
+    crate::ui::main_menu::show_entries(ui, &entries, commands);
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn viewport_layout_items(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     let floating = editor.user.options.viewport_floating();
     if check_item(ui, !floating, "Embedded", "").clicked() && floating {
@@ -188,6 +197,23 @@ pub fn resolution_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>
     });
     let label = resolution_label(editor.preview_resolution);
     let galley = ui.painter().layout_no_wrap(label.to_string(), theme::monospace_bold(10.0), theme::ACCENT_GREEN);
+    ui.painter().galley(response.rect.center() - galley.size() / 2.0, galley, theme::ACCENT_GREEN);
+}
+
+#[cfg(target_os = "macos")]
+pub fn resolution_menu_sized(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>, size: Vec2) {
+    let response = icon_menu_sized(ui, "", "Resolution", None, size, |ui| {
+        menu_caption(ui, "Preview Resolution");
+        for size in PREVIEW_RESOLUTIONS {
+            let checked = editor.preview_resolution == size;
+            if check_item(ui, checked, &format!("{size} x {size}"), "").clicked() {
+                commands.push(Command::SetPreviewResolution(size));
+            }
+        }
+    });
+    let label = resolution_label(editor.preview_resolution);
+    let font_size = 10.0_f32.min(size.y * 0.7);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), theme::monospace_bold(font_size), theme::ACCENT_GREEN);
     ui.painter().galley(response.rect.center() - galley.size() / 2.0, galley, theme::ACCENT_GREEN);
 }
 
@@ -268,6 +294,13 @@ fn screenshot_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
 
 /// The screenshot options both screenshot menus share: the other
 /// screenshots, the folder, and the 3D view's screenshot resolution.
+#[cfg(target_os = "macos")]
+pub fn screenshot_options(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
+    let entries = crate::ui::main_menu::screenshot_entries(editor);
+    crate::ui::main_menu::show_entries(ui, &entries, commands);
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn screenshot_options(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>) {
     if menu_item(ui, None, None, "Save Graph Screenshot as...", "").clicked() {
         commands.push(Command::SaveGraphScreenshotAs);

@@ -321,7 +321,7 @@ fn bake_menu(ui: &mut Ui, editor: &Editor, commands: &mut Vec<Command>, reload_i
 /// `EstimateBakeSizeForMenu`: "Bake Selected (<nodes in
 /// the chain> nodes, <megabytes>)", each output four bytes a value and
 /// three channels for colour, counted in whole megabytes.
-fn bake_estimate(editor: &Editor, node: i32, resolution: usize) -> String {
+pub(super) fn bake_estimate(editor: &Editor, node: i32, resolution: usize) -> String {
     let terrain = editor.document.terrain();
     let chain = nerthus_engine::Engine::build_order(terrain, node);
     let area = (resolution * resolution) as u64;

@@ -1,3 +1,5 @@
+On macOS, use `Command` for the `Ctrl` shortcuts below. `Command + Q` quits Nerthus, `Command + ,` opens Settings, and `Control + Q` opens Replace Nodes. Menus use the macOS menu bar; `F10` activates the in-window menu bar on other platforms.
+
 ## File Commands
 
 #### General Commands

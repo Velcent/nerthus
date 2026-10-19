@@ -54,7 +54,7 @@ web-sys = { workspace = true, features = ["Blob", "BlobPropertyBag", "Document",
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
-objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSEvent", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSButton", "NSCell", "NSControl", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { workspace = true, features = ["std", "NSData"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

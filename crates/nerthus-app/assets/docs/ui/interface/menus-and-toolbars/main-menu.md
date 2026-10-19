@@ -1,6 +1,8 @@
 # Main Menu
 
-Hold `Alt` and press a menu's underlined letter to open it: `F` for File, `E` for Edit, `G` for Graph, `N` for Node, `R` for Preview, `P` for Project, `T` for Tools, or `H` for Help. `F10` activates the menu bar; then use a menu's letter or the arrow keys and `Enter`. `Escape` closes a menu and returns to the bar.
+On macOS, these menus appear in the system menu bar. The **Nerthus** menu contains **About Nerthus**, **Settings**, and **Quit Nerthus**. Use the native traffic lights at the left of the window to close, minimize, or enter full screen.
+
+On other platforms, hold `Alt` and press a menu's underlined letter to open it: `F` for File, `E` for Edit, `G` for Graph, `N` for Node, `R` for Preview, `P` for Project, `T` for Tools, or `H` for Help. `F10` activates the menu bar; then use a menu's letter or the arrow keys and `Enter`. `Escape` closes a menu and returns to the bar.
 
 ## File Menu
 

@@ -61,7 +61,7 @@ fn main() {
         None => WindowPosition::Automatic,
     };
     // The editor draws its own title bar (`WindowChrome`); on macOS the
-    // native frame stays for resizing and shadows, without title or buttons.
+    // native frame supplies its traffic lights, resizing and shadows.
     let window = Window {
         title: "Nerthus".to_string(),
         resolution: size.into(),
@@ -69,7 +69,7 @@ fn main() {
         decorations: cfg!(target_os = "macos"),
         titlebar_transparent: true,
         titlebar_show_title: false,
-        titlebar_show_buttons: false,
+        titlebar_show_buttons: cfg!(target_os = "macos"),
         fullsize_content_view: true,
         // The web build draws into the page's canvas (web/index.html),
         // filling the browser window.

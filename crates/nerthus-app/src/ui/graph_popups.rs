@@ -88,7 +88,7 @@ fn menu_popup(ui: &Ui, editor: &Editor, state: &GraphState, popup: &GraphPopup, 
     let layer = LayerId::new(Order::Foreground, id);
     let window = ui.ctx().content_rect();
     let mut at = popup.anchor();
-    at.y = at.y.clamp(window.top() + crate::ui::title_bar::HEIGHT, window.bottom());
+    at.y = at.y.clamp(window.top() + crate::ui::title_bar::height(ui.ctx()), window.bottom());
     let anchor_rect = Rect::from_min_size(at, Vec2::ZERO);
     let anchor = PopupAnchor::Position(at);
     // A new area takes the room it is given; menus start at their least

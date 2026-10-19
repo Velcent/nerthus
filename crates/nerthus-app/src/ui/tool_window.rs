@@ -37,7 +37,7 @@ impl Squeezed {
 /// The shell's body: the screen less the title bar and the status bar.
 pub fn body(ctx: &Context) -> Rect {
     let full = ctx.content_rect();
-    let top = full.top() + title_bar::HEIGHT;
+    let top = full.top() + title_bar::height(ctx);
     let bottom = (full.bottom() - status_bar::HEIGHT).max(top);
     Rect::from_min_max(Pos2::new(full.left(), top), Pos2::new(full.right(), bottom))
 }
