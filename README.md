@@ -254,9 +254,23 @@ These parts of Gaea 2.3.1.0 are missing from Nerthus or work differently in it.
   default path in BUILDS folder."); Nerthus refuses the build.
 - `--output` with a destination template (`[Filename]`, `[+++]`) also
   creates a folder with the template's literal name before building.
+- `--resolution` takes 512, 1024, 2048, 4096, 8192 or 16384 in Gaea and
+  ignores any other number, so the project's own resolution is built;
+  Nerthus builds at whatever number it is given.
+- Starting a build in the editor (Project › Build and Export, its shortcut,
+  or the Build button in Build Settings) deletes loose nodes in Gaea. Once
+  "Build and Export?" is accepted and the project is saved, every node that
+  has no connection at all, is not an Export node and is not marked for
+  export is removed from the open project; the file just saved still holds
+  it. Nerthus keeps them.
 - Numbers in a `--vars` JSON file are read the way Gaea prints them (`5.0` is
   `5`, `1e5` is `100000`); Nerthus keeps `5.0`, so an Int or Choice variable
   set that way is ignored.
+- Most simulations show no progress while they build. Gaea fills the footer
+  progress bar and status text for Erosion, Wizard, Snow, Shrubs, Anastomosis,
+  FlowMapClassic, Craggy, Uplift, Sandstone, MountainSide, Distress, Recurve,
+  Stratify and Debris ("Rendering pass 1 / 3" and similar); Nerthus does for
+  ErosionPro, EasyErosion, Wizard2, Sediments and Snowfield only.
 - The Stones output of Stones and Scree is worked out from the stone surface
   before it is clamped to 0–1; Gaea clamps first, so the mask differs wherever
   stones push the terrain past 0 or 1.
@@ -281,6 +295,13 @@ These parts of Gaea 2.3.1.0 are missing from Nerthus or work differently in it.
   group or separator rows and no ordering by the variable's order. A Macro
   node also never updates its ports and variables when the installed macro
   changes.
+- Restrict to Group on Accumulator and WaterColor does nothing in Nerthus.
+  Gaea's editor tells each node which group it sits in and the accumulation
+  then counts only that group's nodes; Nerthus never passes the group to a
+  build. Gaea's command-line builds don't either.
+- Switch's Discard Alt in Final Build is ignored. In Gaea's command-line
+  builds it disconnects the Alternate input, and the Switch then fails with
+  "Required port [In] not connected."; Nerthus builds it as usual.
 - Bomber hides Height, Variable Height and Proportional once it has built a
   colour map; Nerthus keeps showing them.
 - Combine's Swap Inputs (with more than two inputs) and File's Purge Cache
@@ -294,6 +315,15 @@ These parts of Gaea 2.3.1.0 are missing from Nerthus or work differently in it.
   sort their extra input and output rows by name in Gaea (`Layer1…Layer3`
   above `Mask1…Mask3`; `Input2` before `Input10`); Nerthus keeps the order the
   ports were added in.
+- Option bars show a description as it is written, so PointCloud's Format
+  bar reads `PLY (.ply)`, `PLY Binary (.ply)`, `XYZ (.xyz)` and `Unreal CSV
+  (.csv)`; Nerthus title-cases them (`PLY (.Ply)`). Hovering a cell of the
+  Export Format or Halftone Pattern grid shows the description (`Pure Raw
+  (.graw)`, `Floyd Steinberg`) in Gaea and the raw member name (`GaeaRaw`,
+  `FloydSteinberg`) in Nerthus.
+- The first group of MathX, FlowMap and FlowMapClassic is headed with the class
+  name in Gaea (MathX, FlowMap, FlowMapClassic); Nerthus heads it with the
+  node's name (Math, Flow, FlowClassic).
 - The per-property menu follows rules in Gaea: Expression… only for float
   properties, Bind to not for gradient lists, and neither for rows that can't
   be bound. Every row has the menu, Reset included. Nerthus offers
@@ -315,6 +345,91 @@ These parts of Gaea 2.3.1.0 are missing from Nerthus or work differently in it.
   Show only these locations, and refuses to keep a path that doesn't exist.
 - A new, empty note shows "This is a Note, can be used to describe details"
   in Gaea; in Nerthus it is blank.
+- Options › Build › Remove Primary port name in Build output does nothing in
+  Nerthus. In Gaea it decides whether the same box in a new project's Build
+  Settings starts ticked; Nerthus's new projects start unticked.
+- Gaea greys out Node Commands and Node menu items the selection can't use:
+  Select upstream/downstream and Convert port to portals unless exactly one
+  node is selected, Combine nodes below two, Group / Ungroup and Move to Tab
+  with nothing selected, Zoom › Selection and Presets without a selection,
+  Lock Preview and Locked 2D Viewport with several selected, and a locked
+  group's colour and icon. Nerthus leaves them enabled (Group / Ungroup with
+  nothing selected makes an empty group).
+- Select All (Ctrl+A) selects every node, group, note and connection of every
+  graph tab in Gaea, and deleting a selection that spans tabs asks "Selected
+  elements contains elements from other graphs. Do you want to continue
+  deleting selected items?"; Nerthus selects the current tab's nodes only.
+- Dropping a connection on the middle of a node shows that node's ports menu
+  in Gaea: its ports on the side the connection reaches (the primary port
+  included), Add as Mask on a node that can take a mask and Add new port on
+  one that can grow; the outer fifths of the node just drop the connection.
+  Nerthus shows that menu only when the connection lands on a compact node's
+  collapsed port, and without the primary port. A drop anywhere else on a
+  node opens the node search, so an ordinary node can't be given a mask or an
+  extra port by dropping on it, which Gaea's own docs describe.
+- Right-clicking empty graph clears the selection and opens the node search
+  in Gaea, and only the middle button pans. Nerthus opens a menu of node
+  categories, Add Note and Zoom to Extents instead, and also pans on a
+  right-button drag.
+- Connecting two nodes selects the node the wire ends at in Gaea, so the
+  property panel and the preview switch to it; Nerthus leaves the selection
+  where it was.
+- Pressing on a connected input and dragging starts a new connection from that
+  input in Gaea, and the existing wire stays until a new one replaces it.
+  Nerthus unplugs the wire at once and carries its source end, so a slip
+  removes a connection and letting go on empty graph offers nodes that feed
+  from the old source.
+- A plain click on one of several selected nodes, groups or notes keeps the
+  whole selection in Gaea, so Delete, Bypass and Group still act on all of
+  them; Nerthus reduces the selection to the clicked element.
+- Bypass (B, the Node menu) does nothing to a baked node in Gaea; in Nerthus
+  it replaces the bake with a bypass.
+- Gaea selects several notes at once (box select, Ctrl or Shift click), and
+  moving, deleting, grouping and Move to Tab act on all of them; Nerthus
+  selects one note at a time.
+- Dragging a group or a note moves the whole selection in Gaea, and Snap to
+  Grid and Snap to Items apply to it. In Nerthus a group (with its own nodes
+  and notes) or a note moves alone and never snaps.
+- Zoom differs. Reset Zoom (Ctrl+1) sets 100% and moves the view to the top
+  left of the nodes in Gaea; Nerthus zooms to 100% about the middle of the
+  view. Gaea draws nodes in their simplified form below 50% zoom (Nerthus
+  below 40%), multiplies the zoom by 1.26 per wheel notch (Nerthus's step is
+  smaller), and has no upper limit, where Nerthus stops at 200% and opens a
+  tab that Gaea saved at a larger zoom at 200%.
+- A port's dot is drawn at full strength once something is connected to it and
+  dimmed when nothing is. Gaea does this for outputs too; Nerthus dims every
+  output, wired or not, so the snap outline (red on a connected port, blue on
+  a free one) is always blue on an output. The "all ports" dot of a compact or
+  small node doesn't light up in Nerthus when a hidden port is wired, as it
+  does in Gaea.
+- The node used as the underlay carries a small magenta icon in its icon stack
+  in Gaea; Nerthus marks it nowhere on the graph.
+- Holding Shift while choosing Bake › Cache to Disk › Delete Cache writes
+  every node's maps out to the disk cache and frees them in Gaea, instead of
+  deleting the cache; Nerthus has no such gesture. Without Shift, Gaea's
+  Delete Cache also marks the project modified; Nerthus's doesn't.
+- Saving warns about unbound variables in Gaea: every save (Ctrl+S, Save As,
+  Save Incremental, Export Macro, Build and Export, baking) first shows
+  "Orphan Variables Detected" with the variables that have no binding, unless
+  the Options box is off. Nerthus shows it only after a mass delete.
+- Clicking GAEA in the title bar opens About in Gaea; Nerthus's brand is
+  plain text.
+- Gaea shows these outcomes as a coloured alert bar over the graph that
+  dismisses itself: Repair File's result, Delete Cache's, Clear Cache's and
+  Clean Memory's, and Bake Selected's "Please wait…", "Success!" and "Error!"
+  (and a baked cache that fails to load). Nerthus puts them in the status bar
+  only, where the next message replaces them.
+- The status bar reads Idle, Working or Suspended in Gaea; Nerthus reads Idle,
+  Building, Engine suspended or Cancelling.
+- Small differences: an unsaved project is `Untitled` in Gaea and
+  `Untitled.terrain` in Nerthus; the recent-file icons number each entry by
+  its place in the list, so a deleted file leaves a gap; the file box flashes
+  green after a save and when the engine resumes; Export Macro on an unsaved
+  project asks where to save first, and baking one saves it and carries on;
+  the floating viewport window stays on top of the editor while the editor is
+  active; a note added from the Graph menu lands near the top left of the
+  view and moves right of whatever is already there, where Nerthus puts it in
+  the middle of the view.
 - Mutate (the Node menu and Mutate all nodes) is refused while a build is
   running ("Did not mutate. An existing build is in progress."); Nerthus
   re-seeds the nodes and restarts the build.
@@ -343,6 +458,14 @@ These parts of Gaea 2.3.1.0 are missing from Nerthus or work differently in it.
   "Frame captured: <file>" in the status bar for each frame and a busy cursor
   until the recording ends, and its frames include the compass unless Hide
   Grid and Compass is ticked; Nerthus's never include the compass.
+- Reset Sky also sets Mask Gradient to Red in Nerthus. Gaea resets the sun,
+  air, haze, ozone, fog, ambient, ground, shadow, skybox and exposure
+  settings only, so a mask preview keeps the gradient chosen in Options or in
+  the panel.
+- With Show Skybox on, Gaea takes the fog colour from a 256-step gradient
+  picture of its own, indexed by the sun's elevation (orange at the horizon,
+  blue high up). Nerthus works the colour out from its own sky, so the haze
+  over the terrain is paler.
 
 ## Intentional differences
 
