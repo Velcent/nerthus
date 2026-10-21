@@ -208,6 +208,141 @@ Its tools:
   `repair_project_file`, `patch_project_file`, which change a `.terrain`
   file without opening it in the editor.
 
+## Missing Features
+
+These parts of Gaea 2.3.1.0 are missing from Nerthus or work differently in it.
+
+### Variables
+
+- Colour variables don't change the properties bound to them. Gaea applies a
+  Color variable to the Color properties it is bound to (Constant,
+  ColorThreshold, Tint, WaterColor and LightX's sun and ambient colours).
+  Nerthus keeps the colour as a plain `R`, `G`, `B` object that its builds
+  don't read, so a bound property keeps its own colour.
+- Range variables made in Nerthus (by binding a range, or in the Vars panel)
+  are saved with a type name Gaea doesn't have, so Gaea refuses to open a
+  project that holds one.
+- Variable values given as text use different formats for Range and Color
+  variables. Gaea writes and reads a Range as `0.200 x 0.700` and a Color as
+  `#RRGGBB` or `0.7000 0.2000 0.1000`; Nerthus uses `0.2, 0.7` and
+  `0.7,0.2,0.1`. Build command lines, `-v`, `--va` and `--vars` values, and
+  batch files written for Gaea therefore don't set those variables here (the
+  comma in a Range also splits the `--va` list). Gaea also logs a variable
+  it could not apply ("Variable [X] could not be applied to N's [P] property
+  as the data [V] was not valid."); Nerthus skips it without a word.
+
+### Math node
+
+- Expressions can't use ExprTk's local vectors (`var v[3] := {1, 2, 3}`,
+  `sum(v)`, `v[]`, arithmetic on vectors), strings, `return` or `assert`. Gaea
+  builds them; Nerthus fails the node with an error.
+- A bracket followed by another bracket (`(x)(y)`, `(a)[b]`) is not
+  multiplied: Nerthus drops the first factor without an error.
+- An unconnected `a`, `b` or `c` keeps what the expression last assigned to
+  it for the whole image in Gaea (a running total in scan order); Nerthus
+  starts every row again.
+- `swap(x, y)` and `x <=> y` give the first variable's old value in Gaea and
+  the second's in Nerthus when used as a value.
+- Gaea fails an expression nested more than 400 deep and names ExprTk's
+  lexer errors (`Invalid numeric token: 1.2`); Nerthus has no depth limit and
+  one generic message.
+
+### Builds and the command line
+
+- A build folder that can't be created falls back to the default Builds
+  folder in Gaea ("The build path could not be created. … Reverting to
+  default path in BUILDS folder."); Nerthus refuses the build.
+- `--output` with a destination template (`[Filename]`, `[+++]`) also
+  creates a folder with the template's literal name before building.
+- Numbers in a `--vars` JSON file are read the way Gaea prints them (`5.0` is
+  `5`, `1e5` is `100000`); Nerthus keeps `5.0`, so an Int or Choice variable
+  set that way is ignored.
+- The Stones output of Stones and Scree is worked out from the stone surface
+  before it is clamped to 0–1; Gaea clamps first, so the mask differs wherever
+  stones push the terrain past 0 or 1.
+
+### Nodes and properties
+
+- New nodes don't get the port labels Gaea gives them: MathX's inputs read
+  a, b and c, RGBMerge's R, G and B, TextureBaker's and MeshWarp's first input
+  Mesher, Construction's In Base, Gabor's Modulation Direction and RGBSplit's
+  Out Gray. Nerthus shows such a label only when a loaded file has it.
+- The menus for dropping a connection on a node and for Insert chokepoint list
+  ports by their raw names (`AreaMask`); Gaea writes `Area Mask`, and orders
+  them as the node does.
+- Reset (Reset Node, Ctrl+R, Reset to Defaults) also removes a node's
+  modifiers in Gaea and leaves bypassed and baked nodes alone; Nerthus resets
+  the parameters only. Reset Node on a Macro node puts its variables back to
+  their defaults in Gaea; Nerthus replaces them with a placeholder variable.
+- A TextureBaker or MeshWarp that is fed by a built Mesher marks itself for
+  export when its panel shows, so its files are written in the default
+  heightfield format; Nerthus needs Mark for Export.
+- A Macro node's variables in the property panel have no colour editor, no
+  group or separator rows and no ordering by the variable's order. A Macro
+  node also never updates its ports and variables when the installed macro
+  changes.
+- Bomber hides Height, Variable Height and Proportional once it has built a
+  colour map; Nerthus keeps showing them.
+- Combine's Swap Inputs (with more than two inputs) and File's Purge Cache
+  (with Never Cache on) stay visible in Gaea; Nerthus hides them.
+- A new EasyErosion node starts with Seed 0 in Gaea and a new FractalTerraces
+  node has two different seeds; Nerthus draws one random seed for both.
+- SatelliteMap's Randomize picks a palette from the node's own library. Nerthus
+  draws a number below the size of the Rock library (594) and clamps it to
+  the library, so Blue and Color mostly land on their last palette.
+- Nodes that can grow ports (Layers, Combine, Bomber, Construction, Mixer)
+  sort their extra input and output rows by name in Gaea (`Layer1…Layer3`
+  above `Mask1…Mask3`; `Input2` before `Input10`); Nerthus keeps the order the
+  ports were added in.
+- The per-property menu follows rules in Gaea: Expression… only for float
+  properties, Bind to not for gradient lists, and neither for rows that can't
+  be bound. Every row has the menu, Reset included. Nerthus offers
+  Expression… on every property, and the curve, palette-list and gradient
+  rows have no menu.
+
+### Graph, menus and dialogs
+
+- The Render Intent override menu in Gaea greys out Heightfield and Mask for
+  colour nodes (SatelliteMap, CLUTer, HSL and the like), and choosing any
+  intent for the node pinned as the underlay un-pins it. Nerthus offers every
+  choice on every node and keeps the pin.
+- Dragging a connection into empty space lists the node types that most often
+  followed that port, strongest first. Nerthus re-sorts that list by how often
+  each node type has been added at all.
+- Options › Experimental › Custom Locations does nothing. Gaea adds those
+  folders (and the Projects folder) to the Open, Save, Import Image, Install
+  Macro and Export Macro dialogs, starts them in the Projects folder with
+  Show only these locations, and refuses to keep a path that doesn't exist.
+- A new, empty note shows "This is a Note, can be used to describe details"
+  in Gaea; in Nerthus it is blank.
+- Mutate (the Node menu and Mutate all nodes) is refused while a build is
+  running ("Did not mutate. An existing build is in progress."); Nerthus
+  re-seeds the nodes and restarts the build.
+- Deleting the only graph tab shows "You must have at least one graph tab in
+  your project. You cannot delete this tab until you create another one."
+  in Gaea; Nerthus greys the item out.
+- Build Settings › Copy Command Line opens the Build Command Line window in
+  Gaea (the command, Copy to Clipboard, Close) instead of copying at once.
+  The Terrain tab's readout reads `Real scale 2.441m/px` and `Height-Scale
+  Ratio: 00.50` in a monospaced font; Nerthus words and formats it
+  differently.
+- The Undo menu words several edits differently: "New Note added", "{name}
+  moved", "Group renamed: {old} renamed to {new}.", "Graph tab ({name})
+  renamed", "Graph color changed.", "Property {name} bound to new variable",
+  "Variable for property {name} unbound" and, for a node added from the
+  toolbox or search, "Node added: {name}".
+
+### Viewport
+
+- Options › Viewport doesn't preview the background colour. Gaea changes the
+  3D view's background while the colour is being picked and puts it back when
+  Options is cancelled; Nerthus changes it when Options is accepted. Gaea
+  also keeps the colour as linear values where Nerthus keeps sRGB, so one
+  options file shows different backgrounds in the two.
+- Recording a turntable gives less feedback and different frames. Gaea shows
+  "Frame captured: <file>" in the status bar for each frame and a busy cursor
+  until the recording ends, and its frames include the compass unless Hide
+  Grid and Compass is ticked; Nerthus's never include the compass.
 
 ## Intentional differences
 
